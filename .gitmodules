@@ -1,0 +1,3 @@
+[submodule "dependencies/slice_tools"]
+	path = dependencies/slice_tools
+	url = https://github.com/LucasSantos91/slice_tools.git
