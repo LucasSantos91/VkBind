@@ -83,7 +83,33 @@ const TypeDescription = struct {
     name: []const u8,
 
     pub fn format(self: @This(), writer: *Io.Writer) Io.Writer.Error!void {
-        try writer.print("{f}{f} {s}", .{ self.ptr[0], self.ptr[1], self.name });
+        const Kind = enum {
+            anyopaque,
+            funcptr,
+            vk,
+            primitive,
+        };
+        const kind: Kind = if (self.ptr[0] != .no and std.mem.eql(u8, self.name, "void"))
+            .anyopaque
+        else if (std.mem.startsWith(u8, self.name, "PFN_vk"))
+            .funcptr
+        else if (std.mem.startsWith(u8, self.name, "Vk"))
+            .vk
+        else
+            .primitive;
+        try writer.print("{f}{f} {s}{s}", .{
+            self.ptr[0], self.ptr[1],
+            if (kind == .funcptr)
+                "Pfn"
+            else
+                "",
+            switch (kind) {
+                .anyopaque => "anyopaque",
+                .funcptr => self.name["PFN_vk".len..],
+                .vk => self.name[2..],
+                .primitive => self.name,
+            },
+        });
     }
 };
 fn parseType(text: *[]const u8) ?TypeDescription {
@@ -146,7 +172,7 @@ pub fn main(init: std.process.Init) !void {
             // It's an alias
             const name = findProperty(tag, "name") orelse @panic("Unnamed alias");
             const alias = findProperty(tag, "alias") orelse @panic("Failed to find alias");
-            try writer.print("pub const {s} = {s};", .{ name, alias });
+            try writer.print("pub const {s} = {s};", .{ name[2..], alias[2..] });
         } else {
             var new = flags.addOne(allocator) catch panicOOM();
             new.bits_enum = findProperty(tag, "requires") orelse findProperty(tag, "bitvalues");
@@ -155,7 +181,7 @@ pub fn main(init: std.process.Init) !void {
                 .@"64"
             else
                 .@"32";
-            if (!findPastAndAdvance(&flags_text, "<name>")) @panic("Failed to find flag name");
+            if (!findPastAndAdvance(&flags_text, "<name>Vk")) @panic("Failed to find flag name");
             const name_end = std.mem.find(u8, flags_text, "<") orelse @panic("Unclosed tag");
             new.name = flags_text[0..name_end];
             flags_text = flags_text[name_end..];
@@ -166,7 +192,7 @@ pub fn main(init: std.process.Init) !void {
     while (findPastAndAdvance(&handles_text, "<type ")) {
         if (!findPastAndAdvance(&handles_text, "<type>VK_DEFINE_")) @panic("Failed to find handle type");
         const non_dispatchable = handles_text[0] == 'N';
-        if (!findPastAndAdvance(&handles_text, "<name>")) @panic("Failed to find handle name");
+        if (!findPastAndAdvance(&handles_text, "<name>Vk")) @panic("Failed to find handle name");
         const end = std.mem.find(u8, handles_text, "<") orelse @panic("Unclosed tag");
         const name = handles_text[0..end];
         handles_text = handles_text[end..];
@@ -175,12 +201,12 @@ pub fn main(init: std.process.Init) !void {
 
     var enums_text = splitSection(&text, "<type category=\"funcpointer\">");
     while (true) {
-        const alias_start = std.mem.find(u8, enums_text, "alias=\"") orelse break;
-        const t_1 = enums_text[alias_start + "alias=\"".len ..];
+        const alias_start = std.mem.find(u8, enums_text, "alias=\"Vk") orelse break;
+        const t_1 = enums_text[alias_start + "alias=\"Vk".len ..];
         const alias_end = std.mem.find(u8, t_1, "\"") orelse @panic("Unclosed string");
         const alias = t_1[0..alias_end];
-        const name_start = std.mem.findLast(u8, enums_text[0..alias_start], "name=\"") orelse @panic("Failed to find alias name");
-        const t_2 = enums_text[name_start + "name=\"".len ..];
+        const name_start = std.mem.findLast(u8, enums_text[0..alias_start], "name=\"Vk") orelse @panic("Failed to find alias name");
+        const t_2 = enums_text[name_start + "name=\"Vk".len ..];
         const name_end = std.mem.find(u8, t_2, "\"") orelse @panic("Unclosed string");
         const name = t_2[0..name_end];
         try writer.print("pub const {s} = {s};", .{ name, alias });
@@ -189,11 +215,11 @@ pub fn main(init: std.process.Init) !void {
     var funcpointers_text = splitSection(&text, "<comment>Struct types</comment>");
     while (true) {
         const return_type = parseType(&funcpointers_text) orelse @panic("Function prototype without return type");
-        if (!findPastAndAdvance(&funcpointers_text, "<name>")) @panic("Function prototype without name");
+        if (!findPastAndAdvance(&funcpointers_text, "<name>PFN_vk")) @panic("Function prototype without name");
         const name_index = std.mem.find(u8, funcpointers_text, "</name>") orelse @panic("Unclosed name tag");
         const func_name = funcpointers_text[0..name_index];
         funcpointers_text = funcpointers_text[name_index..];
-        try writer.print("pub const {s} = *const fn(", .{func_name});
+        try writer.print("pub const Pfn{s} = *const fn(", .{func_name});
         const next_index = std.mem.find(u8, funcpointers_text, "<type category=\"funcpointer\"");
         var this = if (next_index) |i| funcpointers_text[0..i] else funcpointers_text;
         while (parseType(&this)) |param_type| {
