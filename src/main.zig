@@ -70,16 +70,33 @@ const TypeDescription = struct {
         no,
         mutable,
         @"const",
+    };
+    const Size = enum {
+        single,
+        many,
+    };
+    const Ptr = struct {
+        kind: PtrKind = .no,
+        size: Size = .many,
+        optional: bool = true,
+        zero_terminated: bool = false,
 
         pub fn format(self: @This(), writer: *Io.Writer) Io.Writer.Error!void {
-            switch (self) {
-                .no => {},
-                .mutable => try writer.writeAll("*"),
-                .@"const" => try writer.writeAll("*const"),
+            if (self.kind == .no) return;
+            if (self.optional) try writer.writeAll("?");
+            switch (self.size) {
+                .single => try writer.writeAll("*"),
+                .many => {
+                    if (self.zero_terminated)
+                        try writer.writeAll("[*:0]")
+                    else
+                        try writer.writeAll("[*]");
+                },
             }
+            if (self.kind == .@"const") try writer.writeAll("const");
         }
     };
-    ptr: [2]PtrKind = .{ .no, .no },
+    ptr: [2]Ptr = .{ .{}, .{} },
     name: []const u8,
 
     pub fn format(self: @This(), writer: *Io.Writer) Io.Writer.Error!void {
@@ -89,7 +106,7 @@ const TypeDescription = struct {
             vk,
             primitive,
         };
-        const kind: Kind = if (self.ptr[0] != .no and std.mem.eql(u8, self.name, "void"))
+        const kind: Kind = if (self.ptr[0].kind != .no and std.mem.eql(u8, self.name, "void"))
             .anyopaque
         else if (std.mem.startsWith(u8, self.name, "PFN_vk"))
             .funcptr
@@ -99,6 +116,7 @@ const TypeDescription = struct {
             .primitive;
         try writer.print("{f}{f} {s}{s}", .{
             self.ptr[0], self.ptr[1],
+
             if (kind == .funcptr)
                 "Pfn"
             else
@@ -112,7 +130,7 @@ const TypeDescription = struct {
         });
     }
 };
-fn parseType(text: *[]const u8) ?TypeDescription {
+fn parseSimpleType(text: *[]const u8) ?TypeDescription {
     var result: TypeDescription = .{ .name = undefined };
     if (!findPastAndAdvance(text, "<type>")) return null;
     const type_end = std.mem.find(u8, text.*, "</type>") orelse return null;
@@ -124,17 +142,17 @@ fn parseType(text: *[]const u8) ?TypeDescription {
         const p = result.name.ptr - const_str.len - "<type>".len;
         const maybe_const = p[0..const_str.len];
         if (std.mem.eql(u8, maybe_const, const_str)) {
-            result.ptr[0] = .@"const";
+            result.ptr[0].kind = .@"const";
         } else {
-            result.ptr[0] = .mutable;
+            result.ptr[0].kind = .mutable;
         }
         const const_ptr_str = " const *";
         if (text.*[0] == '*') {
             text.* = text.*[1..];
-            result.ptr[1] = .mutable;
+            result.ptr[1].kind = .mutable;
         } else if (std.mem.eql(u8, text.*[0..const_ptr_str.len], const_ptr_str)) {
             text.* = text.*[const_ptr_str.len..];
-            result.ptr[1] = .@"const";
+            result.ptr[1].kind = .@"const";
         }
     }
     result.name = cToZig(result.name);
@@ -153,6 +171,8 @@ pub fn main(init: std.process.Init) !void {
     var stdout_writer = stdout.writer(init.io, &stdout_buffer);
     const writer = &stdout_writer.interface;
     defer writer.flush() catch @panic("Failed to write to stdout");
+
+    try writer.writeAll(@embedFile("preamble.zig"));
 
     _ = splitSection(&text, "<comment>Bitmask types</comment>");
 
@@ -214,7 +234,7 @@ pub fn main(init: std.process.Init) !void {
     }
     var funcpointers_text = splitSection(&text, "<comment>Struct types</comment>");
     while (true) {
-        const return_type = parseType(&funcpointers_text) orelse @panic("Function prototype without return type");
+        const return_type = parseSimpleType(&funcpointers_text) orelse @panic("Function prototype without return type");
         if (!findPastAndAdvance(&funcpointers_text, "<name>PFN_vk")) @panic("Function prototype without name");
         const name_index = std.mem.find(u8, funcpointers_text, "</name>") orelse @panic("Unclosed name tag");
         const func_name = funcpointers_text[0..name_index];
@@ -222,7 +242,20 @@ pub fn main(init: std.process.Init) !void {
         try writer.print("pub const Pfn{s} = *const fn(", .{func_name});
         const next_index = std.mem.find(u8, funcpointers_text, "<type category=\"funcpointer\"");
         var this = if (next_index) |i| funcpointers_text[0..i] else funcpointers_text;
-        while (parseType(&this)) |param_type| {
+        while (parseSimpleType(&this)) |param_type_| {
+            var param_type = param_type_;
+            if (std.mem.eql(u8, param_type.name, "u8")) {
+                // In funcpointers, all pointers to u8 are pointers to null-terminated strings
+                for (&param_type.ptr) |*p| {
+                    p.size = .many;
+                    p.zero_terminated = true;
+                }
+            } else if (std.mem.eql(u8, param_type.name, "void")) {
+                // In funcpointers, all pointers to void are ?*anyopaque
+                for (&param_type.ptr) |*p| {
+                    p.size = .single;
+                }
+            }
             if (!findPastAndAdvance(&this, "<name>")) @panic("Function parameter without name");
             const param_name_index = std.mem.find(u8, this, "</name>") orelse @panic("Unclosed name tag");
             const param_name = this[0..param_name_index];
