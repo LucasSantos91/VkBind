@@ -79,7 +79,7 @@ const TypeDescription = struct {
         kind: PtrKind = .no,
         size: Size = .many,
         optional: bool = true,
-        zero_terminated: bool = false,
+        null_terminated: bool = false,
 
         pub fn format(self: @This(), writer: *Io.Writer) Io.Writer.Error!void {
             if (self.kind == .no) return;
@@ -87,7 +87,7 @@ const TypeDescription = struct {
             switch (self.size) {
                 .single => try writer.writeAll("*"),
                 .many => {
-                    if (self.zero_terminated)
+                    if (self.null_terminated)
                         try writer.writeAll("[*:0]")
                     else
                         try writer.writeAll("[*]");
@@ -248,7 +248,7 @@ pub fn main(init: std.process.Init) !void {
                 // In funcpointers, all pointers to u8 are pointers to null-terminated strings
                 for (&param_type.ptr) |*p| {
                     p.size = .many;
-                    p.zero_terminated = true;
+                    p.null_terminated = true;
                 }
             } else if (std.mem.eql(u8, param_type.name, "void")) {
                 // In funcpointers, all pointers to void are ?*anyopaque
@@ -269,5 +269,92 @@ pub fn main(init: std.process.Init) !void {
         } else {
             break;
         }
+    }
+
+    var structs_text = splitSection(&text, "<comment>Vulkan enumerant (token) definitions</comment>");
+    if (!findPastAndAdvance(&structs_text, "<type category=\"")) @panic("Failed to find first struct");
+    while (true) {
+        const category_end = std.mem.find(u8, structs_text, "\"") orelse @panic("Unclosed string");
+        const category = structs_text[0..category_end];
+        structs_text = structs_text[category_end..];
+        const StructOrUnionOrInclude = enum { @"struct", @"union", include };
+        const struct_or_union_or_include = slice_tools.enums.fromName(StructOrUnionOrInclude, category) orelse @panic("Unknown type category");
+        const StructOrUnion = enum { @"struct", @"union" };
+        const struct_or_union: StructOrUnion = switch (struct_or_union_or_include) {
+            .include => {
+                if (findPastAndAdvance(&structs_text, "<type category=\""))
+                    continue
+                else
+                    break;
+            },
+            .@"struct" => .@"struct",
+            .@"union" => .@"union",
+        };
+        const tag_end = std.mem.find(u8, structs_text, ">") orelse @panic("Unclosed tag");
+        const tag = structs_text[0..tag_end];
+        structs_text = structs_text[tag_end..];
+        const name = findProperty(tag, "name") orelse @panic("Failed to find type name");
+        if (findProperty(tag, "alias")) |alias| {
+            try writer.print("pub const {s} = {s};", .{ name[2..], alias[2..] });
+            if (!findPastAndAdvance(&structs_text, "<type category=\"")) break;
+            continue;
+        }
+        try writer.print("pub const {s} = extern {s} {{", .{ name[2..], @tagName(struct_or_union) });
+        const next_index = std.mem.find(u8, structs_text, "<type category=\"");
+        var this = if (next_index) |i| structs_text[0..i] else structs_text;
+        if (!findPastAndAdvance(&this, "<member")) @panic("Memberless struct");
+        while (true) {
+            const close_tag_index = std.mem.find(u8, this, ">") orelse @panic("Unclosed tag");
+            const member_tag = this[0..close_tag_index];
+            const optional = findProperty(member_tag, "optional");
+            const len = findProperty(member_tag, "len");
+            const values = findProperty(member_tag, "values");
+            const comment = findProperty(member_tag, "comment");
+            if (comment) |c| try writer.print("\n/// {s}\n", .{c});
+            var member_type = parseSimpleType(&this) orelse @panic("Missing member type");
+            if (optional != null) member_type.ptr[0].optional = true;
+            if (len) |l| {
+                member_type.ptr[0].size = .many;
+                if (std.mem.eql(u8, l, "null-terminated"))
+                    member_type.ptr[0].null_terminated = true;
+            }
+
+            if (!findPastAndAdvance(&this, "<name>")) @panic("Nameless struct member");
+            const name_end = std.mem.find(u8, this, "</name>") orelse @panic("Unclosed name tag");
+            const member_name = this[0..name_end];
+            this = this[name_end + "</name>".len ..];
+            const next_member_index = std.mem.find(u8, this, "<member");
+            const remaining = if (next_member_index) |i| this[0..i] else this;
+            if (std.mem.find(u8, remaining, "<comment>")) |comment_start| {
+                const comment_end = std.mem.find(u8, this[comment_start..], "</comment>") orelse @panic("Unclosed comment");
+                const comment_2 = this[comment_start..][0..comment_end];
+                try writer.print("\n/// {s}\n", .{comment_2});
+            }
+            try writer.print("@\"{s}\": {f}", .{ member_name, member_type });
+            if (values) |v| {
+                try writer.writeAll("=.");
+                const removed = v["VK_STRUCTURE_TYPE_".len..];
+                for (removed) |c| try writer.writeByte(std.ascii.toLower(c));
+            } else if (optional) |_| {
+                switch (member_type.ptr[0].kind) {
+                    .no => {
+                        try writer.writeAll(if (std.mem.startsWith(u8, member_type.name, "Vk"))
+                            ".{}"
+                        else
+                            "0");
+                    },
+                    .mutable, .@"const" => {
+                        try writer.writeAll("null");
+                    },
+                }
+            }
+            try writer.writeByte(',');
+            if (next_member_index) |i| {
+                this = this[i + "<member".len ..];
+            } else break;
+        }
+        if (next_index) |i| {
+            structs_text = structs_text[i + "<type category=\"".len ..];
+        } else break;
     }
 }
