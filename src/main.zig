@@ -1,16 +1,12 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const Reader = Io.Reader;
-const panic = std.debug.panic;
+const Writer = Io.Writer;
 const assert = std.debug.assert;
 const slice_tools = @import("slice_tools");
 
-fn panicReadingFailed() noreturn {
-    @panic("Failed reading");
-}
-fn panicUnexpectedEndOfStream() noreturn {
-    @panic("Unexpected end of stream");
+fn panicWriteFailed() noreturn {
+    @panic("Writing failed");
 }
 fn panicOOM() noreturn {
     @panic("Out of memory");
@@ -51,6 +47,8 @@ fn cToZig(text: []const u8) []const u8 {
         uint64_t,
         int64_t,
         size_t,
+        float,
+        double,
     };
     const t = slice_tools.enums.fromName(Types, text) orelse return text;
     return switch (t) {
@@ -63,6 +61,8 @@ fn cToZig(text: []const u8) []const u8 {
         .uint64_t => "u64",
         .int64_t => "i64",
         .size_t => "usize",
+        .float => "f32",
+        .double => "f64",
     };
 }
 const TypeDescription = struct {
@@ -77,7 +77,7 @@ const TypeDescription = struct {
     };
     const Ptr = struct {
         kind: PtrKind = .no,
-        size: Size = .many,
+        size: Size = .single,
         optional: bool = true,
         null_terminated: bool = false,
 
@@ -158,7 +158,23 @@ fn parseSimpleType(text: *[]const u8) ?TypeDescription {
     result.name = cToZig(result.name);
     return result;
 }
-pub fn main(init: std.process.Init) !void {
+fn parseName(text: *[]const u8) []const u8 {
+    if (!findPastAndAdvance(text, "<name>")) @panic("Missing name");
+    const name_index = std.mem.find(u8, text.*, "</name>") orelse @panic("Unclosed name tag");
+    const name = text.*[0..name_index];
+    text.* = text.*[name_index..];
+    return name;
+}
+fn parseHandle(handles_text: *[]const u8, writer: *Writer) void {
+    if (!findPastAndAdvance(handles_text, "<type>VK_DEFINE_")) @panic("Failed to find handle type");
+    const non_dispatchable = handles_text.*[0] == 'N';
+    if (!findPastAndAdvance(handles_text, "<name>Vk")) @panic("Failed to find handle name");
+    const end = std.mem.find(u8, handles_text.*, "<") orelse @panic("Unclosed tag");
+    const name = handles_text.*[0..end];
+    handles_text.* = handles_text.*[end..];
+    writer.print("pub const {s} = enum({s}){{ null_handle, _ }};", .{ name, if (non_dispatchable) "u64" else "usize" }) catch panicWriteFailed();
+}
+pub fn main(init: std.process.Init) void {
     const allocator = init.arena.allocator();
     var text: []const u8 = blk: {
         const stdin = std.Io.File.stdin();
@@ -172,7 +188,7 @@ pub fn main(init: std.process.Init) !void {
     const writer = &stdout_writer.interface;
     defer writer.flush() catch @panic("Failed to write to stdout");
 
-    try writer.writeAll(@embedFile("preamble.zig"));
+    writer.writeAll(@embedFile("preamble.zig")) catch panicWriteFailed();
 
     _ = splitSection(&text, "<comment>Bitmask types</comment>");
 
@@ -192,7 +208,7 @@ pub fn main(init: std.process.Init) !void {
             // It's an alias
             const name = findProperty(tag, "name") orelse @panic("Unnamed alias");
             const alias = findProperty(tag, "alias") orelse @panic("Failed to find alias");
-            try writer.print("pub const {s} = {s};", .{ name[2..], alias[2..] });
+            writer.print("pub const {s} = {s};", .{ name[2..], alias[2..] }) catch panicWriteFailed();
         } else {
             var new = flags.addOne(allocator) catch panicOOM();
             new.bits_enum = findProperty(tag, "requires") orelse findProperty(tag, "bitvalues");
@@ -203,20 +219,14 @@ pub fn main(init: std.process.Init) !void {
                 .@"32";
             if (!findPastAndAdvance(&flags_text, "<name>Vk")) @panic("Failed to find flag name");
             const name_end = std.mem.find(u8, flags_text, "<") orelse @panic("Unclosed tag");
-            new.name = flags_text[0..name_end];
+            new.name = parseName(&flags_text)[2..];
             flags_text = flags_text[name_end..];
         }
     }
 
     var handles_text = splitSection(&text, "<comment>Types generated from corresponding enums tags below</comment>");
     while (findPastAndAdvance(&handles_text, "<type ")) {
-        if (!findPastAndAdvance(&handles_text, "<type>VK_DEFINE_")) @panic("Failed to find handle type");
-        const non_dispatchable = handles_text[0] == 'N';
-        if (!findPastAndAdvance(&handles_text, "<name>Vk")) @panic("Failed to find handle name");
-        const end = std.mem.find(u8, handles_text, "<") orelse @panic("Unclosed tag");
-        const name = handles_text[0..end];
-        handles_text = handles_text[end..];
-        try writer.print("pub const {s} = enum({s}){{ null_handle, _ }};", .{ name, if (non_dispatchable) "u64" else "usize" });
+        parseHandle(&handles_text, writer);
     }
 
     var enums_text = splitSection(&text, "<type category=\"funcpointer\">");
@@ -229,17 +239,14 @@ pub fn main(init: std.process.Init) !void {
         const t_2 = enums_text[name_start + "name=\"Vk".len ..];
         const name_end = std.mem.find(u8, t_2, "\"") orelse @panic("Unclosed string");
         const name = t_2[0..name_end];
-        try writer.print("pub const {s} = {s};", .{ name, alias });
+        writer.print("pub const {s} = {s};", .{ name, alias }) catch panicWriteFailed();
         enums_text = enums_text[alias_start + alias_end ..];
     }
     var funcpointers_text = splitSection(&text, "<comment>Struct types</comment>");
     while (true) {
         const return_type = parseSimpleType(&funcpointers_text) orelse @panic("Function prototype without return type");
-        if (!findPastAndAdvance(&funcpointers_text, "<name>PFN_vk")) @panic("Function prototype without name");
-        const name_index = std.mem.find(u8, funcpointers_text, "</name>") orelse @panic("Unclosed name tag");
-        const func_name = funcpointers_text[0..name_index];
-        funcpointers_text = funcpointers_text[name_index..];
-        try writer.print("pub const Pfn{s} = *const fn(", .{func_name});
+        const func_name = parseName(&funcpointers_text)["PFN_vk".len..];
+        writer.print("pub const Pfn{s} = *const fn(", .{func_name}) catch panicWriteFailed();
         const next_index = std.mem.find(u8, funcpointers_text, "<type category=\"funcpointer\"");
         var this = if (next_index) |i| funcpointers_text[0..i] else funcpointers_text;
         while (parseSimpleType(&this)) |param_type_| {
@@ -260,9 +267,9 @@ pub fn main(init: std.process.Init) !void {
             const param_name_index = std.mem.find(u8, this, "</name>") orelse @panic("Unclosed name tag");
             const param_name = this[0..param_name_index];
             this = this[param_name_index..];
-            try writer.print("{s}: {f},", .{ param_name, param_type });
+            writer.print("{s}: {f},", .{ param_name, param_type }) catch panicWriteFailed();
         }
-        try writer.print(") callconv(vulkan_api) {f};", .{return_type});
+        writer.print(") callconv(vulkan_api) {f};", .{return_type}) catch panicWriteFailed();
 
         if (next_index) |i| {
             funcpointers_text = funcpointers_text[i..];
@@ -277,15 +284,25 @@ pub fn main(init: std.process.Init) !void {
         const category_end = std.mem.find(u8, structs_text, "\"") orelse @panic("Unclosed string");
         const category = structs_text[0..category_end];
         structs_text = structs_text[category_end..];
-        const StructOrUnionOrInclude = enum { @"struct", @"union", include };
-        const struct_or_union_or_include = slice_tools.enums.fromName(StructOrUnionOrInclude, category) orelse @panic("Unknown type category");
+        const Kind = enum { @"struct", @"union", include, handle, basetype };
+        const kind = slice_tools.enums.fromName(Kind, category) orelse @panic("Unknown type category");
         const StructOrUnion = enum { @"struct", @"union" };
-        const struct_or_union: StructOrUnion = switch (struct_or_union_or_include) {
+        const struct_or_union: StructOrUnion = sw: switch (kind) {
             .include => {
                 if (findPastAndAdvance(&structs_text, "<type category=\""))
                     continue
                 else
                     break;
+            },
+            .handle => {
+                parseHandle(&structs_text, writer);
+                continue :sw .include;
+            },
+            .basetype => {
+                const t = parseSimpleType(&structs_text) orelse @panic("Basetype missing type");
+                const name = parseName(&structs_text);
+                writer.print("pub const {s} = {f};", .{ name[2..], t }) catch panicWriteFailed();
+                continue :sw .include;
             },
             .@"struct" => .@"struct",
             .@"union" => .@"union",
@@ -295,11 +312,11 @@ pub fn main(init: std.process.Init) !void {
         structs_text = structs_text[tag_end..];
         const name = findProperty(tag, "name") orelse @panic("Failed to find type name");
         if (findProperty(tag, "alias")) |alias| {
-            try writer.print("pub const {s} = {s};", .{ name[2..], alias[2..] });
+            writer.print("pub const {s} = {s};", .{ name[2..], alias[2..] }) catch panicWriteFailed();
             if (!findPastAndAdvance(&structs_text, "<type category=\"")) break;
             continue;
         }
-        try writer.print("pub const {s} = extern {s} {{", .{ name[2..], @tagName(struct_or_union) });
+        writer.print("pub const {s} = extern {s} {{", .{ name[2..], @tagName(struct_or_union) }) catch panicWriteFailed();
         const next_index = std.mem.find(u8, structs_text, "<type category=\"");
         var this = if (next_index) |i| structs_text[0..i] else structs_text;
         if (!findPastAndAdvance(&this, "<member")) @panic("Memberless struct");
@@ -310,48 +327,55 @@ pub fn main(init: std.process.Init) !void {
             const len = findProperty(member_tag, "len");
             const values = findProperty(member_tag, "values");
             const comment = findProperty(member_tag, "comment");
-            if (comment) |c| try writer.print("\n/// {s}\n", .{c});
+            if (comment) |c| writer.print("\n/// {s}\n", .{c}) catch panicWriteFailed();
             var member_type = parseSimpleType(&this) orelse @panic("Missing member type");
             if (optional != null) member_type.ptr[0].optional = true;
             if (len) |l| {
                 member_type.ptr[0].size = .many;
                 if (std.mem.eql(u8, l, "null-terminated"))
                     member_type.ptr[0].null_terminated = true;
+                if (std.mem.eql(u8, member_type.name, "void")) {
+                    member_type.name = "u8";
+                }
             }
 
-            if (!findPastAndAdvance(&this, "<name>")) @panic("Nameless struct member");
-            const name_end = std.mem.find(u8, this, "</name>") orelse @panic("Unclosed name tag");
-            const member_name = this[0..name_end];
-            this = this[name_end + "</name>".len ..];
+            const member_name = parseName(&this);
             const next_member_index = std.mem.find(u8, this, "<member");
             const remaining = if (next_member_index) |i| this[0..i] else this;
             if (std.mem.find(u8, remaining, "<comment>")) |comment_start| {
-                const comment_end = std.mem.find(u8, this[comment_start..], "</comment>") orelse @panic("Unclosed comment");
-                const comment_2 = this[comment_start..][0..comment_end];
-                try writer.print("\n/// {s}\n", .{comment_2});
+                const c = remaining[comment_start + "<comment>".len ..];
+                const comment_end = std.mem.find(u8, c, "</comment>") orelse @panic("Unclosed comment");
+                const comment_2 = c[0..comment_end];
+                writer.print("\n/// {s}\n", .{comment_2}) catch panicWriteFailed();
             }
-            try writer.print("@\"{s}\": {f}", .{ member_name, member_type });
+            writer.print("@\"{s}\": {f}", .{ member_name, member_type }) catch panicWriteFailed();
             if (values) |v| {
-                try writer.writeAll("=.");
+                writer.writeAll("=.") catch panicWriteFailed();
                 const removed = v["VK_STRUCTURE_TYPE_".len..];
-                for (removed) |c| try writer.writeByte(std.ascii.toLower(c));
+                for (removed) |c| writer.writeByte(std.ascii.toLower(c)) catch panicWriteFailed();
             } else if (optional) |_| {
-                switch (member_type.ptr[0].kind) {
-                    .no => {
-                        try writer.writeAll(if (std.mem.startsWith(u8, member_type.name, "Vk"))
-                            ".{}"
-                        else
-                            "0");
-                    },
-                    .mutable, .@"const" => {
-                        try writer.writeAll("null");
-                    },
+                if (struct_or_union == .@"struct") {
+                    writer.writeAll("=") catch panicWriteFailed();
+                    switch (member_type.ptr[0].kind) {
+                        .no => {
+                            writer.writeAll(if (std.mem.startsWith(u8, member_type.name, "Vk"))
+                                ".{}"
+                            else
+                                "0") catch panicWriteFailed();
+                        },
+                        .mutable, .@"const" => {
+                            writer.writeAll("null") catch panicWriteFailed();
+                        },
+                    }
                 }
             }
-            try writer.writeByte(',');
+            writer.writeByte(',') catch panicWriteFailed();
             if (next_member_index) |i| {
                 this = this[i + "<member".len ..];
-            } else break;
+            } else {
+                writer.writeAll("};") catch panicWriteFailed();
+                break;
+            }
         }
         if (next_index) |i| {
             structs_text = structs_text[i + "<type category=\"".len ..];
