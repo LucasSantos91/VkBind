@@ -204,7 +204,7 @@ const FlagBits = enum {
 
 const Flags = std.StringHashMapUnmanaged(FlagBits);
 fn addToFlags(flags: *Flags, name: []const u8, bits: FlagBits) void {
-    const gp = flags.getOrPut(allocator, name) catch panicOOM();
+    const gp = flags.getOrPut(allocator, dupe(name)) catch panicOOM();
     if (gp.found_existing) std.debug.panic("Duplicate flag: {s}", .{gp.key_ptr.*});
     gp.value_ptr.* = bits;
 }
@@ -227,9 +227,9 @@ fn parseFlag(flags: *Flags, iterator: XmlIterator, writer: *Writer) void {
             const bits = slice_tools.enums.fromName(FlagBits, bits_text) orelse std.debug.panic("Unknown flags type: {s}", .{bits_text});
             const name = iterator.getNextBetweenTags();
             addToFlags(flags, name, bits);
+            iterator.discardElement();
         },
     }
-    iterator.discardElement();
     return;
 }
 
