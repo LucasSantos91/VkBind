@@ -1,187 +1,251 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const Reader = Io.Reader;
 const Writer = Io.Writer;
 const assert = std.debug.assert;
 const slice_tools = @import("slice_tools");
 
-fn panicWriteFailed() noreturn {
-    @panic("Writing failed");
+pub fn defaultPanic() noreturn {
+    @panic("Oops, something went wrong");
 }
-fn panicOOM() noreturn {
-    @panic("Out of memory");
+pub fn panicOOM() noreturn {
+    @panic("OOM");
 }
 
-fn findPast(haystack: []const u8, needle: []const u8) ?usize {
-    const i = std.mem.find(u8, haystack, needle) orelse return null;
-    return i + needle.len;
-}
-fn findPastAndAdvance(haystack: *[]const u8, needle: []const u8) bool {
-    const i = findPast(haystack.*, needle) orelse return false;
-    haystack.* = haystack.*[i..];
-    return true;
-}
-fn findPropertyImpl(text: []const u8, property: []const u8) ?[]const u8 {
-    const i = findPast(text, property) orelse return null;
-    const t = text[i..];
-    const j = std.mem.find(u8, t, "\"") orelse @panic("Unclosed string");
-    return t[0..j];
-}
-fn findProperty(text: []const u8, comptime property: []const u8) ?[]const u8 {
-    return findPropertyImpl(text, property ++ "=\"");
-}
-fn splitSection(text: *[]const u8, finish: []const u8) []const u8 {
-    const j = findPast(text.*, finish) orelse @panic("Failed to find end of section");
-    const result = text.*[0..j];
-    text.* = text.*[j..];
-    return result;
-}
-fn cToZig(text: []const u8) []const u8 {
-    const Types = enum {
-        void,
-        char,
-        uint8_t,
-        uint16_t,
-        uint32_t,
-        int32_t,
-        uint64_t,
-        int64_t,
-        size_t,
-        float,
-        double,
-    };
-    const t = slice_tools.enums.fromName(Types, text) orelse return text;
-    return switch (t) {
-        .void => "void",
-        .char => "u8",
-        .uint8_t => "u8",
-        .uint16_t => "u16",
-        .uint32_t => "u32",
-        .int32_t => "i32",
-        .uint64_t => "u64",
-        .int64_t => "i64",
-        .size_t => "usize",
-        .float => "f32",
-        .double => "f64",
-    };
-}
-const TypeDescription = struct {
-    const PtrKind = enum {
-        no,
-        mutable,
-        @"const",
-    };
-    const Size = enum {
-        single,
-        many,
-    };
-    const Ptr = struct {
-        kind: PtrKind = .no,
-        size: Size = .single,
-        optional: bool = true,
-        null_terminated: bool = false,
+const XmlIterator = struct {
+    reader: *Reader,
 
-        pub fn format(self: @This(), writer: *Io.Writer) Io.Writer.Error!void {
-            if (self.kind == .no) return;
-            if (self.optional) try writer.writeAll("?");
-            switch (self.size) {
-                .single => try writer.writeAll("*"),
-                .many => {
-                    if (self.null_terminated)
-                        try writer.writeAll("[*:0]")
-                    else
-                        try writer.writeAll("[*]");
+    pub fn discardElement(self: @This()) void {
+        var level: usize = 1;
+        while (true) {
+            if (!self.goToTag()) return;
+            const b = self.reader.takeByte() catch defaultPanic();
+            if (b == '/') {
+                _ = self.reader.discardDelimiterInclusive('>') catch defaultPanic();
+                level -= 1;
+                if (level == 0) return;
+            } else {
+                while (true) {
+                    const c = self.reader.takeByte() catch defaultPanic();
+                    switch (c) {
+                        '/' => {
+                            const d = self.reader.takeByte() catch defaultPanic();
+                            if (d == '>') break;
+                        },
+                        '>' => {
+                            level += 1;
+                            break;
+                        },
+                        else => {},
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn goToTag(self: @This()) bool {
+        _ = self.reader.discardDelimiterInclusive('<') catch |e| switch (e) {
+            Reader.Error.EndOfStream => return false,
+            Reader.Error.ReadFailed => defaultPanic(),
+        };
+        return true;
+    }
+    pub fn closeTag(self: @This()) ClosingTag {
+        while (true) {
+            const b = self.reader.takeByte() catch defaultPanic();
+            switch (b) {
+                '/' => {
+                    const c = self.reader.takeByte() catch defaultPanic();
+                    switch (c) {
+                        '>' => return .@"/>",
+                        else => {},
+                    }
+                },
+                '>' => return .@">",
+                else => {},
+            }
+        }
+    }
+    pub fn getTagText(self: @This()) []const u8 {
+        var text: []const u8 = undefined;
+        text.len = 1;
+        while (true) {
+            text = self.reader.peek(text.len) catch defaultPanic();
+            const last_index = text.len - 1;
+            const ret_val = text[0..last_index];
+            switch (text[last_index]) {
+                '>' => {
+                    self.reader.toss(last_index);
+                    return ret_val;
+                },
+                ' ' => {
+                    self.reader.toss(text.len);
+                    return ret_val;
+                },
+                else => {
+                    text.len += 1;
                 },
             }
-            if (self.kind == .@"const") try writer.writeAll("const");
         }
+    }
+    pub fn seekTags(self: @This(), comptime TagsEnum: type) ?TagsEnum {
+        while (true) {
+            if (!self.goToTag()) return null;
+            const text = self.getTagText();
+            if (slice_tools.enums.fromName(TagsEnum, text)) |tag| return tag;
+        }
+    }
+    const ClosingTag = enum {
+        @">",
+        @"/>",
     };
-    ptr: [2]Ptr = .{ .{}, .{} },
-    name: []const u8,
-
-    pub fn format(self: @This(), writer: *Io.Writer) Io.Writer.Error!void {
-        const Kind = enum {
-            anyopaque,
-            funcptr,
-            vk,
-            primitive,
-        };
-        const kind: Kind = if (self.ptr[0].kind != .no and std.mem.eql(u8, self.name, "void"))
-            .anyopaque
-        else if (std.mem.startsWith(u8, self.name, "PFN_vk"))
-            .funcptr
-        else if (std.mem.startsWith(u8, self.name, "Vk"))
-            .vk
-        else
-            .primitive;
-        try writer.print("{f}{f} {s}{s}", .{
-            self.ptr[0], self.ptr[1],
-
-            if (kind == .funcptr)
-                "Pfn"
-            else
-                "",
-            switch (kind) {
-                .anyopaque => "anyopaque",
-                .funcptr => self.name["PFN_vk".len..],
-                .vk => self.name[2..],
-                .primitive => self.name,
+    pub fn goToAttrKey(self: @This()) union(enum) {
+        sucess,
+        close: ClosingTag,
+    } {
+        while (true) {
+            const b = self.reader.peekByte() catch defaultPanic();
+            switch (b) {
+                ' ' => {
+                    self.reader.toss(1);
+                },
+                '>' => {
+                    self.reader.toss(1);
+                    return .{ .close = .@">" };
+                },
+                '/' => {
+                    self.reader.discardAll(2) catch defaultPanic();
+                    return .{ .close = .@"/>" };
+                },
+                else => {
+                    return .sucess;
+                },
+            }
+        }
+    }
+    pub fn getAttrKey(self: @This()) union(enum) {
+        success: []const u8,
+        close: ClosingTag,
+    } {
+        switch (self.goToAttrKey()) {
+            .sucess => {
+                return .{ .success = self.reader.takeDelimiter('=') catch defaultPanic() orelse defaultPanic() };
             },
-        });
+            .close => |c| return .{ .close = c }
+        }
+    }
+    pub fn discardAttrValue(self: @This()) void {
+        for (0..2) |_| {
+            _ = self.reader.discardDelimiterInclusive('"') catch defaultPanic();
+        }
+    }
+    pub fn getAttrValue(self: @This()) []const u8 {
+        _ = self.reader.discardDelimiterInclusive('"') catch defaultPanic();
+        return self.reader.takeDelimiter('"') catch defaultPanic() orelse defaultPanic();
+    }
+
+    pub fn nextAttr(self: @This(), comptime KeysOfInterest: type) union(enum) {
+        const Success = struct {
+            key: KeysOfInterest,
+            value: []const u8,
+        };
+        success: Success,
+        close: ClosingTag,
+    } {
+        while (true) {
+            switch (self.getAttrKey()) {
+                .success => |key| {
+                    const e = slice_tools.enums.fromName(KeysOfInterest, key) orelse {
+                        self.discardAttrValue();
+                        continue;
+                    };
+                    return .{ .success = .{ .key = e, .value = self.getAttrValue() } };
+                },
+                .close => |c| return .{ .close = c },
+            }
+        }
+    }
+    pub fn getNextBetweenTags(self: @This()) []const u8 {
+        if (!self.goToTag()) defaultPanic();
+        if (self.closeTag() != .@">") defaultPanic();
+        return self.reader.takeDelimiter('<') catch defaultPanic() orelse defaultPanic();
     }
 };
-fn parseSimpleType(text: *[]const u8) ?TypeDescription {
-    var result: TypeDescription = .{ .name = undefined };
-    if (!findPastAndAdvance(text, "<type>")) return null;
-    const type_end = std.mem.find(u8, text.*, "</type>") orelse return null;
-    result.name = text.*[0..type_end];
-    text.* = text.*[type_end + "</type>".len ..];
-    if (text.*[0] == '*') {
-        text.* = text.*[1..];
-        const const_str = "const ";
-        const p = result.name.ptr - const_str.len - "<type>".len;
-        const maybe_const = p[0..const_str.len];
-        if (std.mem.eql(u8, maybe_const, const_str)) {
-            result.ptr[0].kind = .@"const";
-        } else {
-            result.ptr[0].kind = .mutable;
-        }
-        const const_ptr_str = " const *";
-        if (text.*[0] == '*') {
-            text.* = text.*[1..];
-            result.ptr[1].kind = .mutable;
-        } else if (std.mem.eql(u8, text.*[0..const_ptr_str.len], const_ptr_str)) {
-            text.* = text.*[const_ptr_str.len..];
-            result.ptr[1].kind = .@"const";
+
+fn writeAlias(new_name: []const u8, alias: []const u8, writer: *Writer) void {
+    writer.print("pub const {s} = {s};", .{ new_name, alias }) catch defaultPanic();
+}
+
+const Flag = struct {
+    const Bits = enum {
+        VkFlags,
+        VkFlags64,
+    };
+    name: []const u8,
+    bits: Bits,
+};
+const Flags = std.ArrayList(Flag);
+fn parseFlag(flags: *Flags, iterator: XmlIterator, writer: *Writer) void {
+    const Attr = enum {
+        name,
+        alias,
+    };
+    var name_buffer: slice_tools.BoundedArray(u8, 256) = .{};
+    while (true) {
+        switch (iterator.nextAttr(Attr)) {
+            .success => |kv| switch (kv.key) {
+                .name => {
+                    name_buffer.appendSlice(kv.value) catch @panic("Name too long");
+                },
+                .alias => {
+                    writeAlias(name_buffer.constSlice(), kv.value, writer);
+                    if (iterator.closeTag() != .@"/>") defaultPanic();
+                    return;
+                },
+            },
+            .close => |c| {
+                if (c != .@">") defaultPanic();
+                const bits = iterator.getNextBetweenTags();
+                const new = flags.addOne(allocator) catch panicOOM();
+                new.name = dupe(name_buffer.constSlice());
+                new.bits = slice_tools.enums.fromName(Flag.Bits, bits) orelse std.debug.panic("Unknown flags type: {s}", .{bits});
+                return;
+            },
         }
     }
-    result.name = cToZig(result.name);
-    return result;
 }
-fn parseName(text: *[]const u8) []const u8 {
-    if (!findPastAndAdvance(text, "<name>")) @panic("Missing name");
-    const name_index = std.mem.find(u8, text.*, "</name>") orelse @panic("Unclosed name tag");
-    const name = text.*[0..name_index];
-    text.* = text.*[name_index..];
-    return name;
+
+const Categories = enum {
+    bitmask,
+    @"struct",
+    @"union",
+};
+fn parseStructOrUnion(iterator: XmlIterator, category: Categories, writer: *Writer) void {
+    _ = writer; // autofix
+    _ = iterator;
+    _ = category;
 }
-fn parseHandle(handles_text: *[]const u8, writer: *Writer) void {
-    if (!findPastAndAdvance(handles_text, "<type>VK_DEFINE_")) @panic("Failed to find handle type");
-    const non_dispatchable = handles_text.*[0] == 'N';
-    if (!findPastAndAdvance(handles_text, "<name>Vk")) @panic("Failed to find handle name");
-    const end = std.mem.find(u8, handles_text.*, "<") orelse @panic("Unclosed tag");
-    const name = handles_text.*[0..end];
-    handles_text.* = handles_text.*[end..];
-    writer.print("pub const {s} = enum({s}){{ null_handle, _ }};", .{ name, if (non_dispatchable) "u64" else "usize" }) catch panicWriteFailed();
+
+pub fn handleClose(c: XmlIterator.ClosingTag, iterator: XmlIterator) void {
+    switch (c) {
+        .@">" => {
+            iterator.discardElement();
+        },
+        .@"/>" => {},
+    }
+}
+
+var allocator: Allocator = undefined;
+fn dupe(str: []const u8) []const u8 {
+    return allocator.dupe(u8, str) catch panicOOM();
 }
 pub fn main(init: std.process.Init) void {
-    const allocator = init.arena.allocator();
-    var text: []const u8 = blk: {
-        const stdin = std.Io.File.stdin();
-        var stdin_reader = stdin.reader(init.io, &.{});
-        const reader = &stdin_reader.interface;
-        break :blk reader.allocRemaining(allocator, .unlimited) catch panicOOM();
-    };
+    allocator = init.arena.allocator();
+    const stdin = std.Io.File.stdin();
+    var stdin_buffer: [4096]u8 = undefined;
+    var stdin_reader = stdin.reader(init.io, &stdin_buffer);
+
     const stdout = std.Io.File.stdout();
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer = stdout.writer(init.io, &stdout_buffer);
@@ -223,201 +287,47 @@ pub fn main(init: std.process.Init) void {
             }
         }
     }
-    writer.writeAll(@embedFile("preamble.zig")) catch panicWriteFailed();
+    //writer.writeAll(@embedFile("preamble.zig")) catch panicWriteFailed();
 
-    _ = splitSection(&text, "<comment>Bitmask types</comment>");
+    const it: XmlIterator = .{ .reader = &stdin_reader.interface };
+    // Skip the <?...?>
+    if (!it.goToTag()) @panic("Malformed xml");
 
-    var flags_text = splitSection(&text, "<comment>Types which can be void pointers or class pointers, selected at compile time</comment>");
-    const Flag = struct {
-        const Bits = enum { @"32", @"64" };
-        name: []const u8,
-        bits: Bits,
-        bits_enum: ?[]const u8,
+    const Tags = enum {
+        type,
     };
     var flags: std.ArrayList(Flag) = .empty;
-    while (findPastAndAdvance(&flags_text, "<type ")) {
-        const j = std.mem.find(u8, flags_text, ">") orelse @panic("Unclosed tag");
-        const tag = flags_text[0..j];
-        flags_text = flags_text[j..];
-        if (!api.match(findProperty(tag, "api"))) continue;
-
-        if (tag[tag.len - 1] == '/') {
-            // It's an alias
-            const name = findProperty(tag, "name") orelse @panic("Unnamed alias");
-            const alias = findProperty(tag, "alias") orelse @panic("Failed to find alias");
-            writer.print("pub const {s} = {s};", .{ name[2..], alias[2..] }) catch panicWriteFailed();
-        } else {
-            var new = flags.addOne(allocator) catch panicOOM();
-            new.bits_enum = findProperty(tag, "requires") orelse findProperty(tag, "bitvalues");
-            if (!findPastAndAdvance(&flags_text, "<type>VkFlags")) @panic("Failed to find flag type");
-            new.bits = if (flags_text[0] == '6')
-                .@"64"
-            else
-                .@"32";
-            if (!findPastAndAdvance(&flags_text, "<name>Vk")) @panic("Failed to find flag name");
-            const name_end = std.mem.find(u8, flags_text, "<") orelse @panic("Unclosed tag");
-            new.name = parseName(&flags_text)[2..];
-            flags_text = flags_text[name_end..];
-        }
-    }
-
-    var handles_text = splitSection(&text, "<comment>Types generated from corresponding enums tags below</comment>");
-    while (findPastAndAdvance(&handles_text, "<type ")) {
-        parseHandle(&handles_text, writer);
-    }
-
-    var enums_text = splitSection(&text, "<type category=\"funcpointer\">");
-    while (true) {
-        const alias_start = std.mem.find(u8, enums_text, "alias=\"Vk") orelse break;
-        const t_1 = enums_text[alias_start + "alias=\"Vk".len ..];
-        const alias_end = std.mem.find(u8, t_1, "\"") orelse @panic("Unclosed string");
-        const alias = t_1[0..alias_end];
-        const name_start = std.mem.findLast(u8, enums_text[0..alias_start], "name=\"Vk") orelse @panic("Failed to find alias name");
-        const t_2 = enums_text[name_start + "name=\"Vk".len ..];
-        const name_end = std.mem.find(u8, t_2, "\"") orelse @panic("Unclosed string");
-        const name = t_2[0..name_end];
-        writer.print("pub const {s} = {s};", .{ name, alias }) catch panicWriteFailed();
-        enums_text = enums_text[alias_start + alias_end ..];
-    }
-    var funcpointers_text = splitSection(&text, "<comment>Struct types</comment>");
-    while (true) {
-        const return_type = parseSimpleType(&funcpointers_text) orelse @panic("Function prototype without return type");
-        const func_name = parseName(&funcpointers_text)["PFN_vk".len..];
-        writer.print("pub const Pfn{s} = *const fn(", .{func_name}) catch panicWriteFailed();
-        const next_index = std.mem.find(u8, funcpointers_text, "<type category=\"funcpointer\"");
-        var this = if (next_index) |i| funcpointers_text[0..i] else funcpointers_text;
-        while (parseSimpleType(&this)) |param_type_| {
-            var param_type = param_type_;
-            if (std.mem.eql(u8, param_type.name, "u8")) {
-                // In funcpointers, all pointers to u8 are pointers to null-terminated strings
-                for (&param_type.ptr) |*p| {
-                    p.size = .many;
-                    p.null_terminated = true;
-                }
-            } else if (std.mem.eql(u8, param_type.name, "void")) {
-                // In funcpointers, all pointers to void are ?*anyopaque
-                for (&param_type.ptr) |*p| {
-                    p.size = .single;
-                }
-            }
-            if (!findPastAndAdvance(&this, "<name>")) @panic("Function parameter without name");
-            const param_name_index = std.mem.find(u8, this, "</name>") orelse @panic("Unclosed name tag");
-            const param_name = this[0..param_name_index];
-            this = this[param_name_index..];
-            writer.print("{s}: {f},", .{ param_name, param_type }) catch panicWriteFailed();
-        }
-        writer.print(") callconv(vulkan_api) {f};", .{return_type}) catch panicWriteFailed();
-
-        if (next_index) |i| {
-            funcpointers_text = funcpointers_text[i..];
-        } else {
-            break;
-        }
-    }
-
-    var structs_text = splitSection(&text, "<comment>Vulkan enumerant (token) definitions</comment>");
-    if (!findPastAndAdvance(&structs_text, "<type category=\"")) @panic("Failed to find first struct");
-    while (true) {
-        const category_end = std.mem.find(u8, structs_text, "\"") orelse @panic("Unclosed string");
-        const category = structs_text[0..category_end];
-        structs_text = structs_text[category_end..];
-        const Kind = enum { @"struct", @"union", include, handle, basetype };
-        const kind = slice_tools.enums.fromName(Kind, category) orelse @panic("Unknown type category");
-        const StructOrUnion = enum { @"struct", @"union" };
-        const struct_or_union: StructOrUnion = sw: switch (kind) {
-            .include => {
-                if (findPastAndAdvance(&structs_text, "<type category=\""))
-                    continue
-                else
-                    break;
-            },
-            .handle => {
-                parseHandle(&structs_text, writer);
-                continue :sw .include;
-            },
-            .basetype => {
-                const t = parseSimpleType(&structs_text) orelse @panic("Basetype missing type");
-                const name = parseName(&structs_text);
-                writer.print("pub const {s} = {f};", .{ name[2..], t }) catch panicWriteFailed();
-                continue :sw .include;
-            },
-            .@"struct" => .@"struct",
-            .@"union" => .@"union",
-        };
-        const tag_end = std.mem.find(u8, structs_text, ">") orelse @panic("Unclosed tag");
-        const tag = structs_text[0..tag_end];
-        structs_text = structs_text[tag_end..];
-        const name = findProperty(tag, "name") orelse @panic("Failed to find type name");
-        if (findProperty(tag, "alias")) |alias| {
-            writer.print("pub const {s} = {s};", .{ name[2..], alias[2..] }) catch panicWriteFailed();
-            if (!findPastAndAdvance(&structs_text, "<type category=\"")) break;
-            continue;
-        }
-        writer.print("pub const {s} = extern {s} {{", .{ name[2..], @tagName(struct_or_union) }) catch panicWriteFailed();
-        const next_index = std.mem.find(u8, structs_text, "<type category=\"");
-        var this = if (next_index) |i| structs_text[0..i] else structs_text;
-        if (!findPastAndAdvance(&this, "<member")) @panic("Memberless struct");
-        while (true) {
-            const close_tag_index = std.mem.find(u8, this, ">") orelse @panic("Unclosed tag");
-            const member_tag = this[0..close_tag_index];
-            if (!api.match(findProperty(member_tag, "api"))) {
-                if (!findPastAndAdvance(&this, "<member")) break;
-                continue;
-            }
-            const optional = findProperty(member_tag, "optional");
-            const len = findProperty(member_tag, "len");
-            const values = findProperty(member_tag, "values");
-            const comment = findProperty(member_tag, "comment");
-            if (comment) |c| writer.print("\n/// {s}\n", .{c}) catch panicWriteFailed();
-            var member_type = parseSimpleType(&this) orelse @panic("Missing member type");
-            if (optional != null) member_type.ptr[0].optional = true;
-            if (len) |l| {
-                member_type.ptr[0].size = .many;
-                if (std.mem.eql(u8, l, "null-terminated"))
-                    member_type.ptr[0].null_terminated = true;
-                if (std.mem.eql(u8, member_type.name, "void")) {
-                    member_type.name = "u8";
-                }
-            }
-
-            const member_name = parseName(&this);
-            const next_member_index = std.mem.find(u8, this, "<member");
-            const remaining = if (next_member_index) |i| this[0..i] else this;
-            if (std.mem.find(u8, remaining, "<comment>")) |comment_start| {
-                const c = remaining[comment_start + "<comment>".len ..];
-                const comment_end = std.mem.find(u8, c, "</comment>") orelse @panic("Unclosed comment");
-                const comment_2 = c[0..comment_end];
-                writer.print("\n/// {s}\n", .{comment_2}) catch panicWriteFailed();
-            }
-            writer.print("@\"{s}\": {f}", .{ member_name, member_type }) catch panicWriteFailed();
-            if (values) |v| {
-                writer.writeAll("=.") catch panicWriteFailed();
-                const removed = v["VK_STRUCTURE_TYPE_".len..];
-                for (removed) |c| writer.writeByte(std.ascii.toLower(c)) catch panicWriteFailed();
-            } else if (optional) |_| {
-                if (struct_or_union == .@"struct") {
-                    writer.writeAll("=") catch panicWriteFailed();
-                    switch (member_type.ptr[0].kind) {
-                        .no => {
-                            writer.writeAll(if (std.mem.startsWith(u8, member_type.name, "Vk"))
-                                ".{}"
-                            else
-                                "0") catch panicWriteFailed();
+    while (it.seekTags(Tags)) |tag| {
+        switch (tag) {
+            .type => {
+                const Attr = enum {
+                    api,
+                    category,
+                };
+                while (true) {
+                    attr_sw: switch (it.nextAttr(Attr)) {
+                        .success => |kv| switch (kv.key) {
+                            .api => {
+                                if (api.match(kv.value)) continue;
+                                continue :attr_sw .{ .close = it.closeTag() };
+                            },
+                            .category => {
+                                const category = slice_tools.enums.fromName(Categories, kv.value) orelse {
+                                    continue :attr_sw .{ .close = it.closeTag() };
+                                };
+                                switch (category) {
+                                    .bitmask => parseFlag(&flags, it, writer),
+                                    .@"struct", .@"union" => |k| parseStructOrUnion(it, k, writer),
+                                }
+                            },
                         },
-                        .mutable, .@"const" => {
-                            writer.writeAll("null") catch panicWriteFailed();
+                        .close => |c| {
+                            handleClose(c, it);
+                            break;
                         },
                     }
                 }
-            }
-            writer.writeByte(',') catch panicWriteFailed();
-            if (next_member_index) |i| {
-                this = this[i + "<member".len ..];
-            } else break;
+            },
         }
-        writer.writeAll("};") catch panicWriteFailed();
-        if (next_index) |i| {
-            structs_text = structs_text[i + "<type category=\"".len ..];
-        } else break;
     }
 }
