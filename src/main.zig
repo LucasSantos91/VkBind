@@ -85,6 +85,10 @@ const XmlIterator = struct {
             }
         }
     }
+    /// Closes the tag without returning the ClosingTag
+    pub fn closeTagRegardless(self: @This()) void {
+        _ = self.reader.discardDelimiterInclusive('>') catch |e| panicRead(e);
+    }
     pub fn getTagText(self: @This()) []const u8 {
         var text: []const u8 = undefined;
         text.len = 1;
@@ -197,6 +201,20 @@ fn writeAlias(new_name: []const u8, alias: []const u8, writer: *Writer) void {
     writer.print("pub const {s} = {s};", .{ new_name, alias }) catch panicWrite();
 }
 
+/// Assumes file pointer is right after `name=somename`
+fn handleAlias(iterator: XmlIterator, writer: *Writer, name: []const u8) void {
+    const n = stripVkPrefix(name);
+    writer.print("pub const {s} = ", .{n}) catch panicWrite();
+    switch (iterator.nextAttr(enum { alias })) {
+        .close => std.debug.panic("Expected alias for flag: {s}", .{n}),
+        .success => |s| {
+            const trimmed = stripVkPrefix(s.value);
+            writer.print("{s};", .{trimmed}) catch panicWrite();
+        },
+    }
+    if (iterator.closeTag() != .@"/>") @panic("Expected alias to end in '/>' when parsing flags");
+}
+
 const FlagBits = enum {
     VkFlags,
     VkFlags64,
@@ -211,15 +229,7 @@ fn addToFlags(flags: *Flags, name: []const u8, bits: FlagBits) void {
 fn parseFlag(flags: *Flags, iterator: XmlIterator, writer: *Writer) void {
     switch (iterator.nextAttr(enum { name })) {
         .success => |kv| switch (kv.key) {
-            .name => {
-                const n = slice_tools.safeSubslice(kv.value, 2, .unlimited) catch std.debug.panic("Flag name too short: {s}", .{kv.value});
-                writer.print("pub const {s} = ", .{n}) catch panicWrite();
-                switch (iterator.nextAttr(enum { alias })) {
-                    .close => std.debug.panic("Expected alias for flag: {s}", .{n}),
-                    .success => |s| writer.print("{s};", .{s.value}) catch panicWrite(),
-                }
-                if (iterator.closeTag() != .@"/>") @panic("Expected alias to end in '/>' when parsing flags");
-            },
+            .name => handleAlias(iterator, writer, kv.value),
         },
         .close => |c| {
             if (c != .@">") @panic("Expected '>' but got '/>' when parsing flags");
@@ -230,7 +240,6 @@ fn parseFlag(flags: *Flags, iterator: XmlIterator, writer: *Writer) void {
             iterator.discardElement();
         },
     }
-    return;
 }
 
 const Categories = enum {
@@ -238,6 +247,7 @@ const Categories = enum {
     @"struct",
     @"union",
     handle,
+    @"enum",
 };
 fn parseStructOrUnion(iterator: XmlIterator, is_struct: bool, writer: *Writer) void {
     _ = writer; // autofix
@@ -257,6 +267,10 @@ pub fn handleClose(c: XmlIterator.ClosingTag, iterator: XmlIterator) void {
 var allocator: Allocator = undefined;
 fn dupe(str: []const u8) []const u8 {
     return allocator.dupe(u8, str) catch panicOOM();
+}
+fn stripVkPrefix(str: []const u8) []const u8 {
+    return slice_tools.safeSubslice(str, 2, .unlimited) catch
+        std.debug.panic("Tried to strip vk prefix but name is too short: {s}", .{str});
 }
 
 const Api = enum {
@@ -278,8 +292,13 @@ const Api = enum {
 };
 fn parseTypes(it: XmlIterator, flags: *Flags, writer: *Writer, api: Api) void {
     while (it.seekTags(enum { type, @"/types" })) |tag| switch (tag) {
-        .type => while (true) attr_sw: switch (it.nextAttr(enum { api, category })) {
+        .type => while (true) attr_sw: switch (it.nextAttr(enum { api, category, name })) {
             .success => |kv| switch (kv.key) {
+                .name => {
+                    // If we hit name before category, this is enum. We'll handle them later, so skip it
+                    it.closeTagRegardless();
+                    break;
+                },
                 .api => {
                     if (api.match(kv.value)) continue;
                     continue :attr_sw .{ .close = it.closeTag() };
@@ -292,6 +311,13 @@ fn parseTypes(it: XmlIterator, flags: *Flags, writer: *Writer, api: Api) void {
                         .bitmask => parseFlag(flags, it, writer),
                         .@"struct", .@"union" => |k| parseStructOrUnion(it, k == .@"struct", writer),
                         .handle => parseHandle(it, writer),
+                        .@"enum" => {
+                            // If category="enum" is hit before name=, it means this is an alias
+                            switch (it.nextAttr(enum { name })) {
+                                .success => |kv2| handleAlias(it, writer, kv2.value),
+                                .close => @panic("Unexpected closing tag when handling enum alias"),
+                            }
+                        },
                     }
                     break;
                 },
@@ -305,9 +331,30 @@ fn parseTypes(it: XmlIterator, flags: *Flags, writer: *Writer, api: Api) void {
     };
     panicUnexpectedEnd();
 }
-fn parseHandle(it: XmlIterator, writer: *Writer) void {
-    _ = writer; // autofix
-    _ = it; // autofix}
+fn parseHandle(iterator: XmlIterator, writer: *Writer) void {
+    switch (iterator.nextAttr(enum { name })) {
+        .success => |kv| switch (kv.key) {
+            .name => handleAlias(iterator, writer, kv.value),
+        },
+        .close => |c| {
+            if (c != .@">") @panic("Expected '>' but got '/>' when parsing handle");
+            const kind_text = iterator.getNextBetweenTags();
+            const kind = slice_tools.enums.fromName(enum { VK_DEFINE_NON_DISPATCHABLE_HANDLE, VK_DEFINE_HANDLE }, kind_text) orelse
+                std.debug.panic("Unknown handle kind: {s}", .{kind_text});
+            const name = iterator.getNextBetweenTags();
+            writer.print(
+                "pub const {s}=enum({s}){{null_handle,_}};",
+                .{
+                    stripVkPrefix(name),
+                    switch (kind) {
+                        .VK_DEFINE_NON_DISPATCHABLE_HANDLE => "u64",
+                        .VK_DEFINE_HANDLE => "usize",
+                    },
+                },
+            ) catch panicWrite();
+            iterator.discardElement();
+        },
+    }
 }
 fn parseEnums(it: XmlIterator) void {
     _ = it;
