@@ -188,6 +188,41 @@ pub fn main(init: std.process.Init) void {
     const writer = &stdout_writer.interface;
     defer writer.flush() catch @panic("Failed to write to stdout");
 
+    const Api = enum {
+        vulkan,
+        vulkansc,
+
+        pub fn match(current: @This(), other: ?[]const u8) bool {
+            var o = other orelse return true;
+            while (true) {
+                const comma = std.mem.find(u8, o, ",");
+                const this = if (comma) |i| o[0..i] else o;
+                const a = slice_tools.enums.fromName(@This(), this) orelse @panic("Unknown api");
+                if (current == a) return true;
+                if (comma) |i| {
+                    o = o[i..];
+                } else return false;
+            }
+        }
+    };
+    var api: Api = .vulkan;
+
+    {
+        var it = init.minimal.args.iterateAllocator(allocator) catch panicOOM();
+        _ = it.next(); // program name
+        while (it.next()) |o| {
+            const Options = enum {
+                @"-api",
+            };
+            const op = slice_tools.enums.fromName(Options, o) orelse std.debug.panic("Unknown option: {s}", .{o});
+            switch (op) {
+                .@"-api" => {
+                    const a = it.next() orelse @panic("Missing api type");
+                    api = slice_tools.enums.fromName(Api, a) orelse std.debug.panic("Unknown api: {s}", .{a});
+                },
+            }
+        }
+    }
     writer.writeAll(@embedFile("preamble.zig")) catch panicWriteFailed();
 
     _ = splitSection(&text, "<comment>Bitmask types</comment>");
@@ -204,6 +239,8 @@ pub fn main(init: std.process.Init) void {
         const j = std.mem.find(u8, flags_text, ">") orelse @panic("Unclosed tag");
         const tag = flags_text[0..j];
         flags_text = flags_text[j..];
+        if (!api.match(findProperty(tag, "api"))) continue;
+
         if (tag[tag.len - 1] == '/') {
             // It's an alias
             const name = findProperty(tag, "name") orelse @panic("Unnamed alias");
@@ -323,6 +360,10 @@ pub fn main(init: std.process.Init) void {
         while (true) {
             const close_tag_index = std.mem.find(u8, this, ">") orelse @panic("Unclosed tag");
             const member_tag = this[0..close_tag_index];
+            if (!api.match(findProperty(member_tag, "api"))) {
+                if (!findPastAndAdvance(&this, "<member")) break;
+                continue;
+            }
             const optional = findProperty(member_tag, "optional");
             const len = findProperty(member_tag, "len");
             const values = findProperty(member_tag, "values");
@@ -372,11 +413,9 @@ pub fn main(init: std.process.Init) void {
             writer.writeByte(',') catch panicWriteFailed();
             if (next_member_index) |i| {
                 this = this[i + "<member".len ..];
-            } else {
-                writer.writeAll("};") catch panicWriteFailed();
-                break;
-            }
+            } else break;
         }
+        writer.writeAll("};") catch panicWriteFailed();
         if (next_index) |i| {
             structs_text = structs_text[i + "<type category=\"".len ..];
         } else break;
