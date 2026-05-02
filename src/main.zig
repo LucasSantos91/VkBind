@@ -6,8 +6,26 @@ const Writer = Io.Writer;
 const assert = std.debug.assert;
 const slice_tools = @import("slice_tools");
 
-pub fn defaultPanic() noreturn {
-    @panic("Oops, something went wrong");
+fn panicUnexpectedEnd() noreturn {
+    @panic("Unexpected end of stream");
+}
+fn panicReadFailed() noreturn {
+    @panic("Failed to read from input");
+}
+pub fn panicRead(e: Reader.Error) noreturn {
+    switch (e) {
+        Reader.Error.EndOfStream => panicUnexpectedEnd(),
+        Reader.Error.ReadFailed => panicReadFailed(),
+    }
+}
+pub fn panicTakeDel(e: error{ StreamTooLong, ReadFailed }) noreturn {
+    switch (e) {
+        error.StreamTooLong => @panic("Insufficient buffer for reading"),
+        error.ReadFailed => panicReadFailed(),
+    }
+}
+pub fn panicWrite() noreturn {
+    @panic("Failed to write to stdout");
 }
 pub fn panicOOM() noreturn {
     @panic("OOM");
@@ -20,17 +38,17 @@ const XmlIterator = struct {
         var level: usize = 1;
         while (true) {
             if (!self.goToTag()) return;
-            const b = self.reader.takeByte() catch defaultPanic();
+            const b = self.reader.takeByte() catch |e| panicRead(e);
             if (b == '/') {
-                _ = self.reader.discardDelimiterInclusive('>') catch defaultPanic();
+                _ = self.reader.discardDelimiterInclusive('>') catch |e| panicRead(e);
                 level -= 1;
                 if (level == 0) return;
             } else {
                 while (true) {
-                    const c = self.reader.takeByte() catch defaultPanic();
+                    const c = self.reader.takeByte() catch |e| panicRead(e);
                     switch (c) {
                         '/' => {
-                            const d = self.reader.takeByte() catch defaultPanic();
+                            const d = self.reader.takeByte() catch |e| panicRead(e);
                             if (d == '>') break;
                         },
                         '>' => {
@@ -47,16 +65,16 @@ const XmlIterator = struct {
     pub fn goToTag(self: @This()) bool {
         _ = self.reader.discardDelimiterInclusive('<') catch |e| switch (e) {
             Reader.Error.EndOfStream => return false,
-            Reader.Error.ReadFailed => defaultPanic(),
+            Reader.Error.ReadFailed => panicReadFailed(),
         };
         return true;
     }
     pub fn closeTag(self: @This()) ClosingTag {
         while (true) {
-            const b = self.reader.takeByte() catch defaultPanic();
+            const b = self.reader.takeByte() catch |e| panicRead(e);
             switch (b) {
                 '/' => {
-                    const c = self.reader.takeByte() catch defaultPanic();
+                    const c = self.reader.takeByte() catch |e| panicRead(e);
                     switch (c) {
                         '>' => return .@"/>",
                         else => {},
@@ -71,7 +89,7 @@ const XmlIterator = struct {
         var text: []const u8 = undefined;
         text.len = 1;
         while (true) {
-            text = self.reader.peek(text.len) catch defaultPanic();
+            text = self.reader.peek(text.len) catch |e| panicRead(e);
             const last_index = text.len - 1;
             const ret_val = text[0..last_index];
             switch (text[last_index]) {
@@ -105,7 +123,7 @@ const XmlIterator = struct {
         close: ClosingTag,
     } {
         while (true) {
-            const b = self.reader.peekByte() catch defaultPanic();
+            const b = self.reader.peekByte() catch |e| panicRead(e);
             switch (b) {
                 ' ' => {
                     self.reader.toss(1);
@@ -115,7 +133,7 @@ const XmlIterator = struct {
                     return .{ .close = .@">" };
                 },
                 '/' => {
-                    self.reader.discardAll(2) catch defaultPanic();
+                    self.reader.discardAll(2) catch |e| panicRead(e);
                     return .{ .close = .@"/>" };
                 },
                 else => {
@@ -130,19 +148,21 @@ const XmlIterator = struct {
     } {
         switch (self.goToAttrKey()) {
             .sucess => {
-                return .{ .success = self.reader.takeDelimiter('=') catch defaultPanic() orelse defaultPanic() };
+                return .{ .success = self.reader.takeDelimiter('=') catch |e|
+                    panicTakeDel(e) orelse
+                    panicUnexpectedEnd() };
             },
             .close => |c| return .{ .close = c }
         }
     }
     pub fn discardAttrValue(self: @This()) void {
         for (0..2) |_| {
-            _ = self.reader.discardDelimiterInclusive('"') catch defaultPanic();
+            _ = self.reader.discardDelimiterInclusive('"') catch |e| panicRead(e);
         }
     }
     pub fn getAttrValue(self: @This()) []const u8 {
-        _ = self.reader.discardDelimiterInclusive('"') catch defaultPanic();
-        return self.reader.takeDelimiter('"') catch defaultPanic() orelse defaultPanic();
+        _ = self.reader.discardDelimiterInclusive('"') catch |e| panicRead(e);
+        return self.reader.takeDelimiter('"') catch |e| panicTakeDel(e) orelse panicUnexpectedEnd();
     }
 
     pub fn nextAttr(self: @This(), comptime KeysOfInterest: type) union(enum) {
@@ -167,64 +187,62 @@ const XmlIterator = struct {
         }
     }
     pub fn getNextBetweenTags(self: @This()) []const u8 {
-        if (!self.goToTag()) defaultPanic();
-        if (self.closeTag() != .@">") defaultPanic();
-        return self.reader.takeDelimiter('<') catch defaultPanic() orelse defaultPanic();
+        if (!self.goToTag()) panicUnexpectedEnd();
+        if (self.closeTag() != .@">") panicUnexpectedEnd();
+        return self.reader.takeDelimiter('<') catch |e| panicTakeDel(e) orelse panicUnexpectedEnd();
     }
 };
 
 fn writeAlias(new_name: []const u8, alias: []const u8, writer: *Writer) void {
-    writer.print("pub const {s} = {s};", .{ new_name, alias }) catch defaultPanic();
+    writer.print("pub const {s} = {s};", .{ new_name, alias }) catch panicWrite();
 }
 
-const Flag = struct {
-    const Bits = enum {
-        VkFlags,
-        VkFlags64,
-    };
-    name: []const u8,
-    bits: Bits,
+const FlagBits = enum {
+    VkFlags,
+    VkFlags64,
 };
-const Flags = std.ArrayList(Flag);
+
+const Flags = std.StringHashMapUnmanaged(FlagBits);
+fn addToFlags(flags: *Flags, name: []const u8, bits: FlagBits) void {
+    const gp = flags.getOrPut(allocator, name) catch panicOOM();
+    if (gp.found_existing) std.debug.panic("Duplicate flag: {s}", .{gp.key_ptr.*});
+    gp.value_ptr.* = bits;
+}
 fn parseFlag(flags: *Flags, iterator: XmlIterator, writer: *Writer) void {
-    const Attr = enum {
-        name,
-        alias,
-    };
-    var name_buffer: slice_tools.BoundedArray(u8, 256) = .{};
-    while (true) {
-        switch (iterator.nextAttr(Attr)) {
-            .success => |kv| switch (kv.key) {
-                .name => {
-                    name_buffer.appendSlice(kv.value) catch @panic("Name too long");
-                },
-                .alias => {
-                    writeAlias(name_buffer.constSlice(), kv.value, writer);
-                    if (iterator.closeTag() != .@"/>") defaultPanic();
-                    return;
-                },
+    switch (iterator.nextAttr(enum { name })) {
+        .success => |kv| switch (kv.key) {
+            .name => {
+                const n = slice_tools.safeSubslice(kv.value, 2, .unlimited) catch std.debug.panic("Flag name too short: {s}", .{kv.value});
+                writer.print("pub const {s} = ", .{n}) catch panicWrite();
+                switch (iterator.nextAttr(enum { alias })) {
+                    .close => std.debug.panic("Expected alias for flag: {s}", .{n}),
+                    .success => |s| writer.print("{s};", .{s.value}) catch panicWrite(),
+                }
+                if (iterator.closeTag() != .@"/>") @panic("Expected alias to end in '/>' when parsing flags");
             },
-            .close => |c| {
-                if (c != .@">") defaultPanic();
-                const bits = iterator.getNextBetweenTags();
-                const new = flags.addOne(allocator) catch panicOOM();
-                new.name = dupe(name_buffer.constSlice());
-                new.bits = slice_tools.enums.fromName(Flag.Bits, bits) orelse std.debug.panic("Unknown flags type: {s}", .{bits});
-                return;
-            },
-        }
+        },
+        .close => |c| {
+            if (c != .@">") @panic("Expected '>' but got '/>' when parsing flags");
+            const bits_text = iterator.getNextBetweenTags();
+            const bits = slice_tools.enums.fromName(FlagBits, bits_text) orelse std.debug.panic("Unknown flags type: {s}", .{bits_text});
+            const name = iterator.getNextBetweenTags();
+            addToFlags(flags, name, bits);
+        },
     }
+    iterator.discardElement();
+    return;
 }
 
 const Categories = enum {
     bitmask,
     @"struct",
     @"union",
+    handle,
 };
-fn parseStructOrUnion(iterator: XmlIterator, category: Categories, writer: *Writer) void {
+fn parseStructOrUnion(iterator: XmlIterator, is_struct: bool, writer: *Writer) void {
     _ = writer; // autofix
     _ = iterator;
-    _ = category;
+    _ = is_struct;
 }
 
 pub fn handleClose(c: XmlIterator.ClosingTag, iterator: XmlIterator) void {
@@ -240,6 +258,67 @@ var allocator: Allocator = undefined;
 fn dupe(str: []const u8) []const u8 {
     return allocator.dupe(u8, str) catch panicOOM();
 }
+
+const Api = enum {
+    vulkan,
+    vulkansc,
+
+    pub fn match(current: @This(), other: ?[]const u8) bool {
+        var o = other orelse return true;
+        while (true) {
+            const comma = std.mem.find(u8, o, ",");
+            const this = if (comma) |i| o[0..i] else o;
+            const a = slice_tools.enums.fromName(@This(), this) orelse std.debug.panic("Unknown api: {s}", .{this});
+            if (current == a) return true;
+            if (comma) |i| {
+                o = o[i..];
+            } else return false;
+        }
+    }
+};
+fn parseTypes(it: XmlIterator, flags: *Flags, writer: *Writer, api: Api) void {
+    while (it.seekTags(enum { type, @"/types" })) |tag| switch (tag) {
+        .type => while (true) attr_sw: switch (it.nextAttr(enum { api, category })) {
+            .success => |kv| switch (kv.key) {
+                .api => {
+                    if (api.match(kv.value)) continue;
+                    continue :attr_sw .{ .close = it.closeTag() };
+                },
+                .category => {
+                    const category = slice_tools.enums.fromName(Categories, kv.value) orelse {
+                        continue :attr_sw .{ .close = it.closeTag() };
+                    };
+                    switch (category) {
+                        .bitmask => parseFlag(flags, it, writer),
+                        .@"struct", .@"union" => |k| parseStructOrUnion(it, k == .@"struct", writer),
+                        .handle => parseHandle(it, writer),
+                    }
+                    break;
+                },
+            },
+            .close => |c| {
+                handleClose(c, it);
+                break;
+            },
+        },
+        .@"/types" => return,
+    };
+    panicUnexpectedEnd();
+}
+fn parseHandle(it: XmlIterator, writer: *Writer) void {
+    _ = writer; // autofix
+    _ = it; // autofix}
+}
+fn parseEnums(it: XmlIterator) void {
+    _ = it;
+}
+fn parseCommands(it: XmlIterator) void {
+    _ = it;
+}
+fn parseExtensions(it: XmlIterator) void {
+    _ = it;
+}
+
 pub fn main(init: std.process.Init) void {
     allocator = init.arena.allocator();
     const stdin = std.Io.File.stdin();
@@ -250,25 +329,8 @@ pub fn main(init: std.process.Init) void {
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer = stdout.writer(init.io, &stdout_buffer);
     const writer = &stdout_writer.interface;
-    defer writer.flush() catch @panic("Failed to write to stdout");
+    defer writer.flush() catch panicWrite();
 
-    const Api = enum {
-        vulkan,
-        vulkansc,
-
-        pub fn match(current: @This(), other: ?[]const u8) bool {
-            var o = other orelse return true;
-            while (true) {
-                const comma = std.mem.find(u8, o, ",");
-                const this = if (comma) |i| o[0..i] else o;
-                const a = slice_tools.enums.fromName(@This(), this) orelse @panic("Unknown api");
-                if (current == a) return true;
-                if (comma) |i| {
-                    o = o[i..];
-                } else return false;
-            }
-        }
-    };
     var api: Api = .vulkan;
 
     {
@@ -287,47 +349,25 @@ pub fn main(init: std.process.Init) void {
             }
         }
     }
-    //writer.writeAll(@embedFile("preamble.zig")) catch panicWriteFailed();
+    //writer.writeAll(@embedFile("preamble.zig")) catch panicWrite();
 
     const it: XmlIterator = .{ .reader = &stdin_reader.interface };
     // Skip the <?...?>
     if (!it.goToTag()) @panic("Malformed xml");
+    if (it.seekTags(enum { registry })) |_| {
+        _ = it.closeTag();
+    } else @panic("Failed to find registry");
 
-    const Tags = enum {
-        type,
+    var flags: Flags = .empty;
+    while (it.seekTags(enum { types, enums, commands, extensions })) |tag| switch (tag) {
+        .types => parseTypes(it, &flags, writer, api),
+        .enums => parseEnums(it),
+        .commands => parseCommands(it),
+        .extensions => parseExtensions(it),
     };
-    var flags: std.ArrayList(Flag) = .empty;
-    while (it.seekTags(Tags)) |tag| {
-        switch (tag) {
-            .type => {
-                const Attr = enum {
-                    api,
-                    category,
-                };
-                while (true) {
-                    attr_sw: switch (it.nextAttr(Attr)) {
-                        .success => |kv| switch (kv.key) {
-                            .api => {
-                                if (api.match(kv.value)) continue;
-                                continue :attr_sw .{ .close = it.closeTag() };
-                            },
-                            .category => {
-                                const category = slice_tools.enums.fromName(Categories, kv.value) orelse {
-                                    continue :attr_sw .{ .close = it.closeTag() };
-                                };
-                                switch (category) {
-                                    .bitmask => parseFlag(&flags, it, writer),
-                                    .@"struct", .@"union" => |k| parseStructOrUnion(it, k, writer),
-                                }
-                            },
-                        },
-                        .close => |c| {
-                            handleClose(c, it);
-                            break;
-                        },
-                    }
-                }
-            },
-        }
+
+    var f = flags.iterator();
+    while (f.next()) |g| {
+        std.debug.print("{s} : {t}\n", .{ g.key_ptr.*, g.value_ptr.* });
     }
 }
