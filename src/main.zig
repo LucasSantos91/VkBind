@@ -257,6 +257,12 @@ fn parseFlag(flags: *Flags, iterator: XmlIterator, writer: *Writer) void {
 fn writeToLower(writer: *Writer, text: []const u8) void {
     for (text) |c| writer.writeByte(std.ascii.toLower(c)) catch panicWrite();
 }
+fn printComment(comment: []const u8, writer: *Writer) void {
+    const start_of_comment = std.mem.findNone(u8, comment, "/ ") orelse
+        // Empty comment?
+        return;
+    writer.print("\n/// {s}\n", .{comment[start_of_comment..]}) catch panicWrite();
+}
 
 const Categories = enum {
     bitmask,
@@ -269,19 +275,33 @@ const Categories = enum {
 fn parseStructOrUnion(iterator: XmlIterator, is_struct: bool, writer: *Writer, api: Api) void {
     const name_attr = (iterator.nextAttr(enum { name }));
     if (name_attr == .close) @panic("Nameless struct");
-    const name = name_attr.success.value;
-    writer.print("pub const {s}=", .{stripVkPrefix(name)}) catch panicWrite();
+    const name = dupe(stripVkPrefix(name_attr.success.value));
+    var alias: []const u8 = &.{};
 
-    switch (iterator.nextAttr(enum { alias })) {
-        .success => |kv2| {
-            writer.print("{s};", .{stripVkPrefix(kv2.value)}) catch panicWrite();
-            return;
-        },
-        .close => |c| {
-            if (c != .@">") std.debug.panic("Unexpected end for type: {s}", .{name});
-        },
+    while (true) {
+        switch (iterator.nextAttr(enum { alias, comment })) {
+            .success => |kv| switch (kv.key) {
+                .alias => {
+                    alias = dupe(stripVkPrefix(kv.value));
+                },
+                .comment => {
+                    printComment(kv.value, writer);
+                }
+            },
+            .close => {
+                break;
+            },
+        }
     }
-    writer.print("extern {s}{{", .{if (is_struct) "struct" else "union"}) catch panicWrite();
+    if (alias.len != 0) {
+        writer.print("pub const {s}={s};", .{ name, alias }) catch panicWrite();
+        freeDupe(alias);
+        freeDupe(name);
+        return;
+    }
+
+    writer.print("pub const {s}=extern {s}{{", .{ name, if (is_struct) "struct" else "union" }) catch panicWrite();
+    freeDupe(name);
     var in_packed_member = false;
     var packed_count: usize = 0;
     member_loop: while (iterator.seekTags(enum { member, @"/type" })) |t| switch (t) {
@@ -290,7 +310,7 @@ fn parseStructOrUnion(iterator: XmlIterator, is_struct: bool, writer: *Writer, a
             var optional: bool = false;
             var len: ZigType.Size = .single;
             while (true) {
-                switch (iterator.nextAttr(enum { api, values, optional, len })) {
+                switch (iterator.nextAttr(enum { api, values, optional, len, comment })) {
                     .success => |kv| switch (kv.key) {
                         .api => {
                             if (!api.match(kv.value)) {
@@ -316,6 +336,9 @@ fn parseStructOrUnion(iterator: XmlIterator, is_struct: bool, writer: *Writer, a
                             else
                                 .many;
                         },
+                        .comment => {
+                            printComment(kv.value, writer);
+                        },
                     },
                     .close => |c| {
                         if (c == .@"/>") std.debug.panic("Unexpected end to type: {s}", .{name});
@@ -330,6 +353,19 @@ fn parseStructOrUnion(iterator: XmlIterator, is_struct: bool, writer: *Writer, a
                 .ptrs = .{ .len = c_member.type.ptrs.len },
                 .amount = c_member.amount,
             };
+            while (true) {
+                switch (iterator.seekTagAndClose(enum { @"/member", comment })) {
+                    .comment => {
+                        const comment = iterator.reader.takeDelimiter('<') catch |e|
+                            panicPeekDel(e) orelse
+                            panicUnexpectedEnd();
+                        printComment(comment, writer);
+                        iterator.closeTagRegardless();
+                    },
+                    .@"/member" => break,
+                }
+            }
+
             switch (zig_type.ptrs.len) {
                 0 => {},
                 1 => {
@@ -378,9 +414,8 @@ fn parseStructOrUnion(iterator: XmlIterator, is_struct: bool, writer: *Writer, a
                 writer.print("={s}", .{default_value}) catch panicWrite();
             }
             writer.writeByte(',') catch panicWrite();
-            _ = iterator.seekTagAndClose(enum { @"/member" });
         }
-    } else std.debug.print("Unexpected end while parsing type: {s}", .{name});
+    } else std.debug.panic("Unexpected end while parsing type: {s}", .{name});
     if (in_packed_member) {
         in_packed_member = false;
         writer.writeAll("},") catch panicWrite();
@@ -698,6 +733,19 @@ const CVar = struct {
         array: []const u8,
         bitfield: []const u8,
         single,
+
+        fn initArray(text: []const u8) @This() {
+            return .{ .array = dupe(text) };
+        }
+        fn initBitfield(text: []const u8) @This() {
+            return .{ .bitfield = dupe(text) };
+        }
+        pub fn deinit(self: @This()) void {
+            switch (self) {
+                .array, .bitfield => |a| freeDupe(a),
+                .single => {},
+            }
+        }
     };
     type: CType,
     name: []const u8,
@@ -724,9 +772,9 @@ const CVar = struct {
                     if (std.mem.findScalar(u8, amount, '>')) |enum_start| {
                         amount = slice_tools.safeSubslice(amount, enum_start + 1, .unlimited) catch @panic("Malformed array size");
                         const enum_end = std.mem.findScalar(u8, amount, '<') orelse @panic("Unclosed enum in array amount");
-                        result.amount = .{ .array = amount[0..enum_end] };
+                        result.amount = .initArray(amount[0..enum_end]);
                     } else {
-                        result.amount = .{ .array = amount };
+                        result.amount = .initArray(amount);
                     }
                     return result;
                 },
@@ -734,7 +782,7 @@ const CVar = struct {
                     it.reader.toss(1);
                     const amount = it.reader.takeDelimiterExclusive('<') catch |e|
                         panicPeekDel(e);
-                    result.amount = .{ .bitfield = amount };
+                    result.amount = .initBitfield(amount);
                     return result;
                 },
                 else => std.debug.panic("Unexpected byte when parsing type: {c}", .{b}),
@@ -746,6 +794,7 @@ const CVar = struct {
     fn deinit(self: *const @This()) void {
         freeDupe(self.name);
         self.type.deinit();
+        self.amount.deinit();
     }
     pub fn format(self: *const @This(), writer: *Writer) Writer.Error!void {
         switch (self.amount) {
