@@ -24,6 +24,12 @@ pub fn panicTakeDel(e: error{ StreamTooLong, ReadFailed }) noreturn {
         error.ReadFailed => panicReadFailed(),
     }
 }
+pub fn panicPeekDel(e: Reader.DelimiterError) noreturn {
+    switch (e) {
+        Reader.DelimiterError.StreamTooLong, Reader.DelimiterError.ReadFailed => panicTakeDel(@errorCast(e)),
+        Reader.DelimiterError.EndOfStream => panicUnexpectedEnd(),
+    }
+}
 pub fn panicWrite() noreturn {
     @panic("Failed to write to stdout");
 }
@@ -195,6 +201,12 @@ const XmlIterator = struct {
         if (self.closeTag() != .@">") panicUnexpectedEnd();
         return self.reader.takeDelimiter('<') catch |e| panicTakeDel(e) orelse panicUnexpectedEnd();
     }
+
+    pub fn seekTagAndClose(self: @This(), comptime Tags: type) Tags {
+        const t = self.seekTags(Tags) orelse @panic("Failed to find expected tags");
+        self.closeTagRegardless();
+        return t;
+    }
 };
 
 fn writeAlias(new_name: []const u8, alias: []const u8, writer: *Writer) void {
@@ -248,6 +260,7 @@ const Categories = enum {
     @"union",
     handle,
     @"enum",
+    funcpointer,
 };
 fn parseStructOrUnion(iterator: XmlIterator, is_struct: bool, writer: *Writer) void {
     _ = writer; // autofix
@@ -268,9 +281,27 @@ var allocator: Allocator = undefined;
 fn dupe(str: []const u8) []const u8 {
     return allocator.dupe(u8, str) catch panicOOM();
 }
+fn freeDupe(str: []const u8) void {
+    allocator.free(str);
+}
 fn stripVkPrefix(str: []const u8) []const u8 {
     return slice_tools.safeSubslice(str, 2, .unlimited) catch
         std.debug.panic("Tried to strip vk prefix but name is too short: {s}", .{str});
+}
+fn stripPfnPrefix(str: []const u8) []const u8 {
+    return slice_tools.safeSubslice(str, "PFN_vk".len, .unlimited) catch
+        std.debug.panic("Tried to strip PFN_vk prefix but name is too short: {s}", .{str});
+}
+const PrefixKind = enum {
+    vk,
+    Vk,
+    PFN_vk,
+};
+fn stripPrefix(name: []const u8) struct { PrefixKind, []const u8 } {
+    if (std.mem.startsWith(u8, name, @tagName(PrefixKind.vk))) return .{ .vk, name[2..] };
+    if (std.mem.startsWith(u8, name, @tagName(PrefixKind.Vk))) return .{ .Vk, name[2..] };
+    if (std.mem.startsWith(u8, name, @tagName(PrefixKind.PFN_vk))) return .{ .Vk, name[@tagName(PrefixKind.PFN_vk).len..] };
+    std.debug.panic("Name has no prefix: {s}", .{name});
 }
 
 const Api = enum {
@@ -318,6 +349,7 @@ fn parseTypes(it: XmlIterator, flags: *Flags, writer: *Writer, api: Api) void {
                                 .close => @panic("Unexpected closing tag when handling enum alias"),
                             }
                         },
+                        .funcpointer => parseFuncPointer(it, writer),
                     }
                     break;
                 },
@@ -356,6 +388,29 @@ fn parseHandle(iterator: XmlIterator, writer: *Writer) void {
         },
     }
 }
+
+fn parseFuncPointer(it: XmlIterator, writer: *Writer) void {
+    _ = it.seekTagAndClose(enum { proto });
+    const ret_type_and_name: CVar = .parse(it);
+    defer ret_type_and_name.deinit();
+    // The return type was duped, so it will live through peeks
+
+    writer.print("pub const Pfn{s} = *const fn(", .{stripPfnPrefix(ret_type_and_name.name)}) catch panicWrite();
+    _ = it.seekTagAndClose(enum { @"/proto" });
+    while (true) {
+        const t = it.seekTagAndClose(enum { param, @"/type" });
+        switch (t) {
+            .param => {
+                const param: CVar = .parse(it);
+                defer param.deinit();
+
+                writer.print("{f},", .{param}) catch panicWrite();
+            },
+            .@"/type" => break,
+        }
+    }
+    writer.print(")callconv(vk_callconv){f};", .{ret_type_and_name.type}) catch panicWrite();
+}
 fn parseEnums(it: XmlIterator) void {
     _ = it;
 }
@@ -365,6 +420,180 @@ fn parseCommands(it: XmlIterator) void {
 fn parseExtensions(it: XmlIterator) void {
     _ = it;
 }
+
+const Primitive = enum {
+    void,
+    u8,
+    u16,
+    u32,
+    u64,
+    i32,
+    i64,
+    f32,
+    f64,
+    usize,
+
+    const CPrimitive = enum {
+        void,
+        char,
+        uint8_t,
+        uint_16t,
+        uint32_t,
+        uint64_t,
+        int32_t,
+        int64_t,
+        float,
+        double,
+        size_t,
+    };
+
+    pub fn parse(text: []const u8) ?@This() {
+        const e = slice_tools.enums.fromName(CPrimitive, text) orelse return null;
+        return switch (e) {
+            .void => .void,
+            .char, .uint8_t => .u8,
+            .uint_16t => .u16,
+            .uint32_t => .u32,
+            .uint64_t => .u64,
+            .int32_t => .i32,
+            .int64_t => .i64,
+            .float => .f32,
+            .double => .f64,
+            .size_t => .usize,
+        };
+    }
+};
+const VarType = union(enum) {
+    primitive: Primitive,
+    non_primitive: []const u8,
+
+    pub fn format(self: *const @This(), writer: *Writer) Writer.Error!void {
+        switch (self.*) {
+            .primitive => |p| writer.print("{t}", .{p}) catch panicWrite(),
+            .non_primitive => |n| {
+                const kind, const stripped = stripPrefix(n);
+                switch (kind) {
+                    .vk => std.debug.panic("Type starts with `vk`: {s}", .{n}),
+                    .Vk => writer.writeAll(stripped) catch panicWrite(),
+                    .PFN_vk => writer.print("Pfn{s}", .{stripped}) catch panicWrite(),
+                }
+            }
+        }
+    }
+
+    pub fn parse(text: []const u8) @This() {
+        return if (Primitive.parse(text)) |p|
+            .{ .primitive = p }
+        else
+            .{ .non_primitive = dupe(text) };
+    }
+    pub fn deinit(self: @This()) void {
+        switch (self) {
+            .primitive => {},
+            .non_primitive => |n| freeDupe(n),
+        }
+    }
+};
+
+const CType = struct {
+    const Kind = enum {
+        @"const",
+        mutable,
+    };
+
+    ptrs: slice_tools.BoundedArray(Kind, 2) = .{},
+    base_type: VarType,
+
+    pub fn deinit(self: *const @This()) void {
+        self.base_type.deinit();
+    }
+    pub fn format(self: *const @This(), writer: *Writer) Writer.Error!void {
+        for (self.ptrs.constSlice()) |p| {
+            writer.writeAll("[*c]") catch panicWrite();
+            if (p == .@"const") writer.writeAll("const ") catch panicWrite();
+        }
+        writer.print("{f}", .{self.base_type}) catch panicWrite();
+    }
+
+    fn parse(it: XmlIterator) @This() {
+        const text = it.reader.takeDelimiterExclusive('<') catch |e| panicPeekDel(e);
+        var result: CType = .{ .base_type = undefined };
+        const trimmed_text = std.mem.trim(u8, text, " ");
+        const is_const = std.mem.eql(u8, trimmed_text, "const");
+        if (is_const) {
+            result.ptrs.buffer[0] = .@"const";
+            result.ptrs.len = 1;
+        }
+        const c_type = it.getNextBetweenTags();
+        result.base_type = .parse(c_type);
+        it.closeTagRegardless();
+        const rest_of_type = it.reader.takeDelimiterExclusive('<') catch |e| panicPeekDel(e);
+        const trimmed_type = std.mem.trim(u8, rest_of_type, " ");
+        if (trimmed_type.len == 0) {
+            if (is_const) @panic("Expected pointer");
+            return result;
+        }
+        if (!is_const) result.ptrs.appendAssumeCapacity(.mutable);
+        const rest_of_type_expression = slice_tools.enums.fromName(enum { @"*", @"**", @"* const*" }, trimmed_type) orelse
+            std.debug.panic("Unknown pointer type: {s}", .{trimmed_text});
+        switch (rest_of_type_expression) {
+            .@"*" => {},
+            .@"**" => {
+                result.ptrs.buffer[1] = .mutable;
+                result.ptrs.len = 2;
+            },
+            .@"* const*" => {
+                result.ptrs.buffer[1] = .@"const";
+                result.ptrs.len = 2;
+            },
+        }
+
+        return result;
+    }
+};
+
+const CVar = struct {
+    type: CType,
+    name: []const u8,
+
+    fn parse(it: XmlIterator) @This() {
+        var result: CVar = undefined;
+        result.type = .parse(it);
+        result.name = it.getNextBetweenTags();
+        return result;
+    }
+    fn deinit(self: *const @This()) void {
+        self.type.deinit();
+    }
+    pub fn format(self: *const @This(), writer: *Writer) Writer.Error!void {
+        writer.print("{s}: {f}", .{ self.name, self.type }) catch panicWrite();
+    }
+};
+
+const ZigVar = struct {
+    const Size = enum {
+        single,
+        many,
+    };
+    const Ptr = struct {
+        optional: bool,
+        size: Size,
+        kind: CType.Kind,
+    };
+
+    ptrs: slice_tools.BoundedArray(Ptr) = .empty,
+    base_type: VarType,
+
+    pub fn format(self: *const @This(), writer: *Writer) Writer.Error!void {
+        for (self.ptrs.constSlice()) |p| {
+            writer.print("{f} ", .{p}) catch panicWrite();
+        }
+        switch (self.base_type) {
+            .primitive => |p| writer.print("{s}", .{if (self.ptrs.len != 0 and p == .void) "anyopaque" else @tagName(p)}) catch panicWrite(),
+            .non_primitive => |p| writer.print("{s}", .{p}) catch panicWrite(),
+        }
+    }
+};
 
 pub fn main(init: std.process.Init) void {
     allocator = init.arena.allocator();
@@ -406,11 +635,12 @@ pub fn main(init: std.process.Init) void {
     } else @panic("Failed to find registry");
 
     var flags: Flags = .empty;
-    while (it.seekTags(enum { types, enums, commands, extensions })) |tag| switch (tag) {
+    while (it.seekTags(enum { types, enums, commands, extensions, @"/registry" })) |tag| switch (tag) {
         .types => parseTypes(it, &flags, writer, api),
         .enums => parseEnums(it),
         .commands => parseCommands(it),
         .extensions => parseExtensions(it),
+        .@"/registry" => break,
     };
 
     var f = flags.iterator();
