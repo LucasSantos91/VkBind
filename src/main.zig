@@ -447,6 +447,16 @@ fn stripPfnPrefix(str: []const u8) []const u8 {
     return slice_tools.safeSubslice(str, "PFN_vk".len, .unlimited) catch
         std.debug.panic("Tried to strip PFN_vk prefix but name is too short: {s}", .{str});
 }
+fn stripVK_Prefix(str: []const u8) []const u8 {
+    return slice_tools.safeSubslice(str, "VK_".len, .unlimited) catch
+        std.debug.panic("Tried to strip VK_ prefix but name is too short: {s}", .{str});
+}
+fn stripVK_PrefixIfNecessary(str: []const u8) []const u8 {
+    return if (std.mem.startsWith(u8, str, "VK_"))
+        str["VK_".len..]
+    else
+        str;
+}
 const PrefixKind = enum {
     none,
     vk,
@@ -567,8 +577,81 @@ fn parseFuncPointer(it: XmlIterator, writer: *Writer) void {
     }
     writer.print(")callconv(vk_callconv){f};", .{ret_type_and_name.type}) catch panicWrite();
 }
-fn parseEnums(it: XmlIterator) void {
-    _ = it;
+fn writeConstant(it: XmlIterator, writer: *Writer) void {
+    const t = switch (it.nextAttr(enum { type })) {
+        .close => @panic("Typeless constant"),
+        .success => |kv| kv.value,
+    };
+    const primitive = Primitive.parse(t) orelse std.debug.panic("Unknown type of constant: {s}", .{t});
+    const value = switch (it.nextAttr(enum { value })) {
+        .close => @panic("Constant without a value"),
+        .success => |kv| kv.value,
+    };
+    const trimmed = std.mem.trim(u8, value, " ");
+    const is_negation = std.mem.startsWith(u8, trimmed, "(~");
+    const number = std.mem.trim(u8, trimmed, " ()~uUlLfF");
+    const duped_number = dupe(number);
+    defer freeDupe(duped_number);
+
+    const name = switch (it.nextAttr(enum { name })) {
+        .close => @panic("Nameless constant"),
+        .success => |kv| kv.value,
+    };
+    const duped_name = dupe(stripVK_Prefix(name));
+    defer freeDupe(duped_name);
+
+    switch (it.nextAttr(enum { comment })) {
+        .success => |kv| {
+            printComment(kv.value, writer);
+            it.closeTagRegardless();
+        },
+        .close => |c| if (c != .@"/>") std.debug.panic("Enum {s} has content", .{duped_name}),
+    }
+    writer.print("pub const {s}:{t}=", .{ duped_name, primitive }) catch panicWrite();
+    if (is_negation) {
+        writer.print("~@as({t},{s});", .{ primitive, duped_number }) catch panicWrite();
+    } else {
+        writer.print("{s};", .{duped_number}) catch panicWrite();
+    }
+}
+fn parseEnums(it: XmlIterator, writer: *Writer, api: Api) void {
+    _ = api;
+    const name = switch (it.nextAttr(enum { name })) {
+        .close => @panic("Nameless enum"),
+        .success => |kv| dupe(kv.value),
+    };
+
+    const enum_type = switch (it.nextAttr(enum { type })) {
+        .close => @panic("Typeless enum"),
+        .success => |kv| slice_tools.enums.fromName(enum { constants, @"enum", bitmask }, kv.value) orelse
+            std.debug.panic("unknown enum type: {s}", .{kv.value})
+    };
+
+    const comment = switch (it.nextAttr(enum { comment })) {
+        .success => |kv| blk: {
+            const c = dupe(kv.value);
+            it.closeTagRegardless();
+            break :blk c;
+        },
+        .close => &.{},
+    };
+    defer freeDupe(comment);
+
+    switch (enum_type) {
+        .constants => while (it.seekTags(enum { @"enum", @"/enums" })) |t| switch (t) {
+            .@"enum" => writeConstant(it, writer),
+            .@"/enums" => {
+                it.closeTagRegardless();
+                break;
+            },
+        } else std.debug.panic("Unclosed enum: {s}", .{name}),
+        .@"enum" => {
+            if (comment.len != 0) printComment(comment, writer);
+        },
+        .bitmask => {
+            if (comment.len != 0) printComment(comment, writer);
+        },
+    }
 }
 fn parseCommands(it: XmlIterator) void {
     _ = it;
@@ -798,7 +881,11 @@ const CVar = struct {
     }
     pub fn format(self: *const @This(), writer: *Writer) Writer.Error!void {
         switch (self.amount) {
-            .array => |amount| writer.print("{s}:[{s}]{f}", .{ self.name, amount, self.type }) catch panicWrite(),
+            .array => |amount| writer.print("{s}:[{s}]{f}", .{
+                self.name,
+                stripVK_PrefixIfNecessary(amount),
+                self.type,
+            }) catch panicWrite(),
             .bitfield => |amount| {
                 writer.print("{s}:u{s}", .{ self.name, amount }) catch panicWrite();
             },
@@ -846,8 +933,8 @@ const ZigType = struct {
             const last_ptr = self.ptrs.buffer[self.ptrs.len - 1];
             writer.writeAll(if (last_ptr.size == .many) "u8" else "anyopaque") catch panicWrite();
         } else switch (self.amount) {
-            .array => |amount| writer.print("[{s}]{f}", .{ amount, self.base_type }) catch panicWrite(),
-            .bitfield => |amount| writer.print("u{s}", .{amount}) catch panicWrite(),
+            .array => |amount| writer.print("[{s}]{f}", .{ stripVK_PrefixIfNecessary(amount), self.base_type }) catch panicWrite(),
+            .bitfield => |amount| writer.print("u{s}", .{stripVK_PrefixIfNecessary(amount)}) catch panicWrite(),
             .single => writer.print("{f}", .{self.base_type}) catch panicWrite(),
         }
     }
@@ -895,7 +982,7 @@ pub fn main(init: std.process.Init) void {
     var flags: Flags = .empty;
     while (it.seekTags(enum { types, enums, commands, extensions, @"/registry" })) |tag| switch (tag) {
         .types => parseTypes(it, &flags, writer, api),
-        .enums => parseEnums(it),
+        .enums => parseEnums(it, writer, api),
         .commands => parseCommands(it),
         .extensions => parseExtensions(it),
         .@"/registry" => break,
