@@ -352,7 +352,17 @@ fn parseStructOrUnion(iterator: XmlIterator, is_struct: bool, writer: *Writer, a
                 else => unreachable,
             }
             // TODO: render bitfields properly
-            writer.print("{s}:{f},", .{ c_member.name, zig_type }) catch panicWrite();
+            writer.print("{s}:{f}", .{ c_member.name, zig_type }) catch panicWrite();
+            if (optional) {
+                const default_value = if (zig_type.ptrs.len != 0)
+                    "null"
+                else switch (zig_type.base_type) {
+                    .primitive => "0",
+                    .non_primitive => ".{}"
+                };
+                writer.print("={s}", .{default_value}) catch panicWrite();
+            }
+            writer.writeByte(',') catch panicWrite();
             _ = iterator.seekTagAndClose(enum { @"/member" });
         }
     } else std.debug.print("Unexpected end while parsing type: {s}", .{name});
@@ -765,9 +775,10 @@ const ZigType = struct {
         for (self.ptrs.constSlice()) |p| {
             writer.print("{f} ", .{p}) catch panicWrite();
         }
-        if (self.ptrs.len != 0 and self.base_type == .primitive and self.base_type.primitive == .void)
-            writer.writeAll("anyopaque") catch panicWrite()
-        else switch (self.amount) {
+        if (self.ptrs.len != 0 and self.base_type == .primitive and self.base_type.primitive == .void) {
+            const last_ptr = self.ptrs.buffer[self.ptrs.len - 1];
+            writer.writeAll(if (last_ptr.size == .many) "u8" else "anyopaque") catch panicWrite();
+        } else switch (self.amount) {
             .array => |amount| writer.print("[{s}]{f}", .{ amount, self.base_type }) catch panicWrite(),
             .bitfield => |amount| writer.print("u{s}", .{amount}) catch panicWrite(),
             .single => writer.print("{f}", .{self.base_type}) catch panicWrite(),
