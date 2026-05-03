@@ -282,6 +282,8 @@ fn parseStructOrUnion(iterator: XmlIterator, is_struct: bool, writer: *Writer, a
         },
     }
     writer.print("extern {s}{{", .{if (is_struct) "struct" else "union"}) catch panicWrite();
+    var in_packed_member = false;
+    var packed_count: usize = 0;
     member_loop: while (iterator.seekTags(enum { member, @"/type" })) |t| switch (t) {
         .@"/type" => break,
         .member => {
@@ -351,9 +353,22 @@ fn parseStructOrUnion(iterator: XmlIterator, is_struct: bool, writer: *Writer, a
                 },
                 else => unreachable,
             }
+            if (zig_type.amount == .bitfield) {
+                if (!in_packed_member) {
+                    in_packed_member = true;
+                    writer.print("p{}:packed struct{{", .{packed_count}) catch panicWrite();
+                    packed_count += 1;
+                }
+            } else {
+                if (in_packed_member) {
+                    in_packed_member = false;
+                    writer.writeAll("},") catch panicWrite();
+                }
+            }
+
             // TODO: render bitfields properly
             writer.print("{s}:{f}", .{ c_member.name, zig_type }) catch panicWrite();
-            if (optional) {
+            if (optional and !in_packed_member) {
                 const default_value = if (zig_type.ptrs.len != 0)
                     "null"
                 else switch (zig_type.base_type) {
@@ -366,6 +381,10 @@ fn parseStructOrUnion(iterator: XmlIterator, is_struct: bool, writer: *Writer, a
             _ = iterator.seekTagAndClose(enum { @"/member" });
         }
     } else std.debug.print("Unexpected end while parsing type: {s}", .{name});
+    if (in_packed_member) {
+        in_packed_member = false;
+        writer.writeAll("},") catch panicWrite();
+    }
     writer.writeAll("};") catch panicWrite();
 }
 
@@ -713,9 +732,8 @@ const CVar = struct {
                 },
                 ':' => {
                     it.reader.toss(1);
-                    const amount = it.reader.takeDelimiter('<') catch |e|
-                        panicTakeDel(e) orelse
-                        panicUnexpectedEnd();
+                    const amount = it.reader.takeDelimiterExclusive('<') catch |e|
+                        panicPeekDel(e);
                     result.amount = .{ .bitfield = amount };
                     return result;
                 },
