@@ -699,59 +699,88 @@ fn parseEnum(it: XmlIterator, api: Api, new_enum: *Enum) void {
     } else @panic("Unclosed enum");
 }
 const Bitmask = struct {
-    en: Enum,
-    aggregates: std.ArrayList(Enum.Entry) = .empty,
+    const Entry = struct {
+        name: []const u8,
+        bitpos: u8,
+        comment: []const u8,
+        pub fn deinit(self: @This()) void {
+            freeDupe(self.name);
+            freeDupe(self.comment);
+        }
+    };
+    const Entries = std.ArrayList(Entry);
+    const Aliases = std.ArrayList(Enum.Entry);
+    const Aggregates = std.ArrayList(Enum.Entry);
+
+    name: []const u8,
+    comment: []const u8,
+    entries: Entries = .empty,
+    aliases: Aliases = .empty,
+    aggregates: Aggregates = .empty,
 
     pub fn deinit(self: *@This()) void {
-        self.en.deinit();
+        freeDupe(self.name);
+        freeDupe(self.comment);
+        for (self.entries.items) |i| i.deinit();
+        self.entries.deinit(allocator);
+        for (self.aliases.items) |i| i.deinit();
+        self.aliases.deinit(allocator);
         for (self.aggregates.items) |i| {
             i.deinit();
         }
         self.aggregates.deinit(allocator);
+        self.* = undefined;
     }
 };
 const Bitmasks = std.ArrayList(Bitmask);
 fn parseBitmask(it: XmlIterator, api: Api, new_bitmask: *Bitmask) void {
     enum_loop: while (it.seekTags(enum { @"enum", @"/enums" })) |t| switch (t) {
         .@"enum" => {
-            var new_entry: Enum.Entry = .{
+            var new_entry: Bitmask.Entry = .{
                 .comment = &.{},
                 .name = &.{},
-                .value = &.{},
+                .bitpos = 0,
             };
+            var value: []const u8 = &.{};
             var is_alias = false;
             var is_aggregate = false;
             while (true) switch (it.nextAttr(enum { value, bitpos, api, name, comment, alias })) {
                 .close => break,
-                .success => |kv| sw: switch (kv.key) {
+                .success => |kv| switch (kv.key) {
                     .api => {
                         if (!api.match(kv.value)) continue :enum_loop;
                     },
                     .bitpos => {
-                        new_entry.value = dupe(kv.value);
+                        new_entry.bitpos = std.fmt.parseInt(u8, kv.value, 10) catch
+                            std.debug.panic("Failed to parse bitpos: {s}", .{kv.value});
                     },
                     .name => {
                         new_entry.name = dupe(stripVK_Prefix(kv.value));
                     },
                     .value => {
                         is_aggregate = true;
-                        continue :sw .bitpos;
+                        value = dupe(kv.value);
                     },
                     .alias => {
                         is_alias = true;
-                        new_entry.value = dupe(stripVK_Prefix(kv.value));
+                        value = dupe(stripVK_Prefix(kv.value));
                     },
                     .comment => {
                         new_entry.comment = dupe(trimComment(kv.value));
                     },
                 }
             };
+            const enum_entry: Enum.Entry = .{
+                .name = new_entry.name,
+                .value = value,
+                .comment = new_entry.comment,
+            };
             if (is_alias) {
-                new_bitmask.en.aliases.append(allocator, new_entry) catch panicOOM();
+                new_bitmask.aliases.append(allocator, enum_entry) catch panicOOM();
             } else if (is_aggregate) {
-                new_bitmask.aggregates.append(allocator, new_entry) catch panicOOM();
+                new_bitmask.aggregates.append(allocator, enum_entry) catch panicOOM();
             } else {
-                new_bitmask.en.entries.append(allocator, new_entry) catch panicOOM();
+                new_bitmask.entries.append(allocator, new_entry) catch panicOOM();
             }
         },
         .@"/enums" => return,
@@ -797,10 +826,10 @@ fn parseEnums(it: XmlIterator, writer: *Writer, api: Api, enums: *Enums, bitmask
         },
         .bitmask => {
             const new = bitmasks.addOne(allocator) catch panicOOM();
-            new.* = .{ .en = .{
+            new.* = .{
                 .name = name,
                 .comment = comment,
-            } };
+            };
             parseBitmask(it, api, new);
         },
     }
@@ -825,7 +854,7 @@ fn writeEnums(writer: *Writer, enums: *Enums) void {
 fn flagsNameFromFlagBits(buffer: *[]u8, name: []const u8) []u8 {
     const flagbits_text = "FlagBits";
     const flags_text = "Flags";
-    const flagbits_index = std.mem.find(u8, name, flagbits_text) orelse
+    const flagbits_index = std.mem.findLast(u8, name, flagbits_text) orelse
         std.debug.panic("Bitmask: {s} has no FlagBits in its name", .{name});
     if (buffer.len < name.len) {
         allocator.free(buffer.*);
@@ -838,7 +867,17 @@ fn flagsNameFromFlagBits(buffer: *[]u8, name: []const u8) []u8 {
     @memcpy(suffix_start, name[flagbits_index + flagbits_text.len ..]);
     return buffer.*[0 .. name.len - (flagbits_text.len - flags_text.len)];
 }
+fn countCapitalLetters(text: []const u8) usize {
+    var count: usize = 0;
+    for (text) |c| {
+        if (std.ascii.isUpper(c)) count += 1;
+    }
+    return count;
+}
 fn writeFlagBitsFunctions(writer: *Writer) void {
+    _ = writer;
+}
+fn writeFlagsFunctions(writer: *Writer) void {
     _ = writer;
 }
 fn writeBitmasks(writer: *Writer, bitmasks: *Bitmasks, flags: *Flags) void {
@@ -846,27 +885,65 @@ fn writeBitmasks(writer: *Writer, bitmasks: *Bitmasks, flags: *Flags) void {
     defer allocator.free(buffer);
 
     for (bitmasks.items) |*i| {
-        printComment(i.en.comment, writer);
-        const flags_name = flagsNameFromFlagBits(&buffer, i.en.name);
-        const kv = flags.fetchRemove(flags_name) orelse std.debug.panic("FlagBits {s} has no corresponding Flags", .{i.en.name});
+        printComment(i.comment, writer);
+        const lessThan = struct {
+            pub fn lessThan(_: void, lhs: Bitmask.Entry, rhs: Bitmask.Entry) bool {
+                return lhs.bitpos < rhs.bitpos;
+            }
+        }.lessThan;
+        std.sort.pdq(Bitmask.Entry, i.entries.items, void{}, lessThan);
+
+        const flags_name = flagsNameFromFlagBits(&buffer, i.name);
+        const kv = flags.fetchRemove(flags_name) orelse std.debug.panic("FlagBits {s} has no corresponding Flags", .{i.name});
         freeDupe(kv.key);
         const bits = kv.value;
-        writer.print("pub const {s}=enum({s}){{", .{ i.en.name, bits.toZig() }) catch panicWrite();
-        for (i.en.entries.items) |e| {
+        writer.print("pub const {s}=enum({s}){{", .{ i.name, bits.toZig() }) catch panicWrite();
+        for (i.entries.items) |e| {
             printComment(e.comment, writer);
-            writer.print("{s}=1<<{s},", .{ e.name, e.value }) catch panicWrite();
+            writer.print("{s}=1<<{},", .{ e.name, e.bitpos }) catch panicWrite();
         }
-        //for (i.aggregates.items) |e| {
-        //    printComment(e.comment, writer);
-        //    writer.print("pub const {s} = {s};", .{ e.name, e.value }) catch panicWrite();
-        //}
-        for (i.en.aliases.items) |e| {
+        for (i.aliases.items) |e| {
             printComment(e.comment, writer);
             writer.print("pub const {s} = @This().{s};", .{ e.name, e.value }) catch panicWrite();
         }
         writeFlagBitsFunctions(writer);
         writer.writeAll("};") catch panicWrite();
+
+        writer.print("pub const {s}=packed struct({s}){{", .{ flags_name, bits.toZig() }) catch panicWrite();
+        var prev_bit: u8 = undefined;
+        const rest = if (i.entries.items.len != 0) blk: {
+            const e = i.entries.items[0];
+            printComment(e.comment, writer);
+            writer.print("{s}:bool=false,", .{e.name}) catch panicWrite();
+            prev_bit = e.bitpos;
+            break :blk i.entries.items[1..];
+        } else i.entries.items;
+        for (rest) |e| {
+            const bit_diff = e.bitpos - prev_bit -| 1;
+            prev_bit = e.bitpos;
+            if (bit_diff > 1) {
+                writer.print("_reserved_{}: u{}=undefined,", .{ e.bitpos, bit_diff }) catch panicWrite();
+            }
+            printComment(e.comment, writer);
+            writer.print("{s}:bool=false,", .{e.name}) catch panicWrite();
+        }
+        for (i.aggregates.items) |e| {
+            printComment(e.comment, writer);
+            writer.print("pub const {s}:@This()=@bitCast({s});", .{ e.name, e.value }) catch panicWrite();
+        }
+        for (i.aliases.items) |e| {
+            printComment(e.comment, writer);
+            writer.print("pub const {s}=@This().{s};", .{ e.name, e.value }) catch panicWrite();
+        }
+        writeFlagsFunctions(writer);
+        writer.writeAll("};") catch panicWrite();
         i.deinit();
+    }
+
+    // Empty flags
+    var flags_it = flags.iterator();
+    while (flags_it.next()) |kv| {
+        writer.print("pub const {s}=packed struct({s}){{}};", .{ kv.key_ptr.*, kv.value_ptr.toZig() }) catch panicWrite();
     }
 }
 fn parseCommands(it: XmlIterator) void {
