@@ -11,3 +11,4 @@ pub const Bool32 = enum(u32) {
     false,
     true,
 };
+pub const VkRemoteAddressNV = *anyopaque;

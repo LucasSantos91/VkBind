@@ -254,6 +254,10 @@ fn parseFlag(flags: *Flags, iterator: XmlIterator, writer: *Writer) void {
     }
 }
 
+fn writeToLower(writer: *Writer, text: []const u8) void {
+    for (text) |c| writer.writeByte(std.ascii.toLower(c)) catch panicWrite();
+}
+
 const Categories = enum {
     bitmask,
     @"struct",
@@ -262,10 +266,96 @@ const Categories = enum {
     @"enum",
     funcpointer,
 };
-fn parseStructOrUnion(iterator: XmlIterator, is_struct: bool, writer: *Writer) void {
-    _ = writer; // autofix
-    _ = iterator;
-    _ = is_struct;
+fn parseStructOrUnion(iterator: XmlIterator, is_struct: bool, writer: *Writer, api: Api) void {
+    const name_attr = (iterator.nextAttr(enum { name }));
+    if (name_attr == .close) @panic("Nameless struct");
+    const name = name_attr.success.value;
+    writer.print("pub const {s}=", .{name}) catch panicWrite();
+
+    switch (iterator.nextAttr(enum { alias })) {
+        .success => |kv2| {
+            writer.print("{s};", .{kv2.value}) catch panicWrite();
+            return;
+        },
+        .close => |c| {
+            if (c != .@">") std.debug.panic("Unexpected end for type: {s}", .{name});
+        },
+    }
+    writer.print("extern {s}{{", .{if (is_struct) "struct" else "union"}) catch panicWrite();
+    member_loop: while (iterator.seekTags(enum { member, @"/type" })) |t| switch (t) {
+        .@"/type" => break,
+        .member => {
+            var optional: bool = false;
+            var len: ZigType.Size = .single;
+            while (true) {
+                switch (iterator.nextAttr(enum { api, values, optional, len })) {
+                    .success => |kv| switch (kv.key) {
+                        .api => {
+                            if (!api.match(kv.value)) {
+                                _ = iterator.seekTagAndClose(enum { @"/member" });
+                                continue :member_loop;
+                            }
+                        },
+                        .values => {
+                            writer.writeAll("sType: StructureType=.") catch panicWrite();
+                            const trimmed = slice_tools.safeSubslice(kv.value, "VK_STRUCTURE_TYPE_".len, .unlimited) catch
+                                std.debug.panic("Structure type has name too short: {s}", .{kv.value});
+                            writeToLower(writer, trimmed);
+                            writer.writeByte(',') catch panicWrite();
+                            _ = iterator.seekTagAndClose(enum { @"/member" });
+                            continue :member_loop;
+                        },
+                        .optional => {
+                            optional = true;
+                        },
+                        .len => {
+                            len = if (std.mem.eql(u8, kv.value, "null-terminated"))
+                                .null_terminated
+                            else
+                                .many;
+                        },
+                    },
+                    .close => |c| {
+                        if (c == .@"/>") std.debug.panic("Unexpected end to type: {s}", .{name});
+                        break;
+                    },
+                }
+            }
+            const c_member = CVar.parse(iterator);
+            defer c_member.deinit();
+            var zig_type: ZigType = .{
+                .base_type = c_member.type.base_type,
+                .ptrs = .{ .len = c_member.type.ptrs.len },
+            };
+            switch (zig_type.ptrs.len) {
+                0 => {},
+                1 => {
+                    zig_type.ptrs.buffer[0] = .{
+                        .optional = optional,
+                        .size = len,
+                        .kind = c_member.type.ptrs.buffer[0],
+                    };
+                },
+                2 => {
+                    zig_type.ptrs.buffer[0] = .{
+                        .optional = false,
+                        .size = .single,
+                        .kind = .mutable,
+                    };
+                    zig_type.ptrs.buffer[1] = .{
+                        .optional = optional,
+                        .size = len,
+                        .kind = c_member.type.ptrs.buffer[1],
+                    };
+                },
+                else => unreachable,
+            }
+
+            writer.print("{s}:{f},", .{ c_member.name, zig_type }) catch panicWrite();
+            _ = iterator.seekTagAndClose(enum { @"/member" });
+        }
+    } else std.debug.print("Unexpected end while parsing type: {s}", .{name});
+    writer.writeAll("};") catch panicWrite();
 }
 
 pub fn handleClose(c: XmlIterator.ClosingTag, iterator: XmlIterator) void {
@@ -293,6 +383,7 @@ fn stripPfnPrefix(str: []const u8) []const u8 {
         std.debug.panic("Tried to strip PFN_vk prefix but name is too short: {s}", .{str});
 }
 const PrefixKind = enum {
+    none,
     vk,
     Vk,
     PFN_vk,
@@ -301,7 +392,7 @@ fn stripPrefix(name: []const u8) struct { PrefixKind, []const u8 } {
     if (std.mem.startsWith(u8, name, @tagName(PrefixKind.vk))) return .{ .vk, name[2..] };
     if (std.mem.startsWith(u8, name, @tagName(PrefixKind.Vk))) return .{ .Vk, name[2..] };
     if (std.mem.startsWith(u8, name, @tagName(PrefixKind.PFN_vk))) return .{ .Vk, name[@tagName(PrefixKind.PFN_vk).len..] };
-    std.debug.panic("Name has no prefix: {s}", .{name});
+    return .{ .none, name };
 }
 
 const Api = enum {
@@ -340,7 +431,7 @@ fn parseTypes(it: XmlIterator, flags: *Flags, writer: *Writer, api: Api) void {
                     };
                     switch (category) {
                         .bitmask => parseFlag(flags, it, writer),
-                        .@"struct", .@"union" => |k| parseStructOrUnion(it, k == .@"struct", writer),
+                        .@"struct", .@"union" => |k| parseStructOrUnion(it, k == .@"struct", writer, api),
                         .handle => parseHandle(it, writer),
                         .@"enum" => {
                             // If category="enum" is hit before name=, it means this is an alias
@@ -437,7 +528,7 @@ const Primitive = enum {
         void,
         char,
         uint8_t,
-        uint_16t,
+        uint16_t,
         uint32_t,
         uint64_t,
         int32_t,
@@ -452,7 +543,7 @@ const Primitive = enum {
         return switch (e) {
             .void => .void,
             .char, .uint8_t => .u8,
-            .uint_16t => .u16,
+            .uint16_t => .u16,
             .uint32_t => .u32,
             .uint64_t => .u64,
             .int32_t => .i32,
@@ -474,7 +565,7 @@ const VarType = union(enum) {
                 const kind, const stripped = stripPrefix(n);
                 switch (kind) {
                     .vk => std.debug.panic("Type starts with `vk`: {s}", .{n}),
-                    .Vk => writer.writeAll(stripped) catch panicWrite(),
+                    .none, .Vk => writer.writeAll(stripped) catch panicWrite(),
                     .PFN_vk => writer.print("Pfn{s}", .{stripped}) catch panicWrite(),
                 }
             }
@@ -505,8 +596,9 @@ const CType = struct {
             if (self == .@"const") writer.writeAll("const") catch panicWrite();
         }
     };
+    const max_ptr_layer = 2;
 
-    ptrs: slice_tools.BoundedArray(Kind, 2) = .{},
+    ptrs: slice_tools.BoundedArray(Kind, max_ptr_layer) = .{},
     base_type: VarType,
 
     pub fn deinit(self: *const @This()) void {
@@ -530,7 +622,7 @@ const CType = struct {
         const text = it.reader.takeDelimiterExclusive('<') catch |e| panicPeekDel(e);
         var result: CType = .{ .base_type = undefined };
         const trimmed_text = std.mem.trim(u8, text, " ");
-        const is_const = std.mem.eql(u8, trimmed_text, "const");
+        const is_const = std.mem.startsWith(u8, trimmed_text, "const");
         if (is_const) {
             result.ptrs.buffer[0] = .@"const";
             result.ptrs.len = 1;
@@ -538,25 +630,33 @@ const CType = struct {
         const c_type = it.getNextBetweenTags();
         result.base_type = .parse(c_type);
         it.closeTagRegardless();
-        const rest_of_type = it.reader.takeDelimiterExclusive('<') catch |e| panicPeekDel(e);
-        const trimmed_type = std.mem.trim(u8, rest_of_type, " ");
-        if (trimmed_type.len == 0) {
-            if (is_const) @panic("Expected pointer");
-            return result;
+        if (is_const) {
+            _ = it.reader.discardDelimiterInclusive('*') catch |e| panicRead(e);
         }
-        if (!is_const) result.ptrs.appendAssumeCapacity(.mutable);
-        const rest_of_type_expression = slice_tools.enums.fromName(enum { @"*", @"**", @"* const*" }, trimmed_type) orelse
-            std.debug.panic("Unknown pointer type: {s}", .{trimmed_text});
-        switch (rest_of_type_expression) {
-            .@"*" => {},
-            .@"**" => {
-                result.ptrs.buffer[1] = .mutable;
-                result.ptrs.len = 2;
-            },
-            .@"* const*" => {
-                result.ptrs.buffer[1] = .@"const";
-                result.ptrs.len = 2;
-            },
+        while (true) {
+            const b = it.reader.peekByte() catch |e| panicRead(e);
+            sw: switch (b) {
+                '<' => break,
+                ' ' => {
+                    it.reader.toss(1);
+                },
+                '*' => {
+                    result.ptrs.appendAssumeCapacity(.mutable);
+                    if (result.ptrs.len == CType.max_ptr_layer) {
+                        _ = it.reader.discardDelimiterExclusive('<') catch panicReadFailed();
+                        break;
+                    }
+                    continue :sw ' ';
+                },
+                'c' => {
+                    result.ptrs.appendAssumeCapacity(.@"const");
+                    _ = it.reader.discardDelimiterExclusive('<') catch panicReadFailed();
+                    break;
+                },
+                else => {
+                    std.debug.panic("Unexpected byte when parsing type: {c}", .{b});
+                },
+            }
         }
 
         return result;
@@ -581,28 +681,44 @@ const CVar = struct {
     }
 };
 
-const ZigVar = struct {
+const ZigType = struct {
     const Size = enum {
         single,
         many,
+        null_terminated,
     };
     const Ptr = struct {
         optional: bool,
         size: Size,
         kind: CType.Kind,
+
+        pub fn format(self: *const @This(), writer: *Writer) Writer.Error!void {
+            writer.print(
+                "{s}{s}{s}",
+                .{
+                    if (self.optional) "?" else "",
+                    switch (self.size) {
+                        .single => "*",
+                        .many => "[*]",
+                        .null_terminated => "[*:0]",
+                    },
+                    if (self.kind == .@"const") "const" else "",
+                },
+            ) catch panicWrite();
+        }
     };
 
-    ptrs: slice_tools.BoundedArray(Ptr) = .empty,
+    ptrs: slice_tools.BoundedArray(Ptr, 2) = .{},
     base_type: VarType,
 
     pub fn format(self: *const @This(), writer: *Writer) Writer.Error!void {
         for (self.ptrs.constSlice()) |p| {
             writer.print("{f} ", .{p}) catch panicWrite();
         }
-        switch (self.base_type) {
-            .primitive => |p| writer.print("{s}", .{if (self.ptrs.len != 0 and p == .void) "anyopaque" else @tagName(p)}) catch panicWrite(),
-            .non_primitive => |p| writer.print("{s}", .{p}) catch panicWrite(),
-        }
+        if (self.ptrs.len != 0 and self.base_type == .primitive and self.base_type.primitive == .void)
+            writer.writeAll("anyopaque") catch panicWrite()
+        else
+            writer.print("{f}", .{self.base_type}) catch panicWrite();
     }
 };
 
