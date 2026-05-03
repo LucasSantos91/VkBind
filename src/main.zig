@@ -270,11 +270,11 @@ fn parseStructOrUnion(iterator: XmlIterator, is_struct: bool, writer: *Writer, a
     const name_attr = (iterator.nextAttr(enum { name }));
     if (name_attr == .close) @panic("Nameless struct");
     const name = name_attr.success.value;
-    writer.print("pub const {s}=", .{name}) catch panicWrite();
+    writer.print("pub const {s}=", .{stripVkPrefix(name)}) catch panicWrite();
 
     switch (iterator.nextAttr(enum { alias })) {
         .success => |kv2| {
-            writer.print("{s};", .{kv2.value}) catch panicWrite();
+            writer.print("{s};", .{stripVkPrefix(kv2.value)}) catch panicWrite();
             return;
         },
         .close => |c| {
