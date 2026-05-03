@@ -326,6 +326,7 @@ fn parseStructOrUnion(iterator: XmlIterator, is_struct: bool, writer: *Writer, a
             var zig_type: ZigType = .{
                 .base_type = c_member.type.base_type,
                 .ptrs = .{ .len = c_member.type.ptrs.len },
+                .amount = c_member.amount,
             };
             switch (zig_type.ptrs.len) {
                 0 => {},
@@ -350,7 +351,7 @@ fn parseStructOrUnion(iterator: XmlIterator, is_struct: bool, writer: *Writer, a
                 },
                 else => unreachable,
             }
-
+            // TODO: render bitfields properly
             writer.print("{s}:{f},", .{ c_member.name, zig_type }) catch panicWrite();
             _ = iterator.seekTagAndClose(enum { @"/member" });
         }
@@ -664,20 +665,68 @@ const CType = struct {
 };
 
 const CVar = struct {
+    const Amount = union(enum) {
+        array: []const u8,
+        bitfield: []const u8,
+        single,
+    };
     type: CType,
     name: []const u8,
+    amount: Amount,
 
     fn parse(it: XmlIterator) @This() {
         var result: CVar = undefined;
         result.type = .parse(it);
-        result.name = it.getNextBetweenTags();
+        result.name = dupe(it.getNextBetweenTags());
+        it.closeTagRegardless();
+        while (true) {
+            const b = it.reader.peekByte() catch |e| panicRead(e);
+            switch (b) {
+                ' ' => it.reader.toss(1),
+                '<' => {
+                    result.amount = .single;
+                    return result;
+                },
+                '[' => {
+                    it.reader.toss(1);
+                    var amount = it.reader.takeDelimiter(']') catch |e|
+                        panicTakeDel(e) orelse
+                        @panic("Missing ']' in array");
+                    if (std.mem.findScalar(u8, amount, '>')) |enum_start| {
+                        amount = slice_tools.safeSubslice(amount, enum_start + 1, .unlimited) catch @panic("Malformed array size");
+                        const enum_end = std.mem.findScalar(u8, amount, '<') orelse @panic("Unclosed enum in array amount");
+                        result.amount = .{ .array = amount[0..enum_end] };
+                    } else {
+                        result.amount = .{ .array = amount };
+                    }
+                    return result;
+                },
+                ':' => {
+                    it.reader.toss(1);
+                    const amount = it.reader.takeDelimiter('<') catch |e|
+                        panicTakeDel(e) orelse
+                        panicUnexpectedEnd();
+                    result.amount = .{ .bitfield = amount };
+                    return result;
+                },
+                else => std.debug.panic("Unexpected byte when parsing type: {c}", .{b}),
+            }
+        }
+
         return result;
     }
     fn deinit(self: *const @This()) void {
+        freeDupe(self.name);
         self.type.deinit();
     }
     pub fn format(self: *const @This(), writer: *Writer) Writer.Error!void {
-        writer.print("{s}: {f}", .{ self.name, self.type }) catch panicWrite();
+        switch (self.amount) {
+            .array => |amount| writer.print("{s}:[{s}]{f}", .{ self.name, amount, self.type }) catch panicWrite(),
+            .bitfield => |amount| {
+                writer.print("{s}:u{s}", .{ self.name, amount }) catch panicWrite();
+            },
+            .single => writer.print("{s}:{f}", .{ self.name, self.type }) catch panicWrite(),
+        }
     }
 };
 
@@ -710,6 +759,7 @@ const ZigType = struct {
 
     ptrs: slice_tools.BoundedArray(Ptr, 2) = .{},
     base_type: VarType,
+    amount: CVar.Amount,
 
     pub fn format(self: *const @This(), writer: *Writer) Writer.Error!void {
         for (self.ptrs.constSlice()) |p| {
@@ -717,8 +767,11 @@ const ZigType = struct {
         }
         if (self.ptrs.len != 0 and self.base_type == .primitive and self.base_type.primitive == .void)
             writer.writeAll("anyopaque") catch panicWrite()
-        else
-            writer.print("{f}", .{self.base_type}) catch panicWrite();
+        else switch (self.amount) {
+            .array => |amount| writer.print("[{s}]{f}", .{ amount, self.base_type }) catch panicWrite(),
+            .bitfield => |amount| writer.print("u{s}", .{amount}) catch panicWrite(),
+            .single => writer.print("{f}", .{self.base_type}) catch panicWrite(),
+        }
     }
 };
 
