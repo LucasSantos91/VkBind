@@ -499,6 +499,11 @@ const CType = struct {
     const Kind = enum {
         @"const",
         mutable,
+
+        pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+            writer.writeAll("[*c]") catch panicWrite();
+            if (self == .@"const") writer.writeAll("const") catch panicWrite();
+        }
     };
 
     ptrs: slice_tools.BoundedArray(Kind, 2) = .{},
@@ -508,11 +513,17 @@ const CType = struct {
         self.base_type.deinit();
     }
     pub fn format(self: *const @This(), writer: *Writer) Writer.Error!void {
-        for (self.ptrs.constSlice()) |p| {
-            writer.writeAll("[*c]") catch panicWrite();
-            if (p == .@"const") writer.writeAll("const ") catch panicWrite();
+        if (self.base_type == .primitive and self.base_type.primitive == .void and self.ptrs.len != 0) {
+            for (self.ptrs.buffer[0..self.ptrs.len -| 1]) |p| {
+                writer.print("{f} ", .{p}) catch panicWrite();
+            }
+            writer.print("?*{s} anyopaque", .{if (self.ptrs.buffer[0] == .@"const") "const" else ""}) catch panicWrite();
+        } else {
+            for (self.ptrs.constSlice()) |p| {
+                writer.print("{f} ", .{p}) catch panicWrite();
+            }
+            writer.print("{f}", .{self.base_type}) catch panicWrite();
         }
-        writer.print("{f}", .{self.base_type}) catch panicWrite();
     }
 
     fn parse(it: XmlIterator) @This() {
