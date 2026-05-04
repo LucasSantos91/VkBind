@@ -637,6 +637,17 @@ fn stripPrefixAndLowerCaps(text: []const u8, prefix_size: usize) []const u8 {
     const trimmed = if (text.len > prefix_size) text[prefix_size..] else text;
     return std.ascii.allocLowerString(allocator, trimmed) catch panicOOM();
 }
+fn stripPrefixAndLowerCapsWithoutBitSuffix(text: []const u8, prefix_size: usize) []const u8 {
+    const trimmed = if (text.len > prefix_size) text[prefix_size..] else text;
+    const bits = "_BIT";
+    const bits_index = std.mem.findLast(u8, trimmed, bits) orelse
+        return std.ascii.allocLowerString(allocator, trimmed) catch panicOOM();
+    const new_len = trimmed.len - bits.len;
+    const ret = allocator.alloc(u8, new_len) catch panicOOM();
+    _ = std.ascii.lowerString(ret, trimmed[0..bits_index]);
+    _ = std.ascii.lowerString(ret[bits_index..], trimmed[bits_index + bits.len ..]);
+    return ret;
+}
 
 const Enum = struct {
     const Entry = struct {
@@ -765,15 +776,15 @@ fn parseBitmask(it: XmlIterator, api: Api, new_bitmask: *Bitmask, prefix_size: u
                             std.debug.panic("Failed to parse bitpos: {s}", .{kv.value});
                     },
                     .name => {
-                        new_entry.name = stripPrefixAndLowerCaps(kv.value, prefix_size);
+                        new_entry.name = stripPrefixAndLowerCapsWithoutBitSuffix(kv.value, prefix_size);
                     },
                     .value => {
                         is_aggregate = true;
-                        value = stripPrefixAndLowerCaps(kv.value, prefix_size);
+                        value = stripPrefixAndLowerCapsWithoutBitSuffix(kv.value, prefix_size);
                     },
                     .alias => {
                         is_alias = true;
-                        value = stripPrefixAndLowerCaps(kv.value, prefix_size);
+                        value = stripPrefixAndLowerCapsWithoutBitSuffix(kv.value, prefix_size);
                     },
                     .comment => {
                         new_entry.comment = dupe(trimComment(kv.value));
