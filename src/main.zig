@@ -876,6 +876,22 @@ fn flagsNameFromFlagBits(buffer: *[]u8, name: []const u8) []u8 {
     @memcpy(suffix_start, name[flagbits_index + flagbits_text.len ..]);
     return buffer.*[0 .. name.len - (flagbits_text.len - flags_text.len)];
 }
+fn flagBitsNameFromFlags(buffer: *[]u8, name: []const u8) []u8 {
+    const flagbits_text = "FlagBits";
+    const flags_text = "Flags";
+    const flags_index = std.mem.findLast(u8, name, flags_text) orelse
+        std.debug.panic("Bitmask: {s} has no Flags in its name", .{name});
+    if (buffer.len < name.len) {
+        allocator.free(buffer.*);
+        buffer.* = allocator.alloc(u8, name.len) catch panicOOM();
+    }
+    @memcpy(buffer.ptr, name[0..flags_index]);
+    const flags_start = buffer.ptr + flags_index;
+    @memcpy(flags_start, flagbits_text);
+    const suffix_start = flags_start + flagbits_text.len;
+    @memcpy(suffix_start, name[flags_index + flags_text.len ..]);
+    return buffer.*[0 .. name.len + (flagbits_text.len - flags_text.len)];
+}
 fn countCapitalLetters(text: []const u8) usize {
     var count: usize = 0;
     for (text) |c| {
@@ -902,11 +918,23 @@ fn getEnumPrefixLenFromName(name: []const u8) usize {
     const caps_count = countCapitalLetters(without_author);
     return "VK_".len + without_author.len + caps_count;
 }
-fn writeFlagBitsFunctions(writer: *Writer) void {
-    _ = writer;
+fn writeFlagBitsFunctions(writer: *Writer, flags_name: []const u8, flag_bits_name: []const u8) void {
+    writer.print(
+        \\ pub const toFlags = FlagBitsMixin({[flags_name]s}, {[flag_bits_name]s}).toFlags;
+        \\ pub const fromFlags = FlagBitsMixin({[flags_name]s}, {[flag_bits_name]s}).fromFlags;
+    , .{ .flags_name = flags_name, .flag_bits_name = flag_bits_name }) catch panicWrite();
 }
-fn writeFlagsFunctions(writer: *Writer) void {
-    _ = writer;
+fn writeFlagsFunctions(writer: *Writer, flags_name: []const u8, flag_bits_name: []const u8) void {
+    writer.print(
+        \\ pub const merge = FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).merge;
+        \\ pub const intersection = FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).intersection;
+        \\ pub const negation = FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).negation;
+        \\ pub const difference = FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).difference;
+        \\ pub const toBit = FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).toBit;
+        \\ pub const fromBit = FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).fromBit;
+        \\ pub const set = FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).set;
+        \\ pub const unset = FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).unset;
+    , .{ .flags_name = flags_name, .flag_bits_name = flag_bits_name }) catch panicWrite();
 }
 fn writeBitmasks(writer: *Writer, bitmasks: *Bitmasks, flags: *Flags) void {
     var buffer: []u8 = &.{};
@@ -934,7 +962,7 @@ fn writeBitmasks(writer: *Writer, bitmasks: *Bitmasks, flags: *Flags) void {
             printComment(e.comment, writer);
             writer.print("pub const @\"{s}\" = @This().{s};", .{ e.name, e.value }) catch panicWrite();
         }
-        writeFlagBitsFunctions(writer);
+        writeFlagBitsFunctions(writer, flags_name, i.name);
         writer.writeAll("};") catch panicWrite();
 
         writer.print("pub const {s}=packed struct({s}){{", .{ flags_name, bits.toZig() }) catch panicWrite();
@@ -963,7 +991,7 @@ fn writeBitmasks(writer: *Writer, bitmasks: *Bitmasks, flags: *Flags) void {
             printComment(e.comment, writer);
             writer.print("pub const @\"{s}\"=@This().{s};", .{ e.name, e.value }) catch panicWrite();
         }
-        writeFlagsFunctions(writer);
+        writeFlagsFunctions(writer, flags_name, i.name);
         writer.writeAll("};") catch panicWrite();
         i.deinit();
     }
@@ -971,7 +999,14 @@ fn writeBitmasks(writer: *Writer, bitmasks: *Bitmasks, flags: *Flags) void {
     // Empty flags
     var flags_it = flags.iterator();
     while (flags_it.next()) |kv| {
-        writer.print("pub const {s}=packed struct({s}){{}};", .{ kv.key_ptr.*, kv.value_ptr.toZig() }) catch panicWrite();
+        const flags_name = kv.key_ptr.*;
+        const flag_bits_name = flagBitsNameFromFlags(&buffer, flags_name);
+        const zig_type = kv.value_ptr.toZig();
+        writer.print("pub const {s}=packed struct({s}){{", .{ flags_name, zig_type }) catch panicWrite();
+        writeFlagsFunctions(writer, flags_name, flag_bits_name);
+        writer.print("}};pub const {s}=enum({s}){{", .{ flag_bits_name, zig_type }) catch panicWrite();
+        writeFlagBitsFunctions(writer, flags_name, flag_bits_name);
+        writer.writeAll("};") catch panicWrite();
     }
 }
 fn parseCommands(it: XmlIterator) void {
@@ -1291,7 +1326,7 @@ pub fn main(init: std.process.Init) void {
             }
         }
     }
-    //writer.writeAll(@embedFile("preamble.zig")) catch panicWrite();
+    writer.writeAll(@embedFile("preamble.zig")) catch panicWrite();
 
     const it: XmlIterator = .{ .reader = &stdin_reader.interface };
     // Skip the <?...?>
