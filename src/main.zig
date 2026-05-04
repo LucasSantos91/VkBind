@@ -452,6 +452,10 @@ fn dupe(str: []const u8) []const u8 {
 fn freeDupe(str: []const u8) void {
     allocator.free(str);
 }
+fn stripLen(str: []const u8, len: usize) []const u8 {
+    return slice_tools.safeSubslice(str, len, .unlimited) catch
+        std.debug.panic("Tried to strip {} chars, but name is too short: {s}", .{ len, str });
+}
 fn stripVkPrefix(str: []const u8) []const u8 {
     return slice_tools.safeSubslice(str, 2, .unlimited) catch
         std.debug.panic("Tried to strip vk prefix but name is too short: {s}", .{str});
@@ -659,7 +663,7 @@ const Enum = struct {
 };
 const Enums = std.ArrayList(Enum);
 
-fn parseEnum(it: XmlIterator, api: Api, new_enum: *Enum) void {
+fn parseEnum(it: XmlIterator, api: Api, new_enum: *Enum, prefix_size: usize) void {
     enum_loop: while (it.seekTags(enum { @"enum", @"/enums" })) |t| switch (t) {
         .@"enum" => {
             var new_entry: Enum.Entry = .{
@@ -678,11 +682,14 @@ fn parseEnum(it: XmlIterator, api: Api, new_enum: *Enum) void {
                         new_entry.value = dupe(kv.value);
                     },
                     .name => {
-                        new_entry.name = dupe(stripVK_Prefix(kv.value));
+                        // Stupid VK_QUERY_SCOPE_ renaming
+                        const trimmed = if (kv.value.len > prefix_size) kv.value[prefix_size..] else kv.value;
+                        new_entry.name = std.ascii.allocLowerString(allocator, trimmed) catch panicOOM();
                     },
                     .alias => {
                         is_alias = true;
-                        new_entry.value = dupe(stripVK_Prefix(kv.value));
+                        const trimmed = if (kv.value.len > prefix_size) kv.value[prefix_size..] else kv.value;
+                        new_entry.value = std.ascii.allocLowerString(allocator, trimmed) catch panicOOM();
                     },
                     .comment => {
                         new_entry.comment = dupe(trimComment(kv.value));
@@ -808,6 +815,8 @@ fn parseEnums(it: XmlIterator, writer: *Writer, api: Api, enums: *Enums, bitmask
         .close => &.{},
     };
 
+    const prefix = getEnumPrefixLenFromName(name);
+
     switch (enum_type) {
         .constants => while (it.seekTags(enum { @"enum", @"/enums" })) |t| switch (t) {
             .@"enum" => writeConstant(it, writer),
@@ -822,7 +831,7 @@ fn parseEnums(it: XmlIterator, writer: *Writer, api: Api, enums: *Enums, bitmask
                 .name = name,
                 .comment = comment,
             };
-            parseEnum(it, api, new);
+            parseEnum(it, api, new, prefix);
         },
         .bitmask => {
             const new = bitmasks.addOne(allocator) catch panicOOM();
@@ -841,11 +850,11 @@ fn writeEnums(writer: *Writer, enums: *Enums) void {
         writer.print("pub const {s}=enum(c_int){{", .{i.name}) catch panicWrite();
         for (i.entries.items) |e| {
             printComment(e.comment, writer);
-            writer.print("{s}={s},", .{ e.name, e.value }) catch panicWrite();
+            writer.print("@\"{s}\"={s},", .{ e.name, e.value }) catch panicWrite();
         }
         for (i.aliases.items) |e| {
             printComment(e.comment, writer);
-            writer.print("pub const {s} = @This().{s};", .{ e.name, e.value }) catch panicWrite();
+            writer.print("pub const @\"{s}\" = @This().@\"{s}\";", .{ e.name, e.value }) catch panicWrite();
         }
         writer.writeAll("};") catch panicWrite();
         i.deinit();
@@ -874,6 +883,25 @@ fn countCapitalLetters(text: []const u8) usize {
     }
     return count;
 }
+fn getAuthorTagLen(text: []const u8) usize {
+    var last = text.ptr + text.len;
+    var count: usize = 0;
+    while (last != text.ptr) {
+        last -= 1;
+        if (std.ascii.isUpper(last[0])) {
+            count += 1;
+        } else return count;
+    }
+    return count;
+}
+
+/// Name must be without VK_ prefix
+fn getEnumPrefixLenFromName(name: []const u8) usize {
+    const author_tag = getAuthorTagLen(name);
+    const without_author = name[0 .. name.len - author_tag];
+    const caps_count = countCapitalLetters(without_author);
+    return "VK_".len + without_author.len + caps_count;
+}
 fn writeFlagBitsFunctions(writer: *Writer) void {
     _ = writer;
 }
@@ -900,11 +928,11 @@ fn writeBitmasks(writer: *Writer, bitmasks: *Bitmasks, flags: *Flags) void {
         writer.print("pub const {s}=enum({s}){{", .{ i.name, bits.toZig() }) catch panicWrite();
         for (i.entries.items) |e| {
             printComment(e.comment, writer);
-            writer.print("{s}=1<<{},", .{ e.name, e.bitpos }) catch panicWrite();
+            writer.print("@\"{s}\"=1<<{},", .{ e.name, e.bitpos }) catch panicWrite();
         }
         for (i.aliases.items) |e| {
             printComment(e.comment, writer);
-            writer.print("pub const {s} = @This().{s};", .{ e.name, e.value }) catch panicWrite();
+            writer.print("pub const @\"{s}\" = @This().{s};", .{ e.name, e.value }) catch panicWrite();
         }
         writeFlagBitsFunctions(writer);
         writer.writeAll("};") catch panicWrite();
@@ -914,7 +942,7 @@ fn writeBitmasks(writer: *Writer, bitmasks: *Bitmasks, flags: *Flags) void {
         const rest = if (i.entries.items.len != 0) blk: {
             const e = i.entries.items[0];
             printComment(e.comment, writer);
-            writer.print("{s}:bool=false,", .{e.name}) catch panicWrite();
+            writer.print("@\"{s}\":bool=false,", .{e.name}) catch panicWrite();
             prev_bit = e.bitpos;
             break :blk i.entries.items[1..];
         } else i.entries.items;
@@ -925,15 +953,15 @@ fn writeBitmasks(writer: *Writer, bitmasks: *Bitmasks, flags: *Flags) void {
                 writer.print("_reserved_{}: u{}=undefined,", .{ e.bitpos, bit_diff }) catch panicWrite();
             }
             printComment(e.comment, writer);
-            writer.print("{s}:bool=false,", .{e.name}) catch panicWrite();
+            writer.print("@\"{s}\":bool=false,", .{e.name}) catch panicWrite();
         }
         for (i.aggregates.items) |e| {
             printComment(e.comment, writer);
-            writer.print("pub const {s}:@This()=@bitCast({s});", .{ e.name, e.value }) catch panicWrite();
+            writer.print("pub const @\"{s}\":@This()=@bitCast({s});", .{ e.name, e.value }) catch panicWrite();
         }
         for (i.aliases.items) |e| {
             printComment(e.comment, writer);
-            writer.print("pub const {s}=@This().{s};", .{ e.name, e.value }) catch panicWrite();
+            writer.print("pub const @\"{s}\"=@This().{s};", .{ e.name, e.value }) catch panicWrite();
         }
         writeFlagsFunctions(writer);
         writer.writeAll("};") catch panicWrite();
