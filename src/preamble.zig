@@ -15,32 +15,31 @@ pub const VkRemoteAddressNV = *anyopaque;
 
 pub fn FlagsMixin(comptime Flags: type, comptime FlagBits: type) type {
     return struct {
-        const BaseType = @typeInfo(Flags).@"struct".backing_integer.?;
-
+        const BackingInt = @typeInfo(Flags).@"struct".backing_integer.?;
+        pub fn toInt(self: Flags) BackingInt {
+            return @bitCast(self);
+        }
+        pub fn fromInt(int: BackingInt) Flags {
+            return @bitCast(int);
+        }
         pub fn merge(lhs: Flags, rhs: Flags) Flags {
-            const l: BaseType = @bitCast(lhs);
-            const r: BaseType = @bitCast(rhs);
-            return l | r;
+            return fromInt(toInt(lhs) | toInt(rhs));
         }
         pub fn intersection(lhs: Flags, rhs: Flags) Flags {
-            const l: BaseType = @bitCast(lhs);
-            const r: BaseType = @bitCast(rhs);
-            return l & r;
+            return fromInt(toInt(lhs) & toInt(rhs));
         }
         pub fn negation(self: Flags) Flags {
-            const s: BaseType = @bitCast(self);
-            return @bitCast(~s);
+            return fromInt(~toInt(self));
         }
         pub fn difference(lhs: Flags, rhs: Flags) Flags {
             const n = negation(rhs);
             return intersection(lhs, n);
         }
         pub fn toBit(self: Flags) FlagBits {
-            const s: BaseType = @bitCast(self);
-            return @enumFromInt(s);
+            return @enumFromInt(toInt(self));
         }
         pub fn fromBit(bit: FlagBits) Flags {
-            return @bitCast(@intFromEnum(bit));
+            return fromInt(@intFromEnum(bit));
         }
         pub fn set(self: Flags, bit: FlagBits) Flags {
             return merge(self, fromBit(bit));
@@ -52,13 +51,19 @@ pub fn FlagsMixin(comptime Flags: type, comptime FlagBits: type) type {
 }
 pub fn FlagBitsMixin(comptime Flags: type, comptime FlagBits: type) type {
     return struct {
-        const BaseType = @typeInfo(Flags).@"struct".backing_integer.?;
+        const BackingInt = @typeInfo(Flags).@"struct".backing_integer.?;
         pub fn toFlags(self: FlagBits) Flags {
             return @bitCast(@intFromEnum(self));
         }
         pub fn fromFlags(self: Flags) FlagBits {
-            const b: BaseType = @bitCast(self);
+            const b: BackingInt = @bitCast(self);
             return @enumFromInt(b);
+        }
+        pub fn toInt(self: FlagBits) BackingInt {
+            return @intFromEnum(self);
+        }
+        pub fn fromInt(self: BackingInt) FlagBits {
+            return @enumFromInt(self);
         }
     };
 }

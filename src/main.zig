@@ -942,20 +942,24 @@ fn getEnumPrefixLenFromName(name: []const u8) usize {
 }
 fn writeFlagBitsFunctions(writer: *Writer, flags_name: []const u8, flag_bits_name: []const u8) void {
     writer.print(
-        \\ pub const toFlags = FlagBitsMixin({[flags_name]s}, {[flag_bits_name]s}).toFlags;
-        \\ pub const fromFlags = FlagBitsMixin({[flags_name]s}, {[flag_bits_name]s}).fromFlags;
+        \\ pub const toFlags=FlagBitsMixin({[flags_name]s}, {[flag_bits_name]s}).toFlags;
+        \\ pub const fromFlags=FlagBitsMixin({[flags_name]s}, {[flag_bits_name]s}).fromFlags;
+        \\ pub const toInt=FlagBitsMixin({[flags_name]s}, {[flag_bits_name]s}).toInt;
+        \\ pub const fromInt=FlagBitsMixin({[flags_name]s}, {[flag_bits_name]s}).fromInt;
     , .{ .flags_name = flags_name, .flag_bits_name = flag_bits_name }) catch panicWrite();
 }
 fn writeFlagsFunctions(writer: *Writer, flags_name: []const u8, flag_bits_name: []const u8) void {
     writer.print(
-        \\ pub const merge = FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).merge;
-        \\ pub const intersection = FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).intersection;
-        \\ pub const negation = FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).negation;
-        \\ pub const difference = FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).difference;
-        \\ pub const toBit = FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).toBit;
-        \\ pub const fromBit = FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).fromBit;
-        \\ pub const set = FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).set;
-        \\ pub const unset = FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).unset;
+        \\ pub const merge=FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).merge;
+        \\ pub const intersection=FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).intersection;
+        \\ pub const negation=FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).negation;
+        \\ pub const difference=FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).difference;
+        \\ pub const toBit=FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).toBit;
+        \\ pub const fromBit=FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).fromBit;
+        \\ pub const set=FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).set;
+        \\ pub const unset=FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).unset;
+        \\ pub const toInt=FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).toInt;
+        \\ pub const fromInt=FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).fromInt;
     , .{ .flags_name = flags_name, .flag_bits_name = flag_bits_name }) catch panicWrite();
 }
 fn writeBitmasks(writer: *Writer, bitmasks: *Bitmasks, flags: *Flags) void {
@@ -969,7 +973,7 @@ fn writeBitmasks(writer: *Writer, bitmasks: *Bitmasks, flags: *Flags) void {
                 return lhs.bitpos < rhs.bitpos;
             }
         }.lessThan;
-        std.sort.pdq(Bitmask.Entry, i.entries.items, void{}, lessThan);
+        std.sort.pdq(Bitmask.Entry, i.entries.items, {}, lessThan);
 
         const flags_name = flagsNameFromFlagBits(&buffer, i.name);
         const kv = flags.fetchRemove(flags_name) orelse std.debug.panic("FlagBits {s} has no corresponding Flags", .{i.name});
