@@ -632,13 +632,13 @@ fn writeConstant(it: XmlIterator, writer: *Writer) void {
     }
 }
 
-fn stripPrefixAndLowerCaps(text: []const u8, prefix_size: usize) []const u8 {
+fn stripPrefixAndLowerCaps(text: []const u8, prefix: []const u8) []const u8 {
     // Stupid VK_QUERY_SCOPE_ renaming
-    const trimmed = if (text.len > prefix_size) text[prefix_size..] else text;
+    const trimmed = if (std.mem.startsWith(u8, text, prefix)) text[prefix.len..] else stripVK_PrefixIfNecessary(text);
     return std.ascii.allocLowerString(allocator, trimmed) catch panicOOM();
 }
-fn stripPrefixAndLowerCapsWithoutBitSuffix(text: []const u8, prefix_size: usize) []const u8 {
-    const trimmed = if (text.len > prefix_size) text[prefix_size..] else text;
+fn stripPrefixAndLowerCapsWithoutBitSuffix(text: []const u8, prefix: []const u8) []const u8 {
+    const trimmed = if (std.mem.startsWith(u8, text, prefix)) text[prefix.len..] else stripVK_PrefixIfNecessary(text);
     const bits = "_BIT";
     const bits_index = std.mem.findLast(u8, trimmed, bits) orelse
         return std.ascii.allocLowerString(allocator, trimmed) catch panicOOM();
@@ -680,7 +680,7 @@ const Enum = struct {
 };
 const Enums = std.ArrayList(Enum);
 
-fn parseEnum(it: XmlIterator, api: Api, new_enum: *Enum, prefix_size: usize) void {
+fn parseEnum(it: XmlIterator, api: Api, new_enum: *Enum, prefix: []const u8) void {
     enum_loop: while (it.seekTags(enum { @"enum", @"/enums" })) |t| switch (t) {
         .@"enum" => {
             var new_entry: Enum.Entry = .{
@@ -699,11 +699,11 @@ fn parseEnum(it: XmlIterator, api: Api, new_enum: *Enum, prefix_size: usize) voi
                         new_entry.value = dupe(kv.value);
                     },
                     .name => {
-                        new_entry.name = stripPrefixAndLowerCaps(kv.value, prefix_size);
+                        new_entry.name = stripPrefixAndLowerCaps(kv.value, prefix);
                     },
                     .alias => {
                         is_alias = true;
-                        new_entry.value = stripPrefixAndLowerCaps(kv.value, prefix_size);
+                        new_entry.value = stripPrefixAndLowerCaps(kv.value, prefix);
                     },
                     .comment => {
                         new_entry.comment = dupe(trimComment(kv.value));
@@ -754,7 +754,7 @@ const Bitmask = struct {
     }
 };
 const Bitmasks = std.ArrayList(Bitmask);
-fn parseBitmask(it: XmlIterator, api: Api, new_bitmask: *Bitmask, prefix_size: usize) void {
+fn parseBitmask(it: XmlIterator, api: Api, new_bitmask: *Bitmask, prefix: []const u8) void {
     enum_loop: while (it.seekTags(enum { @"enum", @"/enums" })) |t| switch (t) {
         .@"enum" => {
             var new_entry: Bitmask.Entry = .{
@@ -776,15 +776,15 @@ fn parseBitmask(it: XmlIterator, api: Api, new_bitmask: *Bitmask, prefix_size: u
                             std.debug.panic("Failed to parse bitpos: {s}", .{kv.value});
                     },
                     .name => {
-                        new_entry.name = stripPrefixAndLowerCapsWithoutBitSuffix(kv.value, prefix_size);
+                        new_entry.name = stripPrefixAndLowerCapsWithoutBitSuffix(kv.value, prefix);
                     },
                     .value => {
                         is_aggregate = true;
-                        value = stripPrefixAndLowerCapsWithoutBitSuffix(kv.value, prefix_size);
+                        value = stripPrefixAndLowerCapsWithoutBitSuffix(kv.value, prefix);
                     },
                     .alias => {
                         is_alias = true;
-                        value = stripPrefixAndLowerCapsWithoutBitSuffix(kv.value, prefix_size);
+                        value = stripPrefixAndLowerCapsWithoutBitSuffix(kv.value, prefix);
                     },
                     .comment => {
                         new_entry.comment = dupe(trimComment(kv.value));
@@ -808,7 +808,14 @@ fn parseBitmask(it: XmlIterator, api: Api, new_bitmask: *Bitmask, prefix_size: u
     } else @panic("Unclosed enum");
 }
 
-fn parseEnums(it: XmlIterator, writer: *Writer, api: Api, enums: *Enums, bitmasks: *Bitmasks) void {
+fn resizeDiscarding(buffer: *[]u8, new_len: usize) void {
+    if (buffer.len < new_len) {
+        allocator.free(buffer.*);
+        buffer.* = allocator.alloc(u8, new_len) catch panicOOM();
+    }
+}
+
+fn parseEnums(it: XmlIterator, writer: *Writer, buffer: *[]u8, api: Api, enums: *Enums, bitmasks: *Bitmasks) void {
     const name = switch (it.nextAttr(enum { name })) {
         .close => @panic("Nameless enum"),
         .success => |kv| dupe(stripVkPrefix(kv.value)),
@@ -840,13 +847,14 @@ fn parseEnums(it: XmlIterator, writer: *Writer, api: Api, enums: *Enums, bitmask
             },
         } else std.debug.panic("Unclosed enum: {s}", .{name}),
         .@"enum" => {
-            const prefix_len = getEnumPrefixLenFromName(no_author);
+            const prefix = getEnumPrefix(buffer, no_author);
             const new = enums.addOne(allocator) catch panicOOM();
             new.* = .{
                 .name = name,
                 .comment = comment,
             };
-            parseEnum(it, api, new, prefix_len);
+
+            parseEnum(it, api, new, prefix);
         },
         .bitmask => {
             const new = bitmasks.addOne(allocator) catch panicOOM();
@@ -858,8 +866,8 @@ fn parseEnums(it: XmlIterator, writer: *Writer, api: Api, enums: *Enums, bitmask
             const new_len = std.math.sub(usize, no_author.len, common.len) catch
                 std.debug.panic("Error when stripping FlagBits from {s}", .{no_author});
             const without_bits = no_author[0..new_len];
-            const prefix_len = getEnumPrefixLenFromName(without_bits);
-            parseBitmask(it, api, new, prefix_len);
+            const prefix = getEnumPrefix(buffer, without_bits);
+            parseBitmask(it, api, new, prefix);
         },
     }
 }
@@ -885,10 +893,7 @@ fn flagsNameFromFlagBits(buffer: *[]u8, name: []const u8) []u8 {
     const flags_text = "Flags";
     const flagbits_index = std.mem.findLast(u8, name, flagbits_text) orelse
         std.debug.panic("Bitmask: {s} has no FlagBits in its name", .{name});
-    if (buffer.len < name.len) {
-        allocator.free(buffer.*);
-        buffer.* = allocator.alloc(u8, name.len) catch panicOOM();
-    }
+    resizeDiscarding(buffer, name.len);
     @memcpy(buffer.ptr, name[0..flagbits_index]);
     const flags_start = buffer.ptr + flagbits_index;
     @memcpy(flags_start, flags_text);
@@ -899,18 +904,38 @@ fn flagsNameFromFlagBits(buffer: *[]u8, name: []const u8) []u8 {
 fn flagBitsNameFromFlags(buffer: *[]u8, name: []const u8) []u8 {
     const flagbits_text = "FlagBits";
     const flags_text = "Flags";
+    const increase = flagbits_text.len - flags_text.len;
     const flags_index = std.mem.findLast(u8, name, flags_text) orelse
         std.debug.panic("Bitmask: {s} has no Flags in its name", .{name});
-    if (buffer.len < name.len) {
-        allocator.free(buffer.*);
-        buffer.* = allocator.alloc(u8, name.len) catch panicOOM();
-    }
+    const final_size = name.len + increase;
+    resizeDiscarding(buffer, final_size);
     @memcpy(buffer.ptr, name[0..flags_index]);
     const flags_start = buffer.ptr + flags_index;
     @memcpy(flags_start, flagbits_text);
     const suffix_start = flags_start + flagbits_text.len;
     @memcpy(suffix_start, name[flags_index + flags_text.len ..]);
-    return buffer.*[0 .. name.len + (flagbits_text.len - flags_text.len)];
+    return buffer.*[0..final_size];
+}
+fn getEnumPrefix(buffer: *[]u8, name: []const u8) []const u8 {
+    const caps_count = countCapitalLetters(name);
+    const prefix = "VK";
+    const final_len = prefix.len + name.len + caps_count + 1;
+    resizeDiscarding(buffer, final_len);
+    var ptr = buffer.ptr;
+    @memcpy(ptr, prefix);
+    ptr += prefix.len;
+    for (name) |c| {
+        if (std.ascii.isUpper(c)) {
+            ptr[0] = '_';
+            ptr[1] = c;
+            ptr += 2;
+        } else {
+            ptr[0] = std.ascii.toUpper(c);
+            ptr += 1;
+        }
+    }
+    ptr[0] = '_';
+    return buffer.*[0..final_len];
 }
 fn countCapitalLetters(text: []const u8) usize {
     var count: usize = 0;
@@ -935,11 +960,6 @@ fn stripAuthorTag(text: []const u8) []const u8 {
     return text[0 .. text.len - l];
 }
 
-/// Name must be without VK_ prefix and without author tag
-fn getEnumPrefixLenFromName(name: []const u8) usize {
-    const caps_count = countCapitalLetters(name);
-    return "VK_".len + name.len + caps_count;
-}
 fn writeFlagBitsFunctions(writer: *Writer, flags_name: []const u8, flag_bits_name: []const u8) void {
     writer.print(
         \\ pub const toFlags=FlagBitsMixin({[flags_name]s}, {[flag_bits_name]s}).toFlags;
@@ -1353,6 +1373,8 @@ pub fn main(init: std.process.Init) void {
         }
     }
     writer.writeAll(@embedFile("preamble.zig")) catch panicWrite();
+    var buffer: []u8 = &.{};
+    defer allocator.free(buffer);
 
     const it: XmlIterator = .{ .reader = &stdin_reader.interface };
     // Skip the <?...?>
@@ -1369,7 +1391,7 @@ pub fn main(init: std.process.Init) void {
     defer bitmasks.deinit(allocator);
     while (it.seekTags(enum { types, enums, commands, extensions, @"/registry" })) |tag| switch (tag) {
         .types => parseTypes(it, &flags, writer, api),
-        .enums => parseEnums(it, writer, api, &enums, &bitmasks),
+        .enums => parseEnums(it, writer, &buffer, api, &enums, &bitmasks),
         .commands => parseCommands(it),
         .extensions => parseExtensions(it),
         .@"/registry" => break,
