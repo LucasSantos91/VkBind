@@ -844,8 +844,7 @@ fn resizeDiscarding(buffer: *[]u8, new_len: usize) void {
     }
 }
 
-fn parseEnums(it: XmlIterator, writer: *Writer, buffer: *[]u8, api: Api, enums: *Enums, bitmasks: *Bitmasks) void {
-    _ = buffer; // autofix
+fn parseEnums(it: XmlIterator, writer: *Writer, api: Api, enums: *Enums, bitmasks: *Bitmasks) void {
     const name = switch (it.nextAttr(enum { name })) {
         .close => @panic("Nameless enum"),
         .success => |kv| dupe(stripVkPrefix(kv.value)),
@@ -1371,8 +1370,6 @@ pub fn main(init: std.process.Init) void {
         }
     }
     writer.writeAll(@embedFile("preamble.zig")) catch panicWrite();
-    var buffer: []u8 = &.{};
-    defer allocator.free(buffer);
 
     const it: XmlIterator = .{ .reader = &stdin_reader.interface };
     // Skip the <?...?>
@@ -1389,7 +1386,7 @@ pub fn main(init: std.process.Init) void {
     defer bitmasks.deinit(allocator);
     while (it.seekTags(enum { types, enums, commands, extensions, @"/registry" })) |tag| switch (tag) {
         .types => parseTypes(it, &flags, writer, api),
-        .enums => parseEnums(it, writer, &buffer, api, &enums, &bitmasks),
+        .enums => parseEnums(it, writer, api, &enums, &bitmasks),
         .commands => parseCommands(it),
         .extensions => parseExtensions(it),
         .@"/registry" => break,
