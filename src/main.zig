@@ -96,7 +96,7 @@ const XmlIterator = struct {
         _ = self.reader.discardDelimiterInclusive('>') catch |e| panicRead(e);
     }
     pub fn getTagText(self: @This()) []const u8 {
-        var text: []const u8 = undefined;
+        var text: []u8 = undefined;
         text.len = 1;
         while (true) {
             text = self.reader.peek(text.len) catch |e| panicRead(e);
@@ -153,7 +153,7 @@ const XmlIterator = struct {
         }
     }
     pub fn getAttrKey(self: @This()) union(enum) {
-        success: []const u8,
+        success: []u8,
         close: ClosingTag,
     } {
         switch (self.goToAttrKey()) {
@@ -170,7 +170,7 @@ const XmlIterator = struct {
             _ = self.reader.discardDelimiterInclusive('"') catch |e| panicRead(e);
         }
     }
-    pub fn getAttrValue(self: @This()) []const u8 {
+    pub fn getAttrValue(self: @This()) []u8 {
         _ = self.reader.discardDelimiterInclusive('"') catch |e| panicRead(e);
         return self.reader.takeDelimiter('"') catch |e| panicTakeDel(e) orelse panicUnexpectedEnd();
     }
@@ -178,7 +178,7 @@ const XmlIterator = struct {
     pub fn nextAttr(self: @This(), comptime KeysOfInterest: type) union(enum) {
         const Success = struct {
             key: KeysOfInterest,
-            value: []const u8,
+            value: []u8,
         };
         success: Success,
         close: ClosingTag,
@@ -196,7 +196,7 @@ const XmlIterator = struct {
             }
         }
     }
-    pub fn getNextBetweenTags(self: @This()) []const u8 {
+    pub fn getNextBetweenTags(self: @This()) []u8 {
         if (!self.goToTag()) panicUnexpectedEnd();
         if (self.closeTag() != .@">") panicUnexpectedEnd();
         return self.reader.takeDelimiter('<') catch |e| panicTakeDel(e) orelse panicUnexpectedEnd();
@@ -446,7 +446,7 @@ pub fn handleClose(c: XmlIterator.ClosingTag, iterator: XmlIterator) void {
 }
 
 var allocator: Allocator = undefined;
-fn dupe(str: []const u8) []const u8 {
+fn dupe(str: anytype) @TypeOf(str) {
     return allocator.dupe(u8, str) catch panicOOM();
 }
 fn freeDupe(str: []const u8) void {
@@ -456,7 +456,7 @@ fn stripLen(str: []const u8, len: usize) []const u8 {
     return slice_tools.safeSubslice(str, len, .unlimited) catch
         std.debug.panic("Tried to strip {} chars, but name is too short: {s}", .{ len, str });
 }
-fn stripVkPrefix(str: []const u8) []const u8 {
+fn stripVkPrefix(str: anytype) @TypeOf(str) {
     return slice_tools.safeSubslice(str, 2, .unlimited) catch
         std.debug.panic("Tried to strip vk prefix but name is too short: {s}", .{str});
 }
@@ -1062,8 +1062,166 @@ fn writeBitmasks(writer: *Writer, bitmasks: *Bitmasks, flags: *Flags) void {
         writer.writeAll("};") catch panicWrite();
     }
 }
-fn parseCommands(it: XmlIterator) void {
-    _ = it;
+const Command = struct {
+    name: []u8,
+    return_value: ZigType,
+    params: []ZigVar,
+    success_codes: []u8,
+    error_codes: []u8,
+    aliases: std.ArrayList([]u8),
+};
+const Commands = struct {
+    const Alias = struct {
+        new_name: []u8,
+        alias: []u8,
+    };
+    base: std.ArrayList(Command) = .empty,
+    instance: std.ArrayList(Command) = .empty,
+    device: std.ArrayList(Command) = .empty,
+    command: std.ArrayList(Command) = .empty,
+};
+fn parseCommands(it: XmlIterator, commands: *Commands, api: Api) void {
+    var last: enum { base, instance, device, command } = .base;
+    command_loop: while (it.seekTags(enum { command, @"/commands" })) |t_| switch (t_) {
+        .command => {
+            var successcodes: []u8 = undefined;
+            var errorcodes: []u8 = undefined;
+            while (true) switch (it.nextAttr(enum { api, successcodes, errorcodes, name })) {
+                .success => |kv| switch (kv.key) {
+                    .api => {
+                        if (!api.match(kv.value)) continue :command_loop;
+                    },
+                    .successcodes => {
+                        successcodes = dupe(kv.value);
+                    },
+                    .errorcodes => {
+                        errorcodes = dupe(kv.value);
+                    },
+                    .name => {
+                        // We assume aliases always directly follow what they are aliasing
+                        const alias = dupe(stripVkPrefix(kv.value));
+                        if (alias.len == 0) @panic("Empty alias");
+                        alias[0] = std.ascii.toLower(alias[0]);
+                        const list = switch (last) {
+                            .base => &commands.base,
+                            .instance => &commands.instance,
+                            .device => &commands.device,
+                            .command => &commands.command,
+                        };
+                        if (list.items.len == 0) std.debug.panic("Can't find what alias {s} refers to", .{alias});
+                        const last_command = &list.items[0];
+                        last_command.aliases.append(allocator, alias) catch panicOOM();
+                        continue :command_loop;
+                    },
+                },
+                .close => {
+                    break;
+                },
+            };
+
+            _ = it.seekTags(enum { proto }) orelse @panic("Command without prototype");
+            const proto: CVar = .parse(it);
+            var params: std.ArrayList(ZigVar) = .empty;
+            while (it.seekTags(enum { param, @"/command", implicitexternsyncparams })) |t| switch (t) {
+                .param => {
+                    var optional = false;
+                    var len: ZigType.Size = .single;
+                    while (true) switch (it.nextAttr(enum { optional, len })) {
+                        .close => break,
+                        .success => |kv| switch (kv.key) {
+                            .optional => {
+                                optional = true;
+                            },
+                            .len => {
+                                len = if (std.mem.eql(u8, kv.value, "null-terminated"))
+                                    .null_terminated
+                                else
+                                    .many;
+                            },
+                        }
+                    };
+                    const cvar: CVar = .parse(it);
+                    var zigvar: ZigVar = .{
+                        .name = cvar.name,
+                        .type = .{
+                            .base_type = cvar.type.base_type,
+                            .amount = cvar.amount,
+                            .ptrs = .{
+                                .len = cvar.type.ptrs.len,
+                            },
+                        },
+                    };
+                    switch (zigvar.type.ptrs.len) {
+                        0 => {},
+                        1 => {
+                            zigvar.type.ptrs.buffer[0] = .{
+                                .optional = optional,
+                                .size = len,
+                                .kind = cvar.type.ptrs.buffer[0],
+                            };
+                        },
+                        2 => {
+                            zigvar.type.ptrs.buffer[0] = .{
+                                .optional = false,
+                                .size = .single,
+                                .kind = .mutable,
+                            };
+                            zigvar.type.ptrs.buffer[1] = .{
+                                .optional = optional,
+                                .size = len,
+                                .kind = cvar.type.ptrs.buffer[1],
+                            };
+                        },
+                        else => unreachable,
+                    }
+                    params.append(allocator, zigvar) catch panicOOM();
+                },
+                .implicitexternsyncparams => {
+                    _ = it.seekTagAndClose(enum { @"/implicitexternsyncparams" });
+                },
+                .@"/command" => break,
+            } else @panic("Unclosed command");
+            const command: Command = .{
+                .name = proto.name,
+                .return_value = .{
+                    .base_type = proto.type.base_type,
+                    .amount = proto.amount,
+                    .ptrs = .{
+                        .len = proto.type.ptrs.len,
+                    },
+                },
+                .params = params.toOwnedSlice(allocator) catch panicOOM(),
+                .success_codes = successcodes,
+                .error_codes = errorcodes,
+                .aliases = .empty,
+            };
+            if (command.params.len != 0 and command.params[0].type.base_type == .non_primitive) blk: {
+                const dispatch = slice_tools.enums.fromName(
+                    enum { VkInstance, VkDevice, VkCommandBuffer },
+                    command.params[0].type.base_type.non_primitive,
+                ) orelse break :blk;
+                const list = l: switch (dispatch) {
+                    .VkInstance => {
+                        last = .instance;
+                        break :l &commands.instance;
+                    },
+                    .VkDevice => {
+                        last = .device;
+                        break :l &commands.device;
+                    },
+                    .VkCommandBuffer => {
+                        last = .command;
+                        break :l &commands.command;
+                    },
+                };
+                list.append(allocator, command) catch panicOOM();
+                continue :command_loop;
+            }
+            commands.base.append(allocator, command) catch panicOOM();
+            last = .base;
+        },
+        .@"/commands" => return,
+    };
 }
 fn parseExtensions(it: XmlIterator) void {
     _ = it;
@@ -1222,14 +1380,14 @@ const CType = struct {
 
 const CVar = struct {
     const Amount = union(enum) {
-        array: []const u8,
-        bitfield: []const u8,
+        array: []u8,
+        bitfield: []u8,
         single,
 
-        fn initArray(text: []const u8) @This() {
+        fn initArray(text: []u8) @This() {
             return .{ .array = dupe(text) };
         }
-        fn initBitfield(text: []const u8) @This() {
+        fn initBitfield(text: []u8) @This() {
             return .{ .bitfield = dupe(text) };
         }
         pub fn deinit(self: @This()) void {
@@ -1240,7 +1398,7 @@ const CVar = struct {
         }
     };
     type: CType,
-    name: []const u8,
+    name: []u8,
     amount: Amount,
 
     fn parse(it: XmlIterator) @This() {
@@ -1347,6 +1505,15 @@ const ZigType = struct {
             .single => writer.print("{f}", .{self.base_type}) catch panicWrite(),
         }
     }
+
+    pub fn deinit(self: *@This()) void {
+        self.base_type.deinit();
+        self.amount.deinit();
+    }
+};
+const ZigVar = struct {
+    name: []const u8,
+    type: ZigType,
 };
 
 pub fn main(init: std.process.Init) void {
@@ -1394,14 +1561,19 @@ pub fn main(init: std.process.Init) void {
     defer enums.deinit(allocator);
     var bitmasks: Bitmasks = .empty;
     defer bitmasks.deinit(allocator);
+    var commands: Commands = .{};
     while (it.seekTags(enum { types, enums, commands, extensions, @"/registry" })) |tag| switch (tag) {
         .types => parseTypes(it, &flags, writer, api),
         .enums => parseEnums(it, writer, api, &enums, &bitmasks),
-        .commands => parseCommands(it),
+        .commands => parseCommands(it, &commands, api),
         .extensions => parseExtensions(it),
         .@"/registry" => break,
     };
 
     writeEnums(writer, &enums);
     writeBitmasks(writer, &bitmasks, &flags);
+
+    for (commands.base.items) |i| {
+        std.debug.print("{s}\n", .{i.name});
+    }
 }
