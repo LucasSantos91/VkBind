@@ -417,7 +417,7 @@ fn parseStructOrUnion(iterator: XmlIterator, is_struct: bool, writer: *Writer, a
 
             // TODO: render bitfields properly
             writer.print("{s}:{f}", .{ c_member.name, zig_type }) catch panicWrite();
-            if (optional and !in_packed_member) {
+            if (is_struct and optional and !in_packed_member) {
                 const default_value = if (zig_type.ptrs.len != 0)
                     "null"
                 else switch (zig_type.base_type) {
@@ -730,6 +730,10 @@ fn parseEnum(it: XmlIterator, api: Api, new_enum: *Enum, prefix: []const u8) voi
                     .alias => {
                         is_alias = true;
                         new_entry.value = stripPrefixAndLowerCaps(kv.value, prefix);
+                        for (new_enum.entries.items) |e| if (std.mem.eql(u8, e.name, new_entry.value)) {
+                            freeDupe(new_entry.value);
+                            continue :enum_loop;
+                        };
                     },
                     .comment => {
                         new_entry.comment = dupe(trimComment(kv.value));
@@ -814,6 +818,10 @@ fn parseBitmask(it: XmlIterator, api: Api, new_bitmask: *Bitmask, prefix: []cons
                     .alias => {
                         is_alias = true;
                         value = stripPrefixAndLowerCapsWithoutBitSuffix(kv.value, prefix, has_suffix);
+                        for (new_bitmask.entries.items) |e| if (std.mem.eql(u8, e.name, value)) {
+                            freeDupe(value);
+                            continue :enum_loop;
+                        };
                     },
                     .comment => {
                         new_entry.comment = dupe(trimComment(kv.value));
