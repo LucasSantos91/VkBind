@@ -638,16 +638,18 @@ fn stripPrefixAndLowerCaps(text: []const u8, prefix: []const u8) []const u8 {
 }
 fn stripPrefixAndLowerCapsWithoutBitSuffix(text: []const u8, prefix: []const u8, has_suffix: bool) []const u8 {
     var trimmed = stripEnumPrefix(text, prefix);
-    if (has_suffix) {
-        for (0..2) |_| {
-            const under = std.mem.find(u8, trimmed, "_") orelse break;
-            trimmed = trimmed[under..];
-        }
+    if (has_suffix) blk: {
+        const under = std.mem.find(u8, trimmed, "_") orelse break :blk;
+        trimmed = trimmed[under + 1 ..];
     }
     const bits = "_BIT";
     const bits_index = std.mem.findLast(u8, trimmed, bits) orelse trimmed.len;
-    const final = trimmed[0..bits_index];
-    return std.ascii.allocLowerString(allocator, final) catch panicOOM();
+    const first_part = trimmed[0..bits_index];
+    const second_part = trimmed[@min(trimmed.len, bits_index + bits.len)..];
+    const ret = allocator.alloc(u8, first_part.len + second_part.len) catch panicOOM();
+    _ = std.ascii.lowerString(ret, first_part);
+    _ = std.ascii.lowerString(ret[first_part.len..], second_part);
+    return ret;
 }
 
 const Enum = struct {
