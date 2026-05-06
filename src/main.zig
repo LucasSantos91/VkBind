@@ -323,7 +323,7 @@ fn parseStructOrUnion(iterator: XmlIterator, is_struct: bool, writer: *Writer, a
             var optional: bool = false;
             var len: ZigType.Size = .single;
             while (true) {
-                switch (iterator.nextAttr(enum { api, values, optional, len, comment })) {
+                switch (iterator.nextAttr(enum { api, values, optional, len, comment, deprecated })) {
                     .success => |kv| switch (kv.key) {
                         .api => {
                             if (!api.match(kv.value)) {
@@ -351,6 +351,11 @@ fn parseStructOrUnion(iterator: XmlIterator, is_struct: bool, writer: *Writer, a
                         },
                         .comment => {
                             printComment(kv.value, writer);
+                        },
+                        .deprecated => {
+                            if (std.mem.eql(u8, "unused", kv.value)) {
+                                optional = true;
+                            }
                         },
                     },
                     .close => |c| {
@@ -487,21 +492,28 @@ fn stripPrefix(name: []const u8) struct { PrefixKind, []const u8 } {
     return .{ .none, name };
 }
 
+const CommaIterator = struct {
+    text: []u8,
+
+    pub fn next(self: *@This()) ?[]u8 {
+        const comma = std.mem.find(u8, self.text, ",");
+        const this = if (comma) |i| self.text[0..i] else self.text;
+        if (this.len == 0) return null;
+        self.text = self.text[this..];
+        return this;
+    }
+};
 const Api = enum {
     vulkan,
     vulkansc,
 
     pub fn match(current: @This(), other: ?[]const u8) bool {
-        var o = other orelse return true;
-        while (true) {
-            const comma = std.mem.find(u8, o, ",");
-            const this = if (comma) |i| o[0..i] else o;
-            const a = slice_tools.enums.fromName(@This(), this) orelse std.debug.panic("Unknown api: {s}", .{this});
+        var it: CommaIterator = .{ .text = other orelse return true };
+        while (it.next()) |api| {
+            const a = slice_tools.enums.fromName(@This(), api) orelse std.debug.panic("Unknown api: {s}", .{api});
             if (current == a) return true;
-            if (comma) |i| {
-                o = o[i..];
-            } else return false;
         }
+        return false;
     }
 };
 fn parseTypes(it: XmlIterator, flags: *Flags, writer: *Writer, api: Api) void {
@@ -545,6 +557,16 @@ fn parseTypes(it: XmlIterator, flags: *Flags, writer: *Writer, api: Api) void {
         .@"/types" => return,
     };
     panicUnexpectedEnd();
+}
+fn parseLen(text: []u8) ZigType.Size {
+    var result: ZigType.Size = .many;
+    var it: CommaIterator = .{ .text = text };
+    while (it.next()) |n| {
+        if (std.mem.eql(u8, n, "null-terminated")) {
+            result = .null_terminated;
+        }
+    }
+    return result;
 }
 fn parseHandle(iterator: XmlIterator, writer: *Writer) void {
     switch (iterator.nextAttr(enum { name })) {
