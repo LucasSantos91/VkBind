@@ -73,7 +73,7 @@ const ReaderWrap = struct {
         return self.reader.peekDelimiterExclusive(delimiter) catch |e| panics.delimiter(e);
     }
     pub fn discardDelimiterInclusive(self: @This(), delimiter: u8) void {
-        self.reader.discardDelimiterInclusive(delimiter) catch |e| panics.reader(e);
+        _ = self.reader.discardDelimiterInclusive(delimiter) catch |e| panics.reader(e);
     }
     pub fn peek(self: @This(), len: usize) []u8 {
         self.reader.peek(len) catch |e| panics.reader(e);
@@ -85,7 +85,10 @@ const ReaderWrap = struct {
         self.reader.tossBuffered(len);
     }
     pub fn takeDelimiter(self: @This(), delimiter: u8) []u8 {
-        return self.reader.takeDelimiter(delimiter) catch |e| panics.delimiter(e);
+        return self.reader.takeDelimiter(delimiter) catch |e| panics.delimiter(e) orelse panics.unexpectedEnd();
+    }
+    pub fn takeDelimiterExclusive(self: @This(), delimiter: u8) []u8 {
+        return self.reader.takeDelimiterExclusive(delimiter) catch |e| panics.delimiter(e) orelse panics.unexpectedEnd();
     }
     pub fn peekGreedy(self: @This(), n: usize) []u8 {
         return self.reader.peekGreedy(n) catch |e| panics.reader(e);
@@ -107,6 +110,9 @@ const WriterWrapper = struct {
     pub fn print(self: @This(), comptime format: []const u8, args: anytype) void {
         self.writer.print(format, args) catch panics.write();
     }
+    pub fn flush(self: @This()) void {
+        self.writer.flush() catch panics.write();
+    }
 };
 
 const XmlIterator = struct {
@@ -121,7 +127,7 @@ const XmlIterator = struct {
     pub fn getTagText(self: @This()) []const u8 {
         while (true) {
             const text = self.reader.peekGreedy(1);
-            if (findAny(" />")) |i| {
+            if (findAny(text, " >")) |i| {
                 self.reader.toss(i);
                 return text[0..i];
             }
@@ -149,11 +155,12 @@ const XmlIterator = struct {
                     return false;
                 },
                 '/' => {
-                    self.reader.discardAll(2);
-                    return .{ .close = .@"/>" };
+                    self.reader.toss(not_space_index + 1);
+                    return false;
                 },
                 else => {
-                    return .sucess;
+                    self.reader.toss(not_space_index);
+                    return true;
                 },
             }
         }
@@ -175,11 +182,12 @@ const XmlIterator = struct {
     pub fn nextAttr(self: @This(), comptime KeysOfInterest: type) ?struct { key: KeysOfInterest, value: []u8 } {
         while (self.getAttrKey()) |text| {
             if (enumFromName(KeysOfInterest, text)) |key| {
-                return .{ key, self.getAttrValue() };
+                return .{ .key = key, .value = self.getAttrValue() };
             } else {
                 self.discardAttrValue();
             }
         }
+        return null;
     }
     pub fn getNextBetweenTags(self: @This()) []u8 {
         self.goToTag();
@@ -188,277 +196,11 @@ const XmlIterator = struct {
     }
 
     pub fn seekTagAndClose(self: @This(), comptime Tags: type) Tags {
-        const t = self.seekTags(Tags) orelse @panic("Failed to find expected tags");
+        const t = self.seekTags(Tags);
         self.closeTag();
         return t;
     }
 };
-
-/// Assumes file pointer is right after `name=somename`
-fn handleAlias(iterator: XmlIterator, writer: *Writer, name: []const u8) void {
-    const n = stripVkPrefix(name);
-    writer.print("pub const {s} = ", .{n}) catch panicWrite();
-    switch (iterator.nextAttr(enum { alias })) {
-        .close => std.debug.panic("Expected alias for flag: {s}", .{n}),
-        .success => |s| {
-            const trimmed = stripVkPrefix(s.value);
-            writer.print("{s};", .{trimmed}) catch panicWrite();
-        },
-    }
-    if (iterator.closeTag() != .@"/>") @panic("Expected alias to end in '/>' when parsing flags");
-}
-
-fn addToFlags(flags: *Flags, name: []const u8, bits: FlagBits) void {
-    const gp = flags.getOrPut(allocator, dupe(name)) catch panicOOM();
-    if (gp.found_existing) std.debug.panic("Duplicate flag: {s}", .{gp.key_ptr.*});
-    gp.value_ptr.* = bits;
-}
-fn parseFlag(flags: *Flags, iterator: XmlIterator, writer: *Writer) void {
-    switch (iterator.nextAttr(enum { name })) {
-        .success => |kv| switch (kv.key) {
-            .name => handleAlias(iterator, writer, kv.value),
-        },
-        .close => |c| {
-            if (c != .@">") @panic("Expected '>' but got '/>' when parsing flags");
-            const bits_text = iterator.getNextBetweenTags();
-            const bits = slice_tools.enums.fromName(FlagBits, bits_text) orelse std.debug.panic("Unknown flags type: {s}", .{bits_text});
-            const name = iterator.getNextBetweenTags();
-            addToFlags(flags, stripVkPrefix(name), bits);
-            iterator.discardElement();
-        },
-    }
-}
-
-fn writeToLower(writer: *Writer, text: []const u8) void {
-    for (text) |c| writer.writeByte(std.ascii.toLower(c)) catch panicWrite();
-}
-fn trimComment(comment: []const u8) []const u8 {
-    const start_of_comment = std.mem.findNone(u8, comment, "/ ") orelse
-        // Empty comment?
-        return &.{};
-    return comment[start_of_comment..];
-}
-fn printComment(comment: []const u8, writer: *Writer) void {
-    const c = trimComment(comment);
-    if (c.len != 0) {
-        writer.print("\n/// {s}\n", .{c}) catch panicWrite();
-    }
-}
-
-const Categories = enum {
-    bitmask,
-    @"struct",
-    @"union",
-    handle,
-    @"enum",
-    funcpointer,
-};
-fn parseStructOrUnion(iterator: XmlIterator, is_struct: bool, writer: *Writer, api: Api) void {
-    const name_attr = (iterator.nextAttr(enum { name }));
-    if (name_attr == .close) @panic("Nameless struct");
-    const name = dupe(stripVkPrefix(name_attr.success.value));
-    var alias: []const u8 = &.{};
-
-    while (true) {
-        switch (iterator.nextAttr(enum { alias, comment })) {
-            .success => |kv| switch (kv.key) {
-                .alias => {
-                    alias = dupe(stripVkPrefix(kv.value));
-                },
-                .comment => {
-                    printComment(kv.value, writer);
-                }
-            },
-            .close => {
-                break;
-            },
-        }
-    }
-    if (alias.len != 0) {
-        writer.print("pub const {s}={s};", .{ name, alias }) catch panicWrite();
-        freeDupe(alias);
-        freeDupe(name);
-        return;
-    }
-
-    writer.print("pub const {s}=extern {s}{{", .{ name, if (is_struct) "struct" else "union" }) catch panicWrite();
-    freeDupe(name);
-    var in_packed_member = false;
-    var packed_count: usize = 0;
-    member_loop: while (iterator.seekTags(enum { member, @"/type" })) |t| switch (t) {
-        .@"/type" => break,
-        .member => {
-            var optional: bool = false;
-            var len: ZigType.Size = .single;
-            while (true) {
-                switch (iterator.nextAttr(enum { api, values, optional, len, comment, deprecated })) {
-                    .success => |kv| switch (kv.key) {
-                        .api => {
-                            if (!api.match(kv.value)) {
-                                _ = iterator.seekTagAndClose(enum { @"/member" });
-                                continue :member_loop;
-                            }
-                        },
-                        .values => {
-                            writer.writeAll("sType: StructureType=.") catch panicWrite();
-                            const trimmed = slice_tools.safeSubslice(kv.value, "VK_STRUCTURE_TYPE_".len, .unlimited) catch
-                                std.debug.panic("Structure type has name too short: {s}", .{kv.value});
-                            writeToLower(writer, trimmed);
-                            writer.writeByte(',') catch panicWrite();
-                            _ = iterator.seekTagAndClose(enum { @"/member" });
-                            continue :member_loop;
-                        },
-                        .optional => {
-                            optional = true;
-                        },
-                        .len => {
-                            len = if (std.mem.eql(u8, kv.value, "null-terminated"))
-                                .null_terminated
-                            else
-                                .many;
-                        },
-                        .comment => {
-                            printComment(kv.value, writer);
-                        },
-                        .deprecated => {
-                            if (std.mem.eql(u8, "unused", kv.value)) {
-                                optional = true;
-                            }
-                        },
-                    },
-                    .close => |c| {
-                        if (c == .@"/>") std.debug.panic("Unexpected end to type: {s}", .{name});
-                        break;
-                    },
-                }
-            }
-            const c_member = CVar.parse(iterator);
-            defer c_member.deinit();
-            var zig_type: ZigType = .{
-                .base_type = c_member.type.base_type,
-                .ptrs = .{ .len = c_member.type.ptrs.len },
-                .amount = c_member.amount,
-            };
-            while (true) {
-                switch (iterator.seekTagAndClose(enum { @"/member", comment })) {
-                    .comment => {
-                        const comment = iterator.reader.takeDelimiter('<') catch |e|
-                            panicPeekDel(e) orelse
-                            panicUnexpectedEnd();
-                        printComment(comment, writer);
-                        iterator.closeTagRegardless();
-                    },
-                    .@"/member" => break,
-                }
-            }
-
-            switch (zig_type.ptrs.len) {
-                0 => {},
-                1 => {
-                    zig_type.ptrs.buffer[0] = .{
-                        .optional = optional,
-                        .size = len,
-                        .kind = c_member.type.ptrs.buffer[0],
-                    };
-                },
-                2 => {
-                    zig_type.ptrs.buffer[0] = .{
-                        .optional = false,
-                        .size = .single,
-                        .kind = .mutable,
-                    };
-                    zig_type.ptrs.buffer[1] = .{
-                        .optional = optional,
-                        .size = len,
-                        .kind = c_member.type.ptrs.buffer[1],
-                    };
-                },
-                else => unreachable,
-            }
-            if (zig_type.amount == .bitfield) {
-                if (!in_packed_member) {
-                    in_packed_member = true;
-                    writer.print("p{}:packed struct{{", .{packed_count}) catch panicWrite();
-                    packed_count += 1;
-                }
-            } else {
-                if (in_packed_member) {
-                    in_packed_member = false;
-                    writer.writeAll("},") catch panicWrite();
-                }
-            }
-
-            // TODO: render bitfields properly
-            writer.print("{s}:{f}", .{ c_member.name, zig_type }) catch panicWrite();
-            if (is_struct and optional and !in_packed_member) {
-                const default_value = if (zig_type.ptrs.len != 0)
-                    "null"
-                else switch (zig_type.base_type) {
-                    .primitive => "0",
-                    .non_primitive => ".{}"
-                };
-                writer.print("={s}", .{default_value}) catch panicWrite();
-            }
-            writer.writeByte(',') catch panicWrite();
-        }
-    } else std.debug.panic("Unexpected end while parsing type: {s}", .{name});
-    if (in_packed_member) {
-        in_packed_member = false;
-        writer.writeAll("},") catch panicWrite();
-    }
-    writer.writeAll("};") catch panicWrite();
-}
-
-pub fn handleClose(c: XmlIterator.ClosingTag, iterator: XmlIterator) void {
-    switch (c) {
-        .@">" => {
-            iterator.discardElement();
-        },
-        .@"/>" => {},
-    }
-}
-
-var allocator: Allocator = undefined;
-fn dupe(str: anytype) @TypeOf(str) {
-    return allocator.dupe(u8, str) catch panicOOM();
-}
-fn freeDupe(str: []const u8) void {
-    allocator.free(str);
-}
-fn stripLen(str: []const u8, len: usize) []const u8 {
-    return slice_tools.safeSubslice(str, len, .unlimited) catch
-        std.debug.panic("Tried to strip {} chars, but name is too short: {s}", .{ len, str });
-}
-fn stripVkPrefix(str: anytype) @TypeOf(str) {
-    return slice_tools.safeSubslice(str, 2, .unlimited) catch
-        std.debug.panic("Tried to strip vk prefix but name is too short: {s}", .{str});
-}
-fn stripPfnPrefix(str: []const u8) []const u8 {
-    return slice_tools.safeSubslice(str, "PFN_vk".len, .unlimited) catch
-        std.debug.panic("Tried to strip PFN_vk prefix but name is too short: {s}", .{str});
-}
-fn stripVK_Prefix(str: []const u8) []const u8 {
-    return slice_tools.safeSubslice(str, "VK_".len, .unlimited) catch
-        std.debug.panic("Tried to strip VK_ prefix but name is too short: {s}", .{str});
-}
-fn stripVK_PrefixIfNecessary(str: []const u8) []const u8 {
-    return if (std.mem.startsWith(u8, str, "VK_"))
-        str["VK_".len..]
-    else
-        str;
-}
-const PrefixKind = enum {
-    none,
-    vk,
-    Vk,
-    PFN_vk,
-};
-fn stripPrefix(name: []const u8) struct { PrefixKind, []const u8 } {
-    if (std.mem.startsWith(u8, name, @tagName(PrefixKind.vk))) return .{ .vk, name[2..] };
-    if (std.mem.startsWith(u8, name, @tagName(PrefixKind.Vk))) return .{ .Vk, name[2..] };
-    if (std.mem.startsWith(u8, name, @tagName(PrefixKind.PFN_vk))) return .{ .Vk, name[@tagName(PrefixKind.PFN_vk).len..] };
-    return .{ .none, name };
-}
 
 const CommaIterator = struct {
     text: []u8,
@@ -467,417 +209,10 @@ const CommaIterator = struct {
         const comma = std.mem.find(u8, self.text, ",");
         const this = if (comma) |i| self.text[0..i] else self.text;
         if (this.len == 0) return null;
-        self.text = self.text[this..];
+        self.text = self.text[this.len..];
         return this;
     }
 };
-
-fn parseTypes(it: XmlIterator, flags: *Flags, writer: *Writer, api: Api) void {
-    while (it.seekTags(enum { type, @"/types" })) |tag| switch (tag) {
-        .type => while (true) attr_sw: switch (it.nextAttr(enum { api, category, name })) {
-            .success => |kv| switch (kv.key) {
-                .name => {
-                    // If we hit name before category, this is enum. We'll handle them later, so skip it
-                    it.closeTagRegardless();
-                    break;
-                },
-                .api => {
-                    if (api.match(kv.value)) continue;
-                    continue :attr_sw .{ .close = it.closeTag() };
-                },
-                .category => {
-                    const category = slice_tools.enums.fromName(Categories, kv.value) orelse {
-                        continue :attr_sw .{ .close = it.closeTag() };
-                    };
-                    switch (category) {
-                        .bitmask => parseFlag(flags, it, writer),
-                        .@"struct", .@"union" => |k| parseStructOrUnion(it, k == .@"struct", writer, api),
-                        .handle => parseHandle(it, writer),
-                        .@"enum" => {
-                            // If category="enum" is hit before name=, it means this is an alias
-                            switch (it.nextAttr(enum { name })) {
-                                .success => |kv2| handleAlias(it, writer, kv2.value),
-                                .close => @panic("Unexpected closing tag when handling enum alias"),
-                            }
-                        },
-                        .funcpointer => parseFuncPointer(it, writer),
-                    }
-                    break;
-                },
-            },
-            .close => |c| {
-                handleClose(c, it);
-                break;
-            },
-        },
-        .@"/types" => return,
-    };
-    panicUnexpectedEnd();
-}
-fn parseLen(text: []u8) ZigType.Size {
-    var result: ZigType.Size = .many;
-    var it: CommaIterator = .{ .text = text };
-    while (it.next()) |n| {
-        if (std.mem.eql(u8, n, "null-terminated")) {
-            result = .null_terminated;
-        }
-    }
-    return result;
-}
-fn parseHandle(iterator: XmlIterator, writer: *Writer) void {
-    switch (iterator.nextAttr(enum { name })) {
-        .success => |kv| switch (kv.key) {
-            .name => handleAlias(iterator, writer, kv.value),
-        },
-        .close => |c| {
-            if (c != .@">") @panic("Expected '>' but got '/>' when parsing handle");
-            const kind_text = iterator.getNextBetweenTags();
-            const kind = slice_tools.enums.fromName(enum { VK_DEFINE_NON_DISPATCHABLE_HANDLE, VK_DEFINE_HANDLE }, kind_text) orelse
-                std.debug.panic("Unknown handle kind: {s}", .{kind_text});
-            const name = iterator.getNextBetweenTags();
-            writer.print(
-                "pub const {s}=enum({s}){{null_handle,_}};",
-                .{
-                    stripVkPrefix(name),
-                    switch (kind) {
-                        .VK_DEFINE_NON_DISPATCHABLE_HANDLE => "u64",
-                        .VK_DEFINE_HANDLE => "usize",
-                    },
-                },
-            ) catch panicWrite();
-            iterator.discardElement();
-        },
-    }
-}
-
-fn parseFuncPointer(it: XmlIterator, writer: *Writer) void {
-    _ = it.seekTagAndClose(enum { proto });
-    const ret_type_and_name: CVar = .parse(it);
-    defer ret_type_and_name.deinit();
-    // The return type was duped, so it will live through peeks
-
-    writer.print("pub const Pfn{s} = *const fn(", .{stripPfnPrefix(ret_type_and_name.name)}) catch panicWrite();
-    _ = it.seekTagAndClose(enum { @"/proto" });
-    while (true) {
-        const t = it.seekTagAndClose(enum { param, @"/type" });
-        switch (t) {
-            .param => {
-                const param: CVar = .parse(it);
-                defer param.deinit();
-
-                writer.print("{f},", .{param}) catch panicWrite();
-            },
-            .@"/type" => break,
-        }
-    }
-    writer.print(")callconv(vk_callconv){f};", .{ret_type_and_name.type}) catch panicWrite();
-}
-fn writeConstant(it: XmlIterator, writer: *Writer) void {
-    const t = switch (it.nextAttr(enum { type })) {
-        .close => @panic("Typeless constant"),
-        .success => |kv| kv.value,
-    };
-    const primitive = Primitive.parse(t) orelse std.debug.panic("Unknown type of constant: {s}", .{t});
-    const value = switch (it.nextAttr(enum { value })) {
-        .close => @panic("Constant without a value"),
-        .success => |kv| kv.value,
-    };
-    const trimmed = std.mem.trim(u8, value, " ");
-    const is_negation = std.mem.startsWith(u8, trimmed, "(~");
-    const number = std.mem.trim(u8, trimmed, " ()~uUlLfF");
-    const duped_number = dupe(number);
-    defer freeDupe(duped_number);
-
-    const name = switch (it.nextAttr(enum { name })) {
-        .close => @panic("Nameless constant"),
-        .success => |kv| kv.value,
-    };
-    const duped_name = dupe(stripVK_Prefix(name));
-    defer freeDupe(duped_name);
-
-    switch (it.nextAttr(enum { comment })) {
-        .success => |kv| {
-            printComment(kv.value, writer);
-            it.closeTagRegardless();
-        },
-        .close => |c| if (c != .@"/>") std.debug.panic("Enum {s} has content", .{duped_name}),
-    }
-    writer.print("pub const {s}:{t}=", .{ duped_name, primitive }) catch panicWrite();
-    if (is_negation) {
-        writer.print("~@as({t},{s});", .{ primitive, duped_number }) catch panicWrite();
-    } else {
-        writer.print("{s};", .{duped_number}) catch panicWrite();
-    }
-}
-
-fn stripPrefixAndLowerCaps(text: []const u8, prefix: []const u8) []const u8 {
-    const stripped = stripEnumPrefix(text, prefix);
-    return std.ascii.allocLowerString(allocator, stripped) catch panicOOM();
-}
-fn stripPrefixAndLowerCapsWithoutBitSuffix(text: []const u8, prefix: []const u8, has_suffix: bool) []const u8 {
-    var trimmed = stripEnumPrefix(text, prefix);
-    if (has_suffix) blk: {
-        const under = std.mem.find(u8, trimmed, "_") orelse break :blk;
-        trimmed = trimmed[under + 1 ..];
-    }
-    const bits = "_BIT";
-    const bits_index = std.mem.findLast(u8, trimmed, bits) orelse trimmed.len;
-    const first_part = trimmed[0..bits_index];
-    const second_part = trimmed[@min(trimmed.len, bits_index + bits.len)..];
-    const ret = allocator.alloc(u8, first_part.len + second_part.len) catch panicOOM();
-    _ = std.ascii.lowerString(ret, first_part);
-    _ = std.ascii.lowerString(ret[first_part.len..], second_part);
-    return ret;
-}
-
-fn stripEnumPrefix(new_entry: []const u8, prefix: []const u8) []const u8 {
-    if (new_entry.len <= prefix.len) return new_entry;
-    if (!std.mem.startsWith(u8, new_entry, "VK_")) std.debug.panic("Enum {s} does not start with VK_", .{new_entry});
-    var entry_ptr = new_entry.ptr + "VK_".len;
-    const entry_limit = new_entry.ptr + new_entry.len;
-    var prefix_ptr = prefix.ptr;
-    const prefix_limit = prefix.ptr + prefix.len;
-    while (prefix_ptr != prefix_limit) {
-        const e = entry_ptr[0];
-        entry_ptr += 1;
-        if (e == '_') continue;
-        const p = prefix_ptr[0];
-        prefix_ptr += 1;
-        if (std.ascii.toLower(e) != std.ascii.toLower(p)) {
-            entry_ptr -= 1;
-            break;
-        }
-    } else {
-        entry_ptr += 1; //Remove the `_` after the name
-    }
-
-    if (@intFromPtr(entry_ptr) > @intFromPtr(entry_limit)) std.debug.panic("Something went wrong when parsing entry {s} of flag {s}", .{ new_entry, prefix });
-    return slice_tools.sliceBetween(entry_ptr, entry_limit);
-}
-
-fn parseEnum(it: XmlIterator, api: Api, new_enum: *Enum, prefix: []const u8) void {
-    enum_loop: while (it.seekTags(enum { @"enum", @"/enums" })) |t| switch (t) {
-        .@"enum" => {
-            var new_entry: Enum.Entry = .{
-                .comment = &.{},
-                .name = &.{},
-                .value = &.{},
-            };
-            var is_alias = false;
-            while (true) switch (it.nextAttr(enum { value, api, name, alias, comment })) {
-                .close => break,
-                .success => |kv| switch (kv.key) {
-                    .api => {
-                        if (!api.match(kv.value)) continue :enum_loop;
-                    },
-                    .value => {
-                        new_entry.value = dupe(kv.value);
-                    },
-                    .name => {
-                        new_entry.name = stripPrefixAndLowerCaps(kv.value, prefix);
-                    },
-                    .alias => {
-                        is_alias = true;
-                        new_entry.value = stripPrefixAndLowerCaps(kv.value, prefix);
-                        for (new_enum.entries.items) |e| if (std.mem.eql(u8, e.name, new_entry.value)) {
-                            freeDupe(new_entry.value);
-                            continue :enum_loop;
-                        };
-                    },
-                    .comment => {
-                        new_entry.comment = dupe(trimComment(kv.value));
-                    },
-                }
-            };
-            if (is_alias) {
-                new_enum.aliases.append(allocator, new_entry) catch panicOOM();
-            } else {
-                new_enum.entries.append(allocator, new_entry) catch panicOOM();
-            }
-        },
-        .@"/enums" => return,
-    } else @panic("Unclosed enum");
-}
-fn parseBitmask(it: XmlIterator, api: Api, new_bitmask: *Bitmask, prefix: []const u8, has_suffix: bool) void {
-    enum_loop: while (it.seekTags(enum { @"enum", @"/enums" })) |t| switch (t) {
-        .@"enum" => {
-            var new_entry: Bitmask.Entry = .{
-                .comment = &.{},
-                .name = &.{},
-                .bitpos = 0,
-            };
-            var value: []const u8 = &.{};
-            var is_alias = false;
-            var is_aggregate = false;
-            while (true) switch (it.nextAttr(enum { value, bitpos, api, name, comment, alias })) {
-                .close => break,
-                .success => |kv| switch (kv.key) {
-                    .api => {
-                        if (!api.match(kv.value)) continue :enum_loop;
-                    },
-                    .bitpos => {
-                        new_entry.bitpos = std.fmt.parseInt(u8, kv.value, 10) catch
-                            std.debug.panic("Failed to parse bitpos: {s}", .{kv.value});
-                    },
-                    .name => {
-                        new_entry.name = stripPrefixAndLowerCapsWithoutBitSuffix(kv.value, prefix, has_suffix);
-                    },
-                    .value => {
-                        is_aggregate = true;
-                        value = if (std.mem.startsWith(u8, kv.value, "VK_"))
-                            stripPrefixAndLowerCapsWithoutBitSuffix(kv.value, prefix, has_suffix)
-                        else
-                            dupe(kv.value);
-                    },
-                    .alias => {
-                        is_alias = true;
-                        value = stripPrefixAndLowerCapsWithoutBitSuffix(kv.value, prefix, has_suffix);
-                        for (new_bitmask.entries.items) |e| if (std.mem.eql(u8, e.name, value)) {
-                            freeDupe(value);
-                            continue :enum_loop;
-                        };
-                    },
-                    .comment => {
-                        new_entry.comment = dupe(trimComment(kv.value));
-                    },
-                }
-            };
-            const enum_entry: Enum.Entry = .{
-                .name = new_entry.name,
-                .value = value,
-                .comment = new_entry.comment,
-            };
-            if (is_alias) {
-                new_bitmask.aliases.append(allocator, enum_entry) catch panicOOM();
-            } else if (is_aggregate) {
-                new_bitmask.aggregates.append(allocator, enum_entry) catch panicOOM();
-            } else {
-                new_bitmask.entries.append(allocator, new_entry) catch panicOOM();
-            }
-        },
-        .@"/enums" => return,
-    } else @panic("Unclosed enum");
-}
-
-fn resizeDiscarding(buffer: *[]u8, new_len: usize) void {
-    if (buffer.len < new_len) {
-        allocator.free(buffer.*);
-        buffer.* = allocator.alloc(u8, new_len) catch panicOOM();
-    }
-}
-
-fn parseEnums(it: XmlIterator, writer: *Writer, api: Api, enums: *Enums, bitmasks: *Bitmasks) void {
-    const name = switch (it.nextAttr(enum { name })) {
-        .close => @panic("Nameless enum"),
-        .success => |kv| dupe(stripVkPrefix(kv.value)),
-    };
-
-    const enum_type = switch (it.nextAttr(enum { type })) {
-        .close => @panic("Typeless enum"),
-        .success => |kv| slice_tools.enums.fromName(enum { constants, @"enum", bitmask }, kv.value) orelse
-            std.debug.panic("unknown enum type: {s}", .{kv.value})
-    };
-
-    const comment = switch (it.nextAttr(enum { comment })) {
-        .success => |kv| blk: {
-            const c = dupe(trimComment(kv.value));
-            it.closeTagRegardless();
-            break :blk c;
-        },
-        .close => &.{},
-    };
-    const no_author = stripAuthorTag(name);
-
-    switch (enum_type) {
-        .constants => while (it.seekTags(enum { @"enum", @"/enums" })) |t| switch (t) {
-            .@"enum" => writeConstant(it, writer),
-            .@"/enums" => {
-                it.closeTagRegardless();
-                break;
-            },
-        } else std.debug.panic("Unclosed enum: {s}", .{name}),
-        .@"enum" => {
-            const new = enums.addOne(allocator) catch panicOOM();
-            new.* = .{
-                .name = name,
-                .comment = comment,
-            };
-            parseEnum(it, api, new, no_author);
-        },
-        .bitmask => {
-            const new = bitmasks.addOne(allocator) catch panicOOM();
-            new.* = .{
-                .name = name,
-                .comment = comment,
-            };
-            const common = "FlagBits";
-            const prefix_len = std.mem.find(u8, no_author, common) orelse std.debug.panic("Bitmask without FlagBits in name: {s}", .{name});
-            const without_bits = no_author[0..prefix_len];
-            const suffix = no_author[prefix_len + common.len ..];
-            parseBitmask(it, api, new, without_bits, suffix.len != 0);
-        },
-    }
-}
-
-fn writeEnums(writer: *Writer, enums: *Enums) void {
-    for (enums.items) |*i| {
-        printComment(i.comment, writer);
-        writer.print("pub const {s}=enum(c_int){{", .{i.name}) catch panicWrite();
-        for (i.entries.items) |e| {
-            printComment(e.comment, writer);
-            writer.print("@\"{s}\"={s},", .{ e.name, e.value }) catch panicWrite();
-        }
-        for (i.aliases.items) |e| {
-            printComment(e.comment, writer);
-            writer.print("pub const @\"{s}\" = @This().@\"{s}\";", .{ e.name, e.value }) catch panicWrite();
-        }
-        writer.writeAll("};") catch panicWrite();
-        i.deinit();
-    }
-}
-fn flagsNameFromFlagBits(buffer: *[]u8, name: []const u8) []u8 {
-    const flagbits_text = "FlagBits";
-    const flags_text = "Flags";
-    const flagbits_index = std.mem.findLast(u8, name, flagbits_text) orelse
-        std.debug.panic("Bitmask: {s} has no FlagBits in its name", .{name});
-    resizeDiscarding(buffer, name.len);
-    @memcpy(buffer.ptr, name[0..flagbits_index]);
-    const flags_start = buffer.ptr + flagbits_index;
-    @memcpy(flags_start, flags_text);
-    const suffix_start = flags_start + flags_text.len;
-    @memcpy(suffix_start, name[flagbits_index + flagbits_text.len ..]);
-    return buffer.*[0 .. name.len - (flagbits_text.len - flags_text.len)];
-}
-fn flagBitsNameFromFlags(buffer: *[]u8, name: []const u8) []u8 {
-    const flagbits_text = "FlagBits";
-    const flags_text = "Flags";
-    const increase = flagbits_text.len - flags_text.len;
-    const flags_index = std.mem.findLast(u8, name, flags_text) orelse
-        std.debug.panic("Bitmask: {s} has no Flags in its name", .{name});
-    const final_size = name.len + increase;
-    resizeDiscarding(buffer, final_size);
-    @memcpy(buffer.ptr, name[0..flags_index]);
-    const flags_start = buffer.ptr + flags_index;
-    @memcpy(flags_start, flagbits_text);
-    const suffix_start = flags_start + flagbits_text.len;
-    @memcpy(suffix_start, name[flags_index + flags_text.len ..]);
-    return buffer.*[0..final_size];
-}
-fn getAuthorTagLen(text: []const u8) usize {
-    var last = text.ptr + text.len;
-    var count: usize = 0;
-    while (last != text.ptr) {
-        last -= 1;
-        if (std.ascii.isUpper(last[0])) {
-            count += 1;
-        } else return count;
-    }
-    return count;
-}
-fn stripAuthorTag(text: []const u8) []const u8 {
-    const l = getAuthorTagLen(text);
-    return text[0 .. text.len - l];
-}
 
 const Registry = struct {
     const Bitmask = struct {
@@ -906,7 +241,6 @@ const Registry = struct {
             }
         };
 
-        name: []u8,
         bits: Bits,
         comment: []u8,
         entries: []Entry,
@@ -915,38 +249,35 @@ const Registry = struct {
 
     const Enum = struct {
         const Entry = struct {
-            name: []u8,
-            value: []u8,
-            comment: []u8,
-            aliases: [][]u8,
+            name: []u8 = &.{},
+            value: []u8 = &.{},
+            comment: []u8 = &.{},
+            aliases: [][]u8 = &.{},
         };
 
-        name: []u8,
-        comment: []u8,
-        entries: []Entry,
-        aliases: []Entry,
+        comment: []u8 = &.{},
+        entries: []Entry = &.{},
+        aliases: []Entry = &.{},
     };
 
     const Command = struct {
-        name: []u8,
         return_value: ZigType,
-        params: []ZigVar,
-        success_codes: []u8,
-        error_codes: []u8,
-        aliases: [][]u8,
+        params: []ZigVar = &.{},
+        success_codes: []u8 = &.{},
+        error_codes: []u8 = &.{},
+        aliases: [][]u8 = &.{},
     };
     const DispatchableHandle = struct {
-        name: []u8,
-        commands: []Command,
+        commands: []Command = &.{},
+        aliases: [][]u8 = &.{},
     };
     const NonDispatchableHandle = struct {
-        name: []u8,
+        aliases: [][]u8 = &.{},
     };
-    const Struct = struct {
-        name: []u8,
-        comment: []u8,
-        members: []ZigVar,
-        aliases: [][]u8,
+    const StructOrUnion = struct {
+        comment: []u8 = &.{},
+        members: []ZigVar = &.{},
+        aliases: [][]u8 = &.{},
     };
 
     const VarType = union(enum) {
@@ -996,31 +327,11 @@ const Registry = struct {
         primitive: Primitive,
         non_primitive: []const u8,
 
-        pub fn format(self: *const @This(), writer: *Writer) Writer.Error!void {
-            switch (self.*) {
-                .primitive => |p| writer.print("{t}", .{p}) catch panicWrite(),
-                .non_primitive => |n| {
-                    const kind, const stripped = stripPrefix(n);
-                    switch (kind) {
-                        .vk => std.debug.panic("Type starts with `vk`: {s}", .{n}),
-                        .none, .Vk => writer.writeAll(stripped) catch panicWrite(),
-                        .PFN_vk => writer.print("Pfn{s}", .{stripped}) catch panicWrite(),
-                    }
-                }
-            }
-        }
-
-        pub fn parse(text: []const u8) @This() {
+        pub fn parse(text: []const u8, allocator: Allocator) @This() {
             return if (Primitive.parse(text)) |p|
                 .{ .primitive = p }
             else
-                .{ .non_primitive = dupe(text) };
-        }
-        pub fn deinit(self: @This()) void {
-            switch (self) {
-                .primitive => {},
-                .non_primitive => |n| freeDupe(n),
-            }
+                .{ .non_primitive = allocator.dupe(u8, text) catch panics.oom() };
         }
     };
 
@@ -1028,75 +339,40 @@ const Registry = struct {
         const Kind = enum {
             @"const",
             mutable,
-
-            pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
-                writer.writeAll("[*c]") catch panicWrite();
-                if (self == .@"const") writer.writeAll("const") catch panicWrite();
-            }
         };
         const max_ptr_layer = 2;
 
         ptrs: slice_tools.BoundedArray(Kind, max_ptr_layer) = .{},
         base_type: VarType,
 
-        pub fn deinit(self: *const @This()) void {
-            self.base_type.deinit();
-        }
-        pub fn format(self: *const @This(), writer: *Writer) Writer.Error!void {
-            if (self.base_type == .primitive and self.base_type.primitive == .void and self.ptrs.len != 0) {
-                for (self.ptrs.buffer[0..self.ptrs.len -| 1]) |p| {
-                    writer.print("{f} ", .{p}) catch panicWrite();
-                }
-                writer.print("?*{s} anyopaque", .{if (self.ptrs.buffer[0] == .@"const") "const" else ""}) catch panicWrite();
-            } else {
-                for (self.ptrs.constSlice()) |p| {
-                    writer.print("{f} ", .{p}) catch panicWrite();
-                }
-                writer.print("{f}", .{self.base_type}) catch panicWrite();
+        pub fn parse(it: XmlIterator, allocator: Allocator) @This() {
+            var result: @This() = .{
+                .base_type = undefined,
+            };
+            const b = it.reader.takeDelimiter('<');
+            if (find(b, "const")) |_| {
+                result.ptrs.appendAssumeCapacity(.@"const");
             }
-        }
-
-        fn parse(it: XmlIterator) @This() {
-            const text = it.reader.takeDelimiterExclusive('<') catch |e| panicPeekDel(e);
-            var result: CType = .{ .base_type = undefined };
-            const trimmed_text = std.mem.trim(u8, text, " ");
-            const is_const = std.mem.startsWith(u8, trimmed_text, "const");
-            if (is_const) {
-                result.ptrs.buffer[0] = .@"const";
-                result.ptrs.len = 1;
+            it.closeTag();
+            const t = it.reader.takeDelimiter('<');
+            result.base_type = .parse(t, allocator);
+            it.closeTag();
+            var after_type = it.reader.takeDelimiter('<');
+            if (findScalar(after_type, '*')) |i| {
+                if (result.ptrs.len == 0) result.ptrs.appendAssumeCapacity(.mutable);
+                after_type = after_type[i..];
             }
-            const c_type = it.getNextBetweenTags();
-            result.base_type = .parse(c_type);
-            it.closeTagRegardless();
-            if (is_const) {
-                _ = it.reader.discardDelimiterInclusive('*') catch |e| panicRead(e);
-            }
-            while (true) {
-                const b = it.reader.peekByte() catch |e| panicRead(e);
-                sw: switch (b) {
-                    '<' => break,
-                    ' ' => {
-                        it.reader.toss(1);
-                    },
-                    '*' => {
-                        result.ptrs.appendAssumeCapacity(.mutable);
-                        if (result.ptrs.len == CType.max_ptr_layer) {
-                            _ = it.reader.discardDelimiterExclusive('<') catch panicReadFailed();
-                            break;
-                        }
-                        continue :sw ' ';
-                    },
+            if (findAny(after_type, "*c")) |i| {
+                switch (after_type[i]) {
+                    '*' => result.ptrs.appendAssumeCapacity(.mutable),
                     'c' => {
+                        // Must be const, but we'll just trust it
+                        assert(std.mem.startsWith(u8, after_type[i..], "const"));
                         result.ptrs.appendAssumeCapacity(.@"const");
-                        _ = it.reader.discardDelimiterExclusive('<') catch panicReadFailed();
-                        break;
                     },
-                    else => {
-                        std.debug.panic("Unexpected byte when parsing type: {c}", .{b});
-                    },
+                    else => unreachable,
                 }
             }
-
             return result;
         }
     };
@@ -1106,77 +382,47 @@ const Registry = struct {
             array: []u8,
             bitfield: []u8,
             single,
-
-            fn initArray(text: []u8) @This() {
-                return .{ .array = dupe(text) };
-            }
-            fn initBitfield(text: []u8) @This() {
-                return .{ .bitfield = dupe(text) };
-            }
-            pub fn deinit(self: @This()) void {
-                switch (self) {
-                    .array, .bitfield => |a| freeDupe(a),
-                    .single => {},
-                }
-            }
         };
         type: CType,
         name: []u8,
         amount: Amount,
 
-        fn parse(it: XmlIterator) @This() {
-            var result: CVar = undefined;
-            result.type = .parse(it);
-            result.name = dupe(it.getNextBetweenTags());
-            it.closeTagRegardless();
-            while (true) {
-                const b = it.reader.peekByte() catch |e| panicRead(e);
-                switch (b) {
-                    ' ' => it.reader.toss(1),
-                    '<' => {
-                        result.amount = .single;
-                        return result;
-                    },
-                    '[' => {
-                        it.reader.toss(1);
-                        var amount = it.reader.takeDelimiter(']') catch |e|
-                            panicTakeDel(e) orelse
-                            @panic("Missing ']' in array");
-                        if (std.mem.findScalar(u8, amount, '>')) |enum_start| {
-                            amount = slice_tools.safeSubslice(amount, enum_start + 1, .unlimited) catch @panic("Malformed array size");
-                            const enum_end = std.mem.findScalar(u8, amount, '<') orelse @panic("Unclosed enum in array amount");
-                            result.amount = .initArray(amount[0..enum_end]);
-                        } else {
-                            result.amount = .initArray(amount);
-                        }
-                        return result;
-                    },
-                    ':' => {
-                        it.reader.toss(1);
-                        const amount = it.reader.takeDelimiterExclusive('<') catch |e|
-                            panicPeekDel(e);
-                        result.amount = .initBitfield(amount);
-                        return result;
-                    },
-                    else => std.debug.panic("Unexpected byte when parsing type: {c}", .{b}),
-                }
-            }
-
-            return result;
-        }
-        pub fn format(self: *const @This(), writer: *Writer) Writer.Error!void {
-            const w: WriterWrapper = .{ .writer = writer };
-            switch (self.amount) {
-                .array => |amount| w.print("{s}:[{s}]{f}", .{
-                    self.name,
-                    stripVK_PrefixIfNecessary(amount),
-                    self.type,
-                }),
-                .bitfield => |amount| {
-                    w.print("{s}:u{s}", .{ self.name, amount });
+        pub fn parse(it: XmlIterator, allocator: Allocator) @This() {
+            var result: @This() = .{
+                .type = .parse(it, allocator),
+                .name = undefined,
+                .amount = undefined,
+            };
+            it.closeTag();
+            result.name = allocator.dupe(u8, it.reader.takeDelimiter('<')) catch panics.oom();
+            it.closeTag();
+            var amount = it.reader.takeDelimiter('<');
+            const i = findAny(amount, ":[") orelse {
+                result.amount = .single;
+                return result;
+            };
+            const char = amount[i];
+            amount = amount[i + 1 ..];
+            switch (char) {
+                ':' => {
+                    const end = findScalar(amount, '<') orelse panic("Failed to find bitfield end for {s}", .{result.name});
+                    result.amount = .{ .bitfield = allocator.dupe(u8, amount[0..end]) catch panics.oom() };
                 },
-                .single => w.print("{s}:{f}", .{ self.name, self.type }),
+                '[' => {
+                    if (findScalar(amount, '<')) |j| {
+                        amount = amount[j..];
+                        var k = findScalar(amount, '>') orelse @panic("Unclosed tag");
+                        amount = amount[k..];
+                        k = findScalar(amount, '<') orelse panic("Failed to find amount end for {s}", .{result.name});
+                        result.amount = .{ .array = allocator.dupe(u8, amount[0..k]) catch panics.oom() };
+                    } else {
+                        const end = findScalar(amount, ']') orelse @panic("Unclose array");
+                        result.amount = .{ .array = allocator.dupe(u8, amount[0..end]) catch panics.oom() };
+                    }
+                },
+                else => unreachable,
             }
+            return result;
         }
     };
 
@@ -1190,40 +436,11 @@ const Registry = struct {
             optional: bool,
             size: Size,
             kind: CType.Kind,
-
-            pub fn format(self: *const @This(), writer: *Writer) Writer.Error!void {
-                writer.print(
-                    "{s}{s}{s}",
-                    .{
-                        if (self.optional) "?" else "",
-                        switch (self.size) {
-                            .single => "*",
-                            .many => "[*]",
-                            .null_terminated => "[*:0]",
-                        },
-                        if (self.kind == .@"const") "const" else "",
-                    },
-                ) catch panicWrite();
-            }
         };
 
         ptrs: slice_tools.BoundedArray(Ptr, 2) = .{},
         base_type: VarType,
         amount: CVar.Amount,
-
-        pub fn format(self: *const @This(), writer: *Writer) Writer.Error!void {
-            for (self.ptrs.constSlice()) |p| {
-                writer.print("{f} ", .{p}) catch panicWrite();
-            }
-            if (self.ptrs.len != 0 and self.base_type == .primitive and self.base_type.primitive == .void) {
-                const last_ptr = self.ptrs.buffer[self.ptrs.len - 1];
-                writer.writeAll(if (last_ptr.size == .many) "u8" else "anyopaque") catch panicWrite();
-            } else switch (self.amount) {
-                .array => |amount| writer.print("[{s}]{f}", .{ stripVK_PrefixIfNecessary(amount), self.base_type }) catch panicWrite(),
-                .bitfield => |amount| writer.print("u{s}", .{stripVK_PrefixIfNecessary(amount)}) catch panicWrite(),
-                .single => writer.print("{f}", .{self.base_type}) catch panicWrite(),
-            }
-        }
 
         pub fn fromCType(c_type: CType) @This() {
             var ret: @This() = .{
@@ -1242,7 +459,7 @@ const Registry = struct {
         }
     };
     const ZigVar = struct {
-        name: [] u8,
+        name: []u8,
         type: ZigType,
 
         pub fn fromCVar(c_var: CVar) @This() {
@@ -1252,17 +469,45 @@ const Registry = struct {
             };
         }
     };
-    const Funcpointer = struct{
-        name: []u8,
-        ret_type: ZigType,
-        params: []ZigVar,
-};
+    const Funcpointer = struct {
+        ret_type: CType,
+        params: []CVar,
+    };
 
-    bitmasks: []Bitmask,
-    enums: []Enum,
-    funcpointers: []Funcpointer,
-    dispatchable_handles: []DispatchableHandle,
-    non_dispatchable_handles: []NonDispatchableHandle,
+    bitmasks: std.StringHashMapUnmanaged(Bitmask) = .empty,
+    enums: std.StringHashMapUnmanaged(Enum) = .empty,
+    funcpointers: std.StringHashMapUnmanaged(Funcpointer) = .empty,
+    dispatchable_handles: std.StringHashMapUnmanaged(DispatchableHandle) = .empty,
+    non_dispatchable_handles: std.StringHashMapUnmanaged(NonDispatchableHandle) = .empty,
+    structs: std.StringHashMapUnmanaged(StructOrUnion) = .empty,
+    unions: std.StringHashMapUnmanaged(StructOrUnion) = .empty,
+
+    fn add(comptime T: type, hashmap: *std.StringHashMapUnmanaged(T), name: []u8, element: T, allocator: Allocator) void {
+        const r = hashmap.getOrPut(allocator, name) catch panics.oom();
+        if (r.found_existing) panic("Duplicate entry: {s}", .{name});
+        r.value_ptr.* = element;
+    }
+    pub fn addBitmask(self: *@This(), name: []u8, bitmask: Bitmask, allocator: Allocator) void {
+        add(Bitmask, &self.bitmasks, name, bitmask, allocator);
+    }
+    pub fn addEnum(self: *@This(), name: []u8, new_enum: Enum, allocator: Allocator) void {
+        add(Enum, &self.enums, name, new_enum, allocator);
+    }
+    pub fn addFuncpointer(self: *@This(), name: []u8, funcpointer: Funcpointer, allocator: Allocator) void {
+        add(Funcpointer, &self.funcpointers, name, funcpointer, allocator);
+    }
+    pub fn addDispatchableHandle(self: *@This(), name: []u8, allocator: Allocator) void {
+        add(DispatchableHandle, &self.dispatchable_handles, name, .{}, allocator);
+    }
+    pub fn addNonDispatchableHandle(self: *@This(), name: []u8, allocator: Allocator) void {
+        add(NonDispatchableHandle, &self.non_dispatchable_handles, name, .{}, allocator);
+    }
+    pub fn addStruct(self: *@This(), name: []u8, new_struct: StructOrUnion, allocator: Allocator) void {
+        add(StructOrUnion, &self.structs, name, new_struct, allocator);
+    }
+    pub fn addUnion(self: *@This(), name: []u8, new_union: StructOrUnion, allocator: Allocator) void {
+        add(StructOrUnion, &self.unions, name, new_union, allocator);
+    }
 };
 
 const Parser = struct {
@@ -1270,7 +515,7 @@ const Parser = struct {
         vulkan,
         vulkansc,
 
-        pub fn match(current: @This(), other: ?[]const u8) bool {
+        pub fn match(current: @This(), other: ?[]u8) bool {
             var it: CommaIterator = .{ .text = other orelse return true };
             while (it.next()) |api| {
                 const a = slice_tools.enums.fromName(@This(), api) orelse std.debug.panic("Unknown api: {s}", .{api});
@@ -1279,19 +524,31 @@ const Parser = struct {
             return false;
         }
     };
-    const DispatchableHandle = struct{
+    const DispatchableHandle = struct {
         commands: []Registry.Command,
-};
+    };
 
+    registry: Registry,
     xml_iterator: XmlIterator,
     allocator: Allocator,
     api: Api,
-    non_dispatchable_handles: std.ArrayList(Registry.NonDispatchableHandle),
-    dispatchable_handles: std.StringHashMapUnmanaged(Registry.DispatchableHandle),
-    structs: std.ArrayList(Registry.Struct),
 
+    fn dupe(self: *const @This(), str: []const u8) []u8 {
+        return self.allocator.dupe(u8, str) catch panics.oom();
+    }
+    fn freeDupe(self: *const @This(), str: []const u8) void {
+        self.allocator.free(str);
+    }
+    pub fn init(reader: *Reader, allocator: Allocator, api: Api) @This() {
+        return .{
+            .allocator = allocator,
+            .xml_iterator = .{ .reader = .{ .reader = reader } },
+            .api = api,
+            .registry = .{},
+        };
+    }
 
-    pub fn parse(self: *@This()) Registry {
+    pub fn parse(self: *@This()) void {
         _ = self.xml_iterator.seekTags(enum { registry });
         while (true) switch (self.xml_iterator.seekTags(enum { types, enums, commands, extensions, @"/registry" })) {
             .types => self.parseTypes(),
@@ -1310,282 +567,77 @@ const Parser = struct {
     fn parseType(self: *@This()) void {
         while (self.xml_iterator.nextAttr(enum { api, category })) |kv| switch (kv.key) {
             .api => {
-                if (self.api.match(kv.value)) continue;
-                self.xml_iterator.closeTag();
+                if (!self.api.match(kv.value)) return;
             },
-            .category => switch (enumFromName(enum { handle, @"struct", @"union", funcpointer }, kv.value)) {
-                .handle => self.parseHandle(),
-                .@"struct", .@"union" => |e| self.parseStructOrUnion(e == @"struct"),
-                .funcpointer => self.parseFuncpointer(),
-        },
+            .category => {
+                switch (enumFromName(enum { handle, @"struct", @"union", funcpointer }, kv.value) orelse continue) {
+                    .handle => self.parseHandle(),
+                    .@"struct", .@"union" => |e| self.parseStructOrUnion(e == .@"struct"),
+                    .funcpointer => self.parseFuncpointer(),
+                }
+                return;
+            }
         };
     }
-    fn parseHandle(self: *@This()) void{
-        const kind = self.xml_iterator.getNextBetweenTags();
-        switch(enumFromName(enum{VK_DEFINE_NON_DISPATCHABLE_HANDLE, VK_DEFINE_HANDLE}, kind)){
+    fn parseHandle(self: *@This()) void {
+        if (self.xml_iterator.nextAttr(enum { name })) |kv| {
+            // This is an alias
+            const name = self.dupe(kv.value);
+            const alias = self.xml_iterator.nextAttr(enum { alias }) orelse panic("Missing alias for handle {s}", .{name});
+            if (self.registry.dispatchable_handles.getPtr(alias.value)) |entry| {
+                entry.aliases = slice_tools.allocated.concat([]u8, entry.aliases, &.{name}, self.allocator) catch panics.oom();
+            } else if (self.registry.non_dispatchable_handles.getPtr(alias.value)) |entry| {
+                entry.aliases = slice_tools.allocated.concat([]u8, entry.aliases, &.{name}, self.allocator) catch panics.oom();
+            } else panic("Failed to find handle: {s}", .{alias.value});
+            return;
+        }
+        const kind_text = self.xml_iterator.getNextBetweenTags();
+        const kind = enumFromName(enum { VK_DEFINE_NON_DISPATCHABLE_HANDLE, VK_DEFINE_HANDLE }, kind_text) orelse
+            panic("Failed to classify handle: {s}", .{kind_text});
+        const name = self.xml_iterator.getNextBetweenTags();
+        switch (kind) {
             .VK_DEFINE_NON_DISPATCHABLE_HANDLE => {
-            self.registry
-        },
-            .VK_DEFINE_HANDLE => {},
+                self.registry.addNonDispatchableHandle(self.dupe(name), self.allocator);
+            },
+            .VK_DEFINE_HANDLE => {
+                self.registry.addDispatchableHandle(self.dupe(name), self.allocator);
+            },
         }
+    }
+    fn parseStructOrUnion(self: *@This(), is_struct: bool) void {
+        _ = is_struct; // autofix
+        _ = self;
+    }
+    fn parseFuncpointer(self: *@This()) void {
+        _ = self.xml_iterator.seekTags(enum { proto });
+        var new: Registry.Funcpointer = undefined;
+        const c_var: Registry.CVar = .parse(self.xml_iterator, self.allocator);
+        new.ret_type = c_var.type;
+        var params: std.ArrayList(Registry.CVar) = .empty;
+        while (true) switch (self.xml_iterator.seekTagAndClose(enum { param, @"/type" })) {
+            .param => {
+                params.append(self.allocator, .parse(self.xml_iterator, self.allocator)) catch panics.oom();
+            },
+            .@"/type" => {
+                new.params = params.toOwnedSlice(self.allocator) catch panics.oom();
+                self.registry.addFuncpointer(c_var.name, new, self.allocator);
+                return;
+            },
+        };
+    }
+    fn parseEnums(self: *@This()) void {
+        _ = self;
+    }
+    fn parseCommands(self: *@This()) void {
+        _ = self;
+    }
+    fn parseExtensions(self: *@This()) void {
+        _ = self;
     }
 };
-
-fn writeFlagBitsFunctions(writer: WriterWrapper, flags_name: []const u8, flag_bits_name: []const u8) void {
-    writer.print(
-        \\ pub const toFlags=FlagBitsMixin({[flags_name]s}, {[flag_bits_name]s}).toFlags;
-        \\ pub const fromFlags=FlagBitsMixin({[flags_name]s}, {[flag_bits_name]s}).fromFlags;
-        \\ pub const toInt=FlagBitsMixin({[flags_name]s}, {[flag_bits_name]s}).toInt;
-        \\ pub const fromInt=FlagBitsMixin({[flags_name]s}, {[flag_bits_name]s}).fromInt;
-    , .{ .flags_name = flags_name, .flag_bits_name = flag_bits_name });
-}
-fn writeFlagsFunctions(writer: WriterWrapper, flags_name: []const u8, flag_bits_name: []const u8) void {
-    writer.print(
-        \\ pub const merge=FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).merge;
-        \\ pub const intersection=FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).intersection;
-        \\ pub const negation=FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).negation;
-        \\ pub const difference=FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).difference;
-        \\ pub const toBit=FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).toBit;
-        \\ pub const fromBit=FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).fromBit;
-        \\ pub const set=FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).set;
-        \\ pub const unset=FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).unset;
-        \\ pub const toInt=FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).toInt;
-        \\ pub const fromInt=FlagsMixin({[flags_name]s}, {[flag_bits_name]s}).fromInt;
-    , .{ .flags_name = flags_name, .flag_bits_name = flag_bits_name });
-}
-fn writeBitmasks(writer: *Writer, bitmasks: *Bitmasks, flags: *Flags) void {
-    var buffer: []u8 = &.{};
-    defer allocator.free(buffer);
-
-    for (bitmasks.items) |*i| {
-        printComment(i.comment, writer);
-        const lessThan = struct {
-            pub fn lessThan(_: void, lhs: Bitmask.Entry, rhs: Bitmask.Entry) bool {
-                return lhs.bitpos < rhs.bitpos;
-            }
-        }.lessThan;
-        std.sort.pdq(Bitmask.Entry, i.entries.items, {}, lessThan);
-
-        const flags_name = flagsNameFromFlagBits(&buffer, i.name);
-        const kv = flags.fetchRemove(flags_name) orelse std.debug.panic("FlagBits {s} has no corresponding Flags", .{i.name});
-        freeDupe(kv.key);
-        const bits = kv.value;
-        writer.print("pub const {s}=enum({s}){{", .{ i.name, bits.toZig() }) catch panicWrite();
-        for (i.entries.items) |e| {
-            printComment(e.comment, writer);
-            writer.print("@\"{s}\"=1<<{},", .{ e.name, e.bitpos }) catch panicWrite();
-        }
-        for (i.aliases.items) |e| {
-            printComment(e.comment, writer);
-            writer.print("pub const @\"{s}\" = @This().@\"{s}\";", .{ e.name, e.value }) catch panicWrite();
-        }
-        writeFlagBitsFunctions(writer, flags_name, i.name);
-        writer.writeAll("};") catch panicWrite();
-
-        writer.print("pub const {s}=packed struct({s}){{", .{ flags_name, bits.toZig() }) catch panicWrite();
-        var prev_bit: u8 = undefined;
-        const rest = if (i.entries.items.len != 0) blk: {
-            const e = i.entries.items[0];
-            printComment(e.comment, writer);
-            writer.print("@\"{s}\":bool=false,", .{e.name}) catch panicWrite();
-            prev_bit = e.bitpos;
-            break :blk i.entries.items[1..];
-        } else i.entries.items;
-        for (rest) |e| {
-            const bit_diff = e.bitpos - prev_bit -| 1;
-            prev_bit = e.bitpos;
-            if (bit_diff > 1) {
-                writer.print("_reserved_{}: u{}=undefined,", .{ e.bitpos, bit_diff }) catch panicWrite();
-            }
-            printComment(e.comment, writer);
-            writer.print("@\"{s}\":bool=false,", .{e.name}) catch panicWrite();
-        }
-        for (i.aggregates.items) |e| {
-            printComment(e.comment, writer);
-            writer.print("pub const @\"{s}\":@This()=@bitCast({s});", .{ e.name, e.value }) catch panicWrite();
-        }
-        for (i.aliases.items) |e| {
-            printComment(e.comment, writer);
-            writer.print("pub const @\"{s}\"=@This().{s};", .{ e.name, e.value }) catch panicWrite();
-        }
-        writeFlagsFunctions(writer, flags_name, i.name);
-        writer.writeAll("};") catch panicWrite();
-        i.deinit();
-    }
-
-    // Empty flags
-    var flags_it = flags.iterator();
-    while (flags_it.next()) |kv| {
-        const flags_name = kv.key_ptr.*;
-        const flag_bits_name = flagBitsNameFromFlags(&buffer, flags_name);
-        const zig_type = kv.value_ptr.toZig();
-        writer.print("pub const {s}=packed struct({s}){{", .{ flags_name, zig_type }) catch panicWrite();
-        writeFlagsFunctions(writer, flags_name, flag_bits_name);
-        writer.print("}};pub const {s}=enum({s}){{", .{ flag_bits_name, zig_type }) catch panicWrite();
-        writeFlagBitsFunctions(writer, flags_name, flag_bits_name);
-        writer.writeAll("};") catch panicWrite();
-    }
-}
-
-const Commands = struct {
-    const Alias = struct {
-        new_name: []u8,
-        alias: []u8,
-    };
-    base: std.ArrayList(Command) = .empty,
-    instance: std.ArrayList(Command) = .empty,
-    device: std.ArrayList(Command) = .empty,
-    command: std.ArrayList(Command) = .empty,
-};
-fn parseCommands(it: XmlIterator, commands: *Commands, api: Api) void {
-    var last: enum { base, instance, device, command } = .base;
-    command_loop: while (it.seekTags(enum { command, @"/commands" })) |t_| switch (t_) {
-        .command => {
-            var successcodes: []u8 = undefined;
-            var errorcodes: []u8 = undefined;
-            while (true) switch (it.nextAttr(enum { api, successcodes, errorcodes, name })) {
-                .success => |kv| switch (kv.key) {
-                    .api => {
-                        if (!api.match(kv.value)) continue :command_loop;
-                    },
-                    .successcodes => {
-                        successcodes = dupe(kv.value);
-                    },
-                    .errorcodes => {
-                        errorcodes = dupe(kv.value);
-                    },
-                    .name => {
-                        // We assume aliases always directly follow what they are aliasing
-                        const alias = dupe(stripVkPrefix(kv.value));
-                        if (alias.len == 0) @panic("Empty alias");
-                        alias[0] = std.ascii.toLower(alias[0]);
-                        const list = switch (last) {
-                            .base => &commands.base,
-                            .instance => &commands.instance,
-                            .device => &commands.device,
-                            .command => &commands.command,
-                        };
-                        if (list.items.len == 0) std.debug.panic("Can't find what alias {s} refers to", .{alias});
-                        const last_command = &list.items[0];
-                        last_command.aliases.append(allocator, alias) catch panicOOM();
-                        continue :command_loop;
-                    },
-                },
-                .close => {
-                    break;
-                },
-            };
-
-            _ = it.seekTags(enum { proto }) orelse @panic("Command without prototype");
-            const proto: CVar = .parse(it);
-            var params: std.ArrayList(ZigVar) = .empty;
-            while (it.seekTags(enum { param, @"/command", implicitexternsyncparams })) |t| switch (t) {
-                .param => {
-                    var optional = false;
-                    var len: ZigType.Size = .single;
-                    while (true) switch (it.nextAttr(enum { optional, len })) {
-                        .close => break,
-                        .success => |kv| switch (kv.key) {
-                            .optional => {
-                                optional = true;
-                            },
-                            .len => {
-                                len = if (std.mem.eql(u8, kv.value, "null-terminated"))
-                                    .null_terminated
-                                else
-                                    .many;
-                            },
-                        }
-                    };
-                    const cvar: CVar = .parse(it);
-                    var zigvar: ZigVar = .{
-                        .name = cvar.name,
-                        .type = .{
-                            .base_type = cvar.type.base_type,
-                            .amount = cvar.amount,
-                            .ptrs = .{
-                                .len = cvar.type.ptrs.len,
-                            },
-                        },
-                    };
-                    switch (zigvar.type.ptrs.len) {
-                        0 => {},
-                        1 => {
-                            zigvar.type.ptrs.buffer[0] = .{
-                                .optional = optional,
-                                .size = len,
-                                .kind = cvar.type.ptrs.buffer[0],
-                            };
-                        },
-                        2 => {
-                            zigvar.type.ptrs.buffer[0] = .{
-                                .optional = false,
-                                .size = .single,
-                                .kind = .mutable,
-                            };
-                            zigvar.type.ptrs.buffer[1] = .{
-                                .optional = optional,
-                                .size = len,
-                                .kind = cvar.type.ptrs.buffer[1],
-                            };
-                        },
-                        else => unreachable,
-                    }
-                    params.append(allocator, zigvar) catch panicOOM();
-                },
-                .implicitexternsyncparams => {
-                    _ = it.seekTagAndClose(enum { @"/implicitexternsyncparams" });
-                },
-                .@"/command" => break,
-            } else @panic("Unclosed command");
-            const command: Command = .{
-                .name = proto.name,
-                .return_value = .{
-                    .base_type = proto.type.base_type,
-                    .amount = proto.amount,
-                    .ptrs = .{
-                        .len = proto.type.ptrs.len,
-                    },
-                },
-                .params = params.toOwnedSlice(allocator) catch panicOOM(),
-                .success_codes = successcodes,
-                .error_codes = errorcodes,
-                .aliases = .empty,
-            };
-            if (command.params.len != 0 and command.params[0].type.base_type == .non_primitive) blk: {
-                const dispatch = slice_tools.enums.fromName(
-                    enum { VkInstance, VkDevice, VkCommandBuffer },
-                    command.params[0].type.base_type.non_primitive,
-                ) orelse break :blk;
-                const list = l: switch (dispatch) {
-                    .VkInstance => {
-                        last = .instance;
-                        break :l &commands.instance;
-                    },
-                    .VkDevice => {
-                        last = .device;
-                        break :l &commands.device;
-                    },
-                    .VkCommandBuffer => {
-                        last = .command;
-                        break :l &commands.command;
-                    },
-                };
-                list.append(allocator, command) catch panicOOM();
-                continue :command_loop;
-            }
-            commands.base.append(allocator, command) catch panicOOM();
-            last = .base;
-        },
-        .@"/commands" => return,
-    };
-}
-fn parseExtensions(it: XmlIterator) void {
-    _ = it;
-}
 
 pub fn main(init: std.process.Init) void {
-    allocator = init.arena.allocator();
+    const allocator = init.arena.allocator();
     const stdin = std.Io.File.stdin();
     var stdin_buffer: [4096]u8 = undefined;
     var stdin_reader = stdin.reader(init.io, &stdin_buffer);
@@ -1593,13 +645,13 @@ pub fn main(init: std.process.Init) void {
     const stdout = std.Io.File.stdout();
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer = stdout.writer(init.io, &stdout_buffer);
-    const writer = &stdout_writer.interface;
-    defer writer.flush() catch panicWrite();
+    const writer: WriterWrapper = .{ .writer = &stdout_writer.interface };
+    defer writer.flush();
 
-    var api: Api = .vulkan;
+    var api: Parser.Api = .vulkan;
 
     {
-        var it = init.minimal.args.iterateAllocator(allocator) catch panicOOM();
+        var it = init.minimal.args.iterateAllocator(allocator) catch panics.oom();
         _ = it.next(); // program name
         while (it.next()) |o| {
             const Options = enum {
@@ -1609,39 +661,43 @@ pub fn main(init: std.process.Init) void {
             switch (op) {
                 .@"-api" => {
                     const a = it.next() orelse @panic("Missing api type");
-                    api = slice_tools.enums.fromName(Api, a) orelse std.debug.panic("Unknown api: {s}", .{a});
+                    api = slice_tools.enums.fromName(Parser.Api, a) orelse std.debug.panic("Unknown api: {s}", .{a});
                 },
             }
         }
     }
-    writer.writeAll(@embedFile("preamble.zig")) catch panicWrite();
 
-    const it: XmlIterator = .{ .reader = &stdin_reader.interface };
-    // Skip the <?...?>
-    if (!it.goToTag()) @panic("Malformed xml");
-    if (it.seekTags(enum { registry })) |_| {
-        _ = it.closeTag();
-    } else @panic("Failed to find registry");
-
-    var flags: Flags = .empty;
-    defer flags.deinit(allocator);
-    var enums: Enums = .empty;
-    defer enums.deinit(allocator);
-    var bitmasks: Bitmasks = .empty;
-    defer bitmasks.deinit(allocator);
-    var commands: Commands = .{};
-    while (it.seekTags(enum { types, enums, commands, extensions, @"/registry" })) |tag| switch (tag) {
-        .types => parseTypes(it, &flags, writer, api),
-        .enums => parseEnums(it, writer, api, &enums, &bitmasks),
-        .commands => parseCommands(it, &commands, api),
-        .extensions => parseExtensions(it),
-        .@"/registry" => break,
-    };
-
-    writeEnums(writer, &enums);
-    writeBitmasks(writer, &bitmasks, &flags);
-
-    for (commands.base.items) |i| {
-        std.debug.print("{s}\n", .{i.name});
+    var parser: Parser = .init(&stdin_reader.interface, allocator, api);
+    parser.parse();
+    const registry = parser.registry;
+    //writer.writeAll(@embedFile("preamble.zig")) catch panics.write();
+    {
+        writer.writeAll("Dispatchable handles\n");
+        var it = registry.dispatchable_handles.iterator();
+        while (it.next()) |kv| {
+            writer.print("{s}\n", .{kv.key_ptr.*});
+        }
+    }
+    writer.writeAll("---------------------------\n");
+    {
+        writer.writeAll("Non dispatchable handles\n");
+        var it = registry.non_dispatchable_handles.iterator();
+        while (it.next()) |kv| {
+            writer.print("{s}\n", .{kv.key_ptr.*});
+        }
+    }
+    writer.writeAll("---------------------------\n");
+    {
+        writer.writeAll("Funcpointers\n");
+        var it = registry.funcpointers.iterator();
+        while (it.next()) |kv| {
+            const name = kv.key_ptr.*;
+            const a = kv.value_ptr.*;
+            writer.print("{s}: ", .{name});
+            for (a.params) |p| {
+                writer.print("{s}: {any}, ", .{ p.name, p.type.base_type });
+            }
+            writer.writeByte('\n');
+        }
     }
 }
