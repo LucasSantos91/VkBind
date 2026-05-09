@@ -66,10 +66,10 @@ const ReaderWrap = struct {
     pub fn peekByte(self: @This()) u8 {
         return self.reader.peekByte() catch |e| panics.reader(e);
     }
-    pub fn peekDelimiterInclusive(self: @This(), delimiter: u8) u8 {
+    pub fn peekDelimiterInclusive(self: @This(), delimiter: u8) []u8 {
         return self.reader.peekDelimiterInclusive(delimiter) catch |e| panics.delimiter(e);
     }
-    pub fn peekDelimiterExclusive(self: @This(), delimiter: u8) u8 {
+    pub fn peekDelimiterExclusive(self: @This(), delimiter: u8) []u8 {
         return self.reader.peekDelimiterExclusive(delimiter) catch |e| panics.delimiter(e);
     }
     pub fn discardDelimiterInclusive(self: @This(), delimiter: u8) void {
@@ -278,6 +278,7 @@ const Registry = struct {
         comment: []u8 = &.{},
         members: []ZigVar = &.{},
         aliases: [][]u8 = &.{},
+        s_type: []u8 = &.{},
     };
 
     const VarType = union(enum) {
@@ -379,7 +380,11 @@ const Registry = struct {
 
     const CVar = struct {
         const Amount = union(enum) {
-            array: []u8,
+            const Array = struct {
+                is_literal: bool,
+                data: []u8,
+            };
+            array: Array,
             bitfield: []u8,
             single,
         };
@@ -396,28 +401,36 @@ const Registry = struct {
             it.closeTag();
             result.name = allocator.dupe(u8, it.reader.takeDelimiter('<')) catch panics.oom();
             it.closeTag();
-            var amount = it.reader.takeDelimiter('<');
+            const amount = it.reader.peekDelimiterExclusive('<');
             const i = findAny(amount, ":[") orelse {
+                it.reader.toss(amount.len);
                 result.amount = .single;
                 return result;
             };
-            const char = amount[i];
-            amount = amount[i + 1 ..];
-            switch (char) {
+            switch (amount[i]) {
                 ':' => {
-                    const end = findScalar(amount, '<') orelse panic("Failed to find bitfield end for {s}", .{result.name});
-                    result.amount = .{ .bitfield = allocator.dupe(u8, amount[0..end]) catch panics.oom() };
+                    result.amount = .{ .bitfield = allocator.dupe(u8, amount[i + 1 ..]) catch panics.oom() };
+                    it.reader.toss(amount.len + 1);
                 },
                 '[' => {
-                    if (findScalar(amount, '<')) |j| {
-                        amount = amount[j..];
-                        var k = findScalar(amount, '>') orelse @panic("Unclosed tag");
-                        amount = amount[k..];
-                        k = findScalar(amount, '<') orelse panic("Failed to find amount end for {s}", .{result.name});
-                        result.amount = .{ .array = allocator.dupe(u8, amount[0..k]) catch panics.oom() };
+                    result.amount = .{ .array = undefined };
+                    const am = &result.amount.array;
+                    it.reader.toss(i + 1);
+                    var inside_brackets = it.reader.takeDelimiter(']');
+                    if (findScalar(inside_brackets, '<')) |j| {
+                        inside_brackets = inside_brackets[j + 1 ..];
+                        var k = findScalar(inside_brackets, '>') orelse @panic("Unclosed tag");
+                        inside_brackets = inside_brackets[k + 1 ..];
+                        k = findScalar(inside_brackets, '<') orelse panic("Failed to find amount end for {s}", .{result.name});
+                        am.* = .{
+                            .is_literal = false,
+                            .data = allocator.dupe(u8, inside_brackets[0..k]) catch panics.oom(),
+                        };
                     } else {
-                        const end = findScalar(amount, ']') orelse @panic("Unclose array");
-                        result.amount = .{ .array = allocator.dupe(u8, amount[0..end]) catch panics.oom() };
+                        am.* = .{
+                            .is_literal = true,
+                            .data = allocator.dupe(u8, inside_brackets) catch panics.oom(),
+                        };
                     }
                 },
                 else => unreachable,
@@ -433,12 +446,13 @@ const Registry = struct {
             null_terminated,
         };
         const Ptr = struct {
-            optional: bool,
-            size: Size,
-            kind: CType.Kind,
+            optional: bool = false,
+            size: Size = .single,
+            kind: CType.Kind = .mutable,
         };
+        const Ptrs = slice_tools.BoundedArray(Ptr, 2);
 
-        ptrs: slice_tools.BoundedArray(Ptr, 2) = .{},
+        ptrs: Ptrs = .{},
         base_type: VarType,
         amount: CVar.Amount,
 
@@ -605,8 +619,111 @@ const Parser = struct {
         }
     }
     fn parseStructOrUnion(self: *@This(), is_struct: bool) void {
-        _ = is_struct; // autofix
-        _ = self;
+        const name = self.dupe(self.xml_iterator.nextAttr(enum { name }).?.value);
+        const registry = if (is_struct)
+            &self.registry.structs
+        else
+            &self.registry.unions;
+        var comment: []u8 = &.{};
+        if (self.xml_iterator.nextAttr(enum { alias, comment })) |kv| switch (kv.key) {
+            .alias => {
+                const gp = registry.getOrPut(self.allocator, kv.value) catch panics.oom();
+                if (!gp.found_existing) {
+                    gp.key_ptr.* = self.dupe(kv.value);
+                    gp.value_ptr.* = .{};
+                }
+                gp.value_ptr.aliases = slice_tools.allocated.concat([]u8, gp.value_ptr.aliases, &.{name}, self.allocator) catch panics.oom();
+                return;
+            },
+            .comment => {
+                comment = self.dupe(kv.value);
+            },
+        };
+        const gp = registry.getOrPut(self.allocator, name) catch panics.oom();
+        const new = gp.value_ptr;
+        if (!gp.found_existing) {
+            new.* = .{};
+        }
+        new.comment = comment;
+        var members: std.ArrayList(Registry.ZigVar) = .empty;
+        member_loop: while (true) switch (self.xml_iterator.seekTags(enum { member, @"/type" })) {
+            .member => {
+                var ptrs: Registry.ZigType.Ptrs = .{};
+                while (self.xml_iterator.nextAttr(enum { api, values, optional, len })) |kv| switch (kv.key) {
+                    .api => {
+                        if (!self.api.match(kv.value)) continue :member_loop;
+                    },
+                    .values => {
+                        members.append(self.allocator, .{
+                            .name = self.dupe("sType"),
+                            .type = .{
+                                .base_type = .{ .non_primitive = self.dupe("VkStructureType") },
+                                .ptrs = .{ .len = 0 },
+                                .amount = .single,
+                            },
+                        }) catch panics.oom();
+                        new.s_type = self.dupe(kv.value);
+                        _ = self.xml_iterator.seekTagAndClose(enum { @"/member" });
+                        continue :member_loop;
+                    },
+                    .optional => {
+                        var comma_it: CommaIterator = .{ .text = kv.value };
+                        ptrs.len = 0;
+                        while (comma_it.next()) |l| {
+                            ptrs.buffer[ptrs.len].optional = std.mem.eql(u8, l, "true");
+                            ptrs.len +|= 1;
+                        }
+                    },
+                    .len => {
+                        var comma_it: CommaIterator = .{ .text = kv.value };
+                        ptrs.len = 0;
+                        while (comma_it.next()) |l| {
+                            const ptr = &ptrs.buffer[ptrs.len];
+                            if (enumFromName(enum { @"null-terminated", @"1" }, l)) |t| switch (t) {
+                                .@"null-terminated" => {
+                                    ptr.size = .null_terminated;
+                                },
+                                .@"1" => {
+                                    ptr.size = .single;
+                                },
+                            } else {
+                                ptr.size = .many;
+                                ptr.optional = true;
+                                const member = blk: {
+                                    for (members.items) |*m| {
+                                        if (std.mem.eql(u8, m.name, l)) {
+                                            break :blk m;
+                                        }
+                                    }
+                                    continue;
+                                };
+                                if (member.type.ptrs.len != 0) {
+                                    ptr.optional = member.type.ptrs.buffer[0].optional;
+                                }
+                            }
+                            ptrs.len +|= 1;
+                        }
+                    },
+                };
+
+                const c_var: Registry.CVar = .parse(self.xml_iterator, self.allocator);
+                var new_member: Registry.ZigVar = .{ .name = c_var.name, .type = .{
+                    .amount = c_var.amount,
+                    .base_type = c_var.type.base_type,
+                    .ptrs = undefined,
+                } };
+                const p = &new_member.type.ptrs;
+                p.len = @max(c_var.type.ptrs.len, ptrs.len);
+                for (&p.buffer, c_var.type.ptrs.buffer) |*dst, src| {
+                    dst.kind = src;
+                }
+                members.append(self.allocator, new_member) catch panics.oom();
+            },
+            .@"/type" => {
+                new.members = members.toOwnedSlice(self.allocator) catch panics.oom();
+                return;
+            },
+        };
     }
     fn parseFuncpointer(self: *@This()) void {
         _ = self.xml_iterator.seekTags(enum { proto });
@@ -695,6 +812,34 @@ pub fn main(init: std.process.Init) void {
             const a = kv.value_ptr.*;
             writer.print("{s}: ", .{name});
             for (a.params) |p| {
+                writer.print("{s}: {any}, ", .{ p.name, p.type.base_type });
+            }
+            writer.writeByte('\n');
+        }
+    }
+    writer.writeAll("---------------------------\n");
+    {
+        writer.writeAll("Structs\n");
+        var it = registry.structs.iterator();
+        while (it.next()) |kv| {
+            const name = kv.key_ptr.*;
+            const a = kv.value_ptr.*;
+            writer.print("{s}: ", .{name});
+            for (a.members) |p| {
+                writer.print("{s}: {any}, ", .{ p.name, p.type.base_type });
+            }
+            writer.writeByte('\n');
+        }
+    }
+    writer.writeAll("---------------------------\n");
+    {
+        writer.writeAll("Unions\n");
+        var it = registry.structs.iterator();
+        while (it.next()) |kv| {
+            const name = kv.key_ptr.*;
+            const a = kv.value_ptr.*;
+            writer.print("{s}: ", .{name});
+            for (a.members) |p| {
                 writer.print("{s}: {any}, ", .{ p.name, p.type.base_type });
             }
             writer.writeByte('\n');
