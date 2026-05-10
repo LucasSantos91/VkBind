@@ -708,7 +708,16 @@ const Registry = struct {
             members = members[1..];
         }
         for (members) |member| {
-            try writer.print("{f},\n", .{member});
+            try writer.print("{f}", .{member});
+            if (is_struct and member.type.ptrs.buffer[0].optional) {
+                try writer.writeByte('=');
+                const null_value = if (member.type.ptrs.len != 0)
+                    "null"
+                else
+                    "@bitCast(0)";
+                try writer.writeAll(null_value);
+            }
+            try writer.writeByte(',');
         }
         try writer.writeAll("};\n");
     }
@@ -859,13 +868,14 @@ const Parser = struct {
         var members: std.ArrayList(Registry.ZigVar) = .empty;
         member_loop: while (true) switch (self.xml_iterator.seekTags(enum { member, @"/type" })) {
             .member => {
-                var ptrs: Registry.ZigType.Ptrs = .{};
+                // In some cases we read the `ptrs.buffer` elements even if `ptrs.len` == 0.
+                // To avoid undefined behavior, every member needs to have this set these elements.
+                var ptrs: Registry.ZigType.Ptrs = .{
+                    .len = 0,
+                    .buffer = @splat(.{}),
+                };
 
-                // This is hacky, but down below, in the `len` prong, we may read ptrs.buffer[0].optional of a previous
-                // member, even if ptrs.buffer.len != 0. To avoid undefined behavior, every member needs to have this set
-                // to false, by default.
-                ptrs.buffer[0].optional = false;
-                while (self.xml_iterator.nextAttr(enum { api, values, optional, len })) |kv| switch (kv.key) {
+                while (self.xml_iterator.nextAttr(enum { api, values, optional, len, deprecated })) |kv| switch (kv.key) {
                     .api => {
                         if (!self.api.match(kv.value)) continue :member_loop;
                     },
@@ -917,6 +927,9 @@ const Parser = struct {
                             }
                             ptrs.len +|= 1;
                         }
+                    },
+                    .deprecated => {
+                        ptrs.buffer[0].optional = true;
                     },
                 };
 
