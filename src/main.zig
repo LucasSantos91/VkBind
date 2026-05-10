@@ -585,7 +585,11 @@ const Registry = struct {
                 },
                 .bitfield => unreachable,
             }
-            try writer.print("{f}", .{self.base_type});
+            if (self.ptrs.len != 0 and self.base_type == .primitive and self.base_type.primitive == .void) {
+                try writer.writeAll("anyopaque");
+            } else {
+                try writer.print("{f}", .{self.base_type});
+            }
         }
     };
     const ZigVar = struct {
