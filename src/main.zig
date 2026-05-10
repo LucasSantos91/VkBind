@@ -125,13 +125,14 @@ const XmlIterator = struct {
         self.reader.discardDelimiterInclusive('>');
     }
     pub fn getTagText(self: @This()) []const u8 {
+        var len: usize = 1;
         while (true) {
-            const text = self.reader.peekGreedy(1);
+            const text = self.reader.peekGreedy(len);
             if (findAny(text, " >")) |i| {
                 self.reader.toss(i);
                 return text[0..i];
             }
-            self.reader.reader.tossBuffered();
+            len += 1;
         }
     }
     pub fn seekTags(self: @This(), comptime TagsEnum: type) TagsEnum {
@@ -517,6 +518,23 @@ const Registry = struct {
             optional: bool = false,
             size: Size = .single,
             kind: CType.Kind = .mutable,
+
+            pub fn format(self: *const @This(), writer: *Writer) Writer.Error!void {
+                const optional_text = if (self.optional)
+                    "?"
+                else
+                    "";
+                const ptr_text = switch (self.size) {
+                    .single => "*",
+                    .many => "[*]",
+                    .null_terminated => "[*:0]",
+                };
+                const kind_text = switch (self.kind) {
+                    .@"const" => "const",
+                    .mutable => "",
+                };
+                try writer.print("{s}{s}{s}", .{ optional_text, ptr_text, kind_text });
+            }
         };
         const Ptrs = slice_tools.BoundedArray(Ptr, 2);
 
@@ -539,6 +557,33 @@ const Registry = struct {
             }
             return ret;
         }
+
+        pub fn format(self: *const @This(), writer: *Writer) Writer.Error!void {
+            if (self.amount == .bitfield) {
+                try writer.print("u{s}", .{self.amount.bitfield});
+                return;
+            }
+            for (self.ptrs.constSlice()) |p| {
+                try writer.print("{f} ", .{p});
+            }
+            switch (self.amount) {
+                .single => {},
+                .array => |ar| {
+                    try writer.writeByte('[');
+                    if (ar.is_literal) {
+                        try writer.writeAll(ar.data);
+                    } else {
+                        const trimmed = slice_tools.safeSubslice(ar.data, "VK_".len, .unlimited) catch
+                            panic("Failed to remove \"VK_\" prefix from: {s}", .{ar.data});
+                        _ = std.ascii.lowerString(trimmed, trimmed);
+                        try writer.writeAll(trimmed);
+                    }
+                    try writer.writeByte(']');
+                },
+                .bitfield => unreachable,
+            }
+            try writer.print("{f}", .{self.base_type});
+        }
     };
     const ZigVar = struct {
         name: []u8,
@@ -549,6 +594,10 @@ const Registry = struct {
                 .name = c_var.name,
                 .type = .fromCType(c_var.type),
             };
+        }
+
+        pub fn format(self: *const @This(), writer: *Writer) Writer.Error!void {
+            try writer.print("{s}:{f}", .{ self.name, self.type });
         }
     };
     const Funcpointer = struct {
@@ -610,7 +659,7 @@ const Registry = struct {
     fn writeWithoutVkPrefixOfPanic(writer: *Writer, text: []const u8) Writer.Error!void {
         if (!(try writeWithoutVkPrefix(writer, text))) panic("Type doesn't start with Vk: {s}", .{text});
     }
-    pub fn printHandleCommon(writer: *Writer, name: []const u8, aliases: []const []const u8, enum_backing_int: []const u8) Writer.Error!void {
+    fn printHandleCommon(writer: *Writer, name: []const u8, aliases: []const []const u8, enum_backing_int: []const u8) Writer.Error!void {
         try writer.writeAll("pub const ");
         try writeWithoutVkPrefixOfPanic(writer, name);
         try writer.print("=enum({s}){{null_handle, _}};", .{enum_backing_int});
@@ -622,16 +671,56 @@ const Registry = struct {
             });
         }
     }
-    pub fn printNonDispatchableHandles(self: *const @This(), writer: *Writer) Writer.Error!void {
+    fn printNonDispatchableHandles(self: *const @This(), writer: *Writer) Writer.Error!void {
         var it = self.non_dispatchable_handles.iterator();
         while (it.next()) |elem| {
             try printHandleCommon(writer, elem.key_ptr.*, elem.value_ptr.aliases, "u64");
         }
     }
-    pub fn printDispatchableHandles(self: *const @This(), writer: *Writer) Writer.Error!void {
+    fn printDispatchableHandles(self: *const @This(), writer: *Writer) Writer.Error!void {
         var it = self.dispatchable_handles.iterator();
         while (it.next()) |elem| {
             try printHandleCommon(writer, elem.key_ptr.*, elem.value_ptr.aliases, "usize");
+        }
+    }
+    fn printComment(writer: *Writer, comment: []const u8) Writer.Error!void {
+        var c = if (std.mem.startsWith(u8, comment, "//")) comment[2..] else comment;
+        c = std.mem.trim(u8, c, " ");
+        if (c.len != 0) {
+            try writer.print("\n/// {s}\n", .{c});
+        }
+    }
+
+    fn printStructsAndUnionsCommon(writer: *Writer, name: []const u8, elem: *StructOrUnion, is_struct: bool) Writer.Error!void {
+        try printComment(writer, elem.comment);
+        try writer.writeAll("pub const ");
+        try writeWithoutVkPrefixOfPanic(writer, name);
+        try writer.print("=extern {s}{{", .{if (is_struct) "struct" else "union"});
+        var members = elem.members;
+        if (elem.s_type.len != 0) {
+            const trimmed = slice_tools.safeSubslice(elem.s_type, "VK_STRUCTURE_TYPE_".len, .unlimited) catch
+                panic("sType doesn't start with expected prefix: {s}", .{elem.s_type});
+            _ = std.ascii.lowerString(trimmed, trimmed);
+            try writer.print("sType: StructureType=.{s},\n", .{trimmed});
+            members = members[1..];
+        }
+        for (members) |member| {
+            try writer.print("{f},\n", .{member});
+        }
+        try writer.writeAll("};\n");
+    }
+    fn printStructsAndUnions(self: *const @This(), writer: *Writer) Writer.Error!void {
+        {
+            var it = self.structs.iterator();
+            while (it.next()) |elem| {
+                try printStructsAndUnionsCommon(writer, elem.key_ptr.*, elem.value_ptr, true);
+            }
+        }
+        {
+            var it = self.unions.iterator();
+            while (it.next()) |elem| {
+                try printStructsAndUnionsCommon(writer, elem.key_ptr.*, elem.value_ptr, false);
+            }
         }
     }
 
@@ -639,6 +728,7 @@ const Registry = struct {
         try self.printFuncpointers(writer);
         try self.printNonDispatchableHandles(writer);
         try self.printDispatchableHandles(writer);
+        try self.printStructsAndUnions(writer);
     }
 };
 
