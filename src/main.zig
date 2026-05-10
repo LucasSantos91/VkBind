@@ -834,9 +834,14 @@ const Parser = struct {
                     },
                 };
                 const p = &new_member.type.ptrs;
-                p.len = @max(c_var.type.ptrs.len, ptrs.len);
-                for (&p.buffer, c_var.type.ptrs.buffer) |*dst, src| {
+                const c_ptrs = &c_var.type.ptrs;
+                p.len = @max(c_ptrs.len, ptrs.len);
+                const min = @min(p.len, c_ptrs.len);
+                for (p.buffer[0..min], c_ptrs.buffer[0..min]) |*dst, src| {
                     dst.kind = src;
+                }
+                for (p.buffer[min..]) |*dst| {
+                    dst.kind = .mutable;
                 }
                 members.append(self.allocator, new_member) catch panics.oom();
             },
