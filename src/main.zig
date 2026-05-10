@@ -289,6 +289,7 @@ const Registry = struct {
             u16,
             u32,
             u64,
+            c_int,
             i32,
             i64,
             f32,
@@ -302,6 +303,7 @@ const Registry = struct {
                 uint16_t,
                 uint32_t,
                 uint64_t,
+                int,
                 int32_t,
                 int64_t,
                 float,
@@ -317,6 +319,7 @@ const Registry = struct {
                     .uint16_t => .u16,
                     .uint32_t => .u32,
                     .uint64_t => .u64,
+                    .int => .c_int,
                     .int32_t => .i32,
                     .int64_t => .i64,
                     .float => .f32,
@@ -915,23 +918,19 @@ const Parser = struct {
                 };
 
                 const c_var: Registry.CVar = .parse(self.xml_iterator, self.allocator);
+                const c_ptrs = &c_var.type.ptrs;
                 var new_member: Registry.ZigVar = .{
                     .name = c_var.name,
                     .type = .{
                         .amount = c_var.amount,
                         .base_type = c_var.type.base_type,
-                        .ptrs = undefined,
+                        .ptrs = ptrs,
                     },
                 };
                 const p = &new_member.type.ptrs;
-                const c_ptrs = &c_var.type.ptrs;
-                p.len = @max(c_ptrs.len, ptrs.len);
-                const min = @min(p.len, c_ptrs.len);
-                for (p.buffer[0..min], c_ptrs.buffer[0..min]) |*dst, src| {
+                p.len = c_ptrs.len;
+                for (p.slice(), c_ptrs.constSlice()) |*dst, src| {
                     dst.kind = src;
-                }
-                for (p.buffer[min..]) |*dst| {
-                    dst.kind = .mutable;
                 }
                 members.append(self.allocator, new_member) catch panics.oom();
             },
