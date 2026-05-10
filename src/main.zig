@@ -860,6 +860,11 @@ const Parser = struct {
         member_loop: while (true) switch (self.xml_iterator.seekTags(enum { member, @"/type" })) {
             .member => {
                 var ptrs: Registry.ZigType.Ptrs = .{};
+
+                // This is hacky, but down below, in the `len` prong, we may read ptrs.buffer[0].optional of a previous
+                // member, even if ptrs.buffer.len != 0. To avoid undefined behavior, every member needs to have this set
+                // to false, by default.
+                ptrs.buffer[0].optional = false;
                 while (self.xml_iterator.nextAttr(enum { api, values, optional, len })) |kv| switch (kv.key) {
                     .api => {
                         if (!self.api.match(kv.value)) continue :member_loop;
@@ -908,9 +913,7 @@ const Parser = struct {
                                     }
                                     continue;
                                 };
-                                if (member.type.ptrs.len != 0) {
-                                    ptr.optional = member.type.ptrs.buffer[0].optional;
-                                }
+                                ptr.optional = member.type.ptrs.buffer[0].optional;
                             }
                             ptrs.len +|= 1;
                         }
