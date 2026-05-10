@@ -276,8 +276,12 @@ const Registry = struct {
         aliases: [][]u8 = &.{},
     };
     const StructOrUnion = struct {
+        const Member = struct {
+            member: ZigVar,
+            comment: []u8,
+        };
         comment: []u8 = &.{},
-        members: []ZigVar = &.{},
+        members: []Member = &.{},
         aliases: [][]u8 = &.{},
         s_type: []u8 = &.{},
     };
@@ -712,10 +716,11 @@ const Registry = struct {
             members = members[1..];
         }
         for (members) |member| {
-            try writer.print("{f}", .{member});
-            if (is_struct and member.type.ptrs.buffer[0].optional) {
+            try printComment(writer, member.comment);
+            try writer.print("{f}", .{member.member});
+            if (is_struct and member.member.type.ptrs.buffer[0].optional) {
                 try writer.writeByte('=');
-                const null_value = if (member.type.ptrs.len != 0)
+                const null_value = if (member.member.type.ptrs.len != 0)
                     "null"
                 else
                     "@bitCast(0)";
@@ -869,7 +874,7 @@ const Parser = struct {
             new.* = .{};
         }
         new.comment = comment;
-        var members: std.ArrayList(Registry.ZigVar) = .empty;
+        var members: std.ArrayList(Registry.StructOrUnion.Member) = .empty;
         member_loop: while (true) switch (self.xml_iterator.seekTags(enum { member, @"/type" })) {
             .member => {
                 // In some cases we read the `ptrs.buffer` elements even if `ptrs.len` == 0.
@@ -885,12 +890,12 @@ const Parser = struct {
                     },
                     .values => {
                         members.append(self.allocator, .{
-                            .name = self.dupe("sType"),
-                            .type = .{
+                            .comment = &.{},
+                            .member = .{ .name = self.dupe("sType"), .type = .{
                                 .base_type = .{ .non_primitive = self.dupe("VkStructureType") },
                                 .ptrs = .{ .len = 0 },
                                 .amount = .single,
-                            },
+                            } },
                         }) catch panics.oom();
                         new.s_type = self.dupe(kv.value);
                         _ = self.xml_iterator.seekTagAndClose(enum { @"/member" });
@@ -921,13 +926,13 @@ const Parser = struct {
                                 ptr.optional = true;
                                 const member = blk: {
                                     for (members.items) |*m| {
-                                        if (std.mem.eql(u8, m.name, l)) {
+                                        if (std.mem.eql(u8, m.member.name, l)) {
                                             break :blk m;
                                         }
                                     }
                                     continue;
                                 };
-                                ptr.optional = member.type.ptrs.buffer[0].optional;
+                                ptr.optional = member.member.type.ptrs.buffer[0].optional;
                             }
                             ptrs.len +|= 1;
                         }
@@ -939,15 +944,18 @@ const Parser = struct {
 
                 const c_var: Registry.CVar = .parse(self.xml_iterator, self.allocator);
                 const c_ptrs = &c_var.type.ptrs;
-                var new_member: Registry.ZigVar = .{
-                    .name = c_var.name,
-                    .type = .{
+                var new_member: Registry.StructOrUnion.Member = .{
+                    .member = .{ .name = c_var.name, .type = .{
                         .amount = c_var.amount,
                         .base_type = c_var.type.base_type,
                         .ptrs = ptrs,
+                    } },
+                    .comment = switch (self.xml_iterator.seekTagAndClose(enum { @"/member", comment })) {
+                        .@"/member" => &.{},
+                        .comment => self.dupe(self.xml_iterator.reader.takeDelimiter('<')),
                     },
                 };
-                const p = &new_member.type.ptrs;
+                const p = &new_member.member.type.ptrs;
                 p.len = c_ptrs.len;
                 for (p.slice(), c_ptrs.constSlice()) |*dst, src| {
                     dst.kind = src;
