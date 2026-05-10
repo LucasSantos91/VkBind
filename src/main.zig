@@ -334,8 +334,37 @@ const Registry = struct {
             else
                 .{ .non_primitive = allocator.dupe(u8, text) catch panics.oom() };
         }
+        pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+            switch (self) {
+                .primitive => |a| {
+                    try writer.print("{t}", .{a});
+                },
+                .non_primitive => |a| {
+                    try writeTypeWithoutPrefix(writer, a);
+                }
+            }
+        }
     };
 
+    fn writeWithoutVkPrefix(writer: *Writer, text: []const u8) Writer.Error!bool {
+        if (std.mem.startsWith(u8, text, "Vk")) {
+            try writer.writeAll(text[2..]);
+            return true;
+        }
+        return false;
+    }
+    fn writeWithoutPfnPrefix(writer: *Writer, text: []const u8) Writer.Error!bool {
+        if (std.mem.startsWith(u8, text, "PFN_vk")) {
+            try writer.print("Pfn{s}", .{text["PFN_vk".len..]});
+            return true;
+        }
+        return false;
+    }
+    fn writeTypeWithoutPrefix(writer: *Writer, text: []const u8) Writer.Error!void {
+        if (try writeWithoutVkPrefix(writer, text)) return;
+        if (try writeWithoutPfnPrefix(writer, text)) return;
+        try writer.writeAll(text);
+    }
     const CType = struct {
         const Kind = enum {
             @"const",
@@ -361,7 +390,7 @@ const Registry = struct {
             var after_type = it.reader.takeDelimiter('<');
             if (findScalar(after_type, '*')) |i| {
                 if (result.ptrs.len == 0) result.ptrs.appendAssumeCapacity(.mutable);
-                after_type = after_type[i..];
+                after_type = after_type[i + 1 ..];
             }
             if (findAny(after_type, "*c")) |i| {
                 switch (after_type[i]) {
@@ -375,6 +404,20 @@ const Registry = struct {
                 }
             }
             return result;
+        }
+
+        pub fn format(self: *const @This(), writer: *Writer) Writer.Error!void {
+            for (self.ptrs.constSlice()) |p| {
+                try writer.writeAll(switch (p) {
+                    .@"const" => "[*c]const",
+                    .mutable => "[*c]",
+                });
+            }
+            if (self.ptrs.len != 0 and self.base_type == .primitive and self.base_type.primitive == .void) {
+                try writer.writeAll(" anyopaque");
+            } else {
+                try writer.print(" {f}", .{self.base_type});
+            }
         }
     };
 
@@ -391,6 +434,31 @@ const Registry = struct {
         type: CType,
         name: []u8,
         amount: Amount,
+
+        pub fn format(self: *const @This(), writer: *Writer) Writer.Error!void {
+            try writer.print("{s}:", .{self.name});
+            switch (self.amount) {
+                .single => {
+                    for (self.type.ptrs.constSlice()) |p| {
+                        try writer.writeAll(switch (p) {
+                            .@"const" => "[*c]const",
+                            .mutable => "[*c]",
+                        });
+                    }
+                    if (self.type.ptrs.len != 0 and self.type.base_type == .primitive and self.type.base_type.primitive == .void) {
+                        try writer.writeAll(" anyopaque");
+                    } else {
+                        try writer.print(" {f}", .{self.type.base_type});
+                    }
+                },
+                .bitfield => |b| {
+                    try writer.print("u{s}", .{b});
+                },
+                .array => |ar| {
+                    try writer.print("[{s}]{f}", .{ ar.data, self.type });
+                }
+            }
+        }
 
         pub fn parse(it: XmlIterator, allocator: Allocator) @This() {
             var result: @This() = .{
@@ -486,6 +554,14 @@ const Registry = struct {
     const Funcpointer = struct {
         ret_type: CType,
         params: []CVar,
+
+        pub fn format(self: *const @This(), writer: *Writer) Writer.Error!void {
+            try writer.writeAll("*const fn(");
+            for (self.params) |p| {
+                try writer.print("{f},", .{p});
+            }
+            try writer.print(")callconv(vulkan_api) {f};", .{self.ret_type});
+        }
     };
 
     bitmasks: std.StringHashMapUnmanaged(Bitmask) = .empty,
@@ -522,6 +598,48 @@ const Registry = struct {
     pub fn addUnion(self: *@This(), name: []u8, new_union: StructOrUnion, allocator: Allocator) void {
         add(StructOrUnion, &self.unions, name, new_union, allocator);
     }
+    pub fn printFuncpointers(self: *const @This(), writer: *Writer) Writer.Error!void {
+        var it = self.funcpointers.iterator();
+        while (it.next()) |elem| {
+            try writer.writeAll("pub const ");
+            const w = try writeWithoutPfnPrefix(writer, elem.key_ptr.*);
+            if (!w) panic("Funcpointer doesn't start with PFN_vk: {s}", .{elem.key_ptr.*});
+            try writer.print("={f}", .{elem.value_ptr.*});
+        }
+    }
+    fn writeWithoutVkPrefixOfPanic(writer: *Writer, text: []const u8) Writer.Error!void {
+        if (!(try writeWithoutVkPrefix(writer, text))) panic("Type doesn't start with Vk: {s}", .{text});
+    }
+    pub fn printHandleCommon(writer: *Writer, name: []const u8, aliases: []const []const u8, enum_backing_int: []const u8) Writer.Error!void {
+        try writer.writeAll("pub const ");
+        try writeWithoutVkPrefixOfPanic(writer, name);
+        try writer.print("=enum({s}){{null_handle, _}};", .{enum_backing_int});
+        for (aliases) |alias| {
+            try writer.writeAll("pub const ");
+            try writeWithoutVkPrefixOfPanic(writer, alias);
+            try writer.print("={s};", .{
+                name[2..], // We already know it starts with Vk
+            });
+        }
+    }
+    pub fn printNonDispatchableHandles(self: *const @This(), writer: *Writer) Writer.Error!void {
+        var it = self.non_dispatchable_handles.iterator();
+        while (it.next()) |elem| {
+            try printHandleCommon(writer, elem.key_ptr.*, elem.value_ptr.aliases, "u64");
+        }
+    }
+    pub fn printDispatchableHandles(self: *const @This(), writer: *Writer) Writer.Error!void {
+        var it = self.dispatchable_handles.iterator();
+        while (it.next()) |elem| {
+            try printHandleCommon(writer, elem.key_ptr.*, elem.value_ptr.aliases, "usize");
+        }
+    }
+
+    pub fn format(self: *const @This(), writer: *Writer) Writer.Error!void {
+        try self.printFuncpointers(writer);
+        try self.printNonDispatchableHandles(writer);
+        try self.printDispatchableHandles(writer);
+    }
 };
 
 const Parser = struct {
@@ -542,7 +660,7 @@ const Parser = struct {
         commands: []Registry.Command,
     };
 
-    registry: Registry,
+    registry: Registry = .{},
     xml_iterator: XmlIterator,
     allocator: Allocator,
     api: Api,
@@ -707,11 +825,14 @@ const Parser = struct {
                 };
 
                 const c_var: Registry.CVar = .parse(self.xml_iterator, self.allocator);
-                var new_member: Registry.ZigVar = .{ .name = c_var.name, .type = .{
-                    .amount = c_var.amount,
-                    .base_type = c_var.type.base_type,
-                    .ptrs = undefined,
-                } };
+                var new_member: Registry.ZigVar = .{
+                    .name = c_var.name,
+                    .type = .{
+                        .amount = c_var.amount,
+                        .base_type = c_var.type.base_type,
+                        .ptrs = undefined,
+                    },
+                };
                 const p = &new_member.type.ptrs;
                 p.len = @max(c_var.type.ptrs.len, ptrs.len);
                 for (&p.buffer, c_var.type.ptrs.buffer) |*dst, src| {
@@ -787,62 +908,5 @@ pub fn main(init: std.process.Init) void {
     var parser: Parser = .init(&stdin_reader.interface, allocator, api);
     parser.parse();
     const registry = parser.registry;
-    //writer.writeAll(@embedFile("preamble.zig")) catch panics.write();
-    {
-        writer.writeAll("Dispatchable handles\n");
-        var it = registry.dispatchable_handles.iterator();
-        while (it.next()) |kv| {
-            writer.print("{s}\n", .{kv.key_ptr.*});
-        }
-    }
-    writer.writeAll("---------------------------\n");
-    {
-        writer.writeAll("Non dispatchable handles\n");
-        var it = registry.non_dispatchable_handles.iterator();
-        while (it.next()) |kv| {
-            writer.print("{s}\n", .{kv.key_ptr.*});
-        }
-    }
-    writer.writeAll("---------------------------\n");
-    {
-        writer.writeAll("Funcpointers\n");
-        var it = registry.funcpointers.iterator();
-        while (it.next()) |kv| {
-            const name = kv.key_ptr.*;
-            const a = kv.value_ptr.*;
-            writer.print("{s}: ", .{name});
-            for (a.params) |p| {
-                writer.print("{s}: {any}, ", .{ p.name, p.type.base_type });
-            }
-            writer.writeByte('\n');
-        }
-    }
-    writer.writeAll("---------------------------\n");
-    {
-        writer.writeAll("Structs\n");
-        var it = registry.structs.iterator();
-        while (it.next()) |kv| {
-            const name = kv.key_ptr.*;
-            const a = kv.value_ptr.*;
-            writer.print("{s}: ", .{name});
-            for (a.members) |p| {
-                writer.print("{s}: {any}, ", .{ p.name, p.type.base_type });
-            }
-            writer.writeByte('\n');
-        }
-    }
-    writer.writeAll("---------------------------\n");
-    {
-        writer.writeAll("Unions\n");
-        var it = registry.structs.iterator();
-        while (it.next()) |kv| {
-            const name = kv.key_ptr.*;
-            const a = kv.value_ptr.*;
-            writer.print("{s}: ", .{name});
-            for (a.members) |p| {
-                writer.print("{s}: {any}, ", .{ p.name, p.type.base_type });
-            }
-            writer.writeByte('\n');
-        }
-    }
+    writer.print("{s}\n{f}", .{ @embedFile("preamble.zig"), registry });
 }
