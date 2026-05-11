@@ -242,10 +242,11 @@ const Registry = struct {
             }
         };
 
-        bits: Bits,
-        comment: []u8,
-        entries: []Entry,
-        aggregates: []Enum.Entry,
+        bits: Bits = .@"32",
+        comment: []u8 = &.{},
+        entries: []Entry = &.{},
+        aggregates: []Enum.Entry = &.{},
+        aliases: [][]u8 = &.{},
     };
 
     const Enum = struct {
@@ -258,7 +259,7 @@ const Registry = struct {
 
         comment: []u8 = &.{},
         entries: []Entry = &.{},
-        aliases: []Entry = &.{},
+        aliases: [][]u8 = &.{},
     };
 
     const Command = struct {
@@ -623,6 +624,11 @@ const Registry = struct {
             try writer.print(")callconv(vulkan_api) {f};", .{self.ret_type});
         }
     };
+    const Constant = struct {
+        comment: []u8,
+        primitive: VarType.Primitive,
+        value: []u8,
+    };
 
     bitmasks: std.StringHashMapUnmanaged(Bitmask) = .empty,
     enums: std.StringHashMapUnmanaged(Enum) = .empty,
@@ -631,6 +637,7 @@ const Registry = struct {
     non_dispatchable_handles: std.StringHashMapUnmanaged(NonDispatchableHandle) = .empty,
     structs: std.StringHashMapUnmanaged(StructOrUnion) = .empty,
     unions: std.StringHashMapUnmanaged(StructOrUnion) = .empty,
+    constants: std.StringHashMapUnmanaged(Constant) = .empty,
 
     fn add(comptime T: type, hashmap: *std.StringHashMapUnmanaged(T), name: []u8, element: T, allocator: Allocator) void {
         const r = hashmap.getOrPut(allocator, name) catch panics.oom();
@@ -657,6 +664,9 @@ const Registry = struct {
     }
     pub fn addUnion(self: *@This(), name: []u8, new_union: StructOrUnion, allocator: Allocator) void {
         add(StructOrUnion, &self.unions, name, new_union, allocator);
+    }
+    pub fn addConstant(self: *@This(), name: []u8, constant: Constant, allocator: Allocator) void {
+        add(Constant, &self.constants, name, constant, allocator);
     }
     pub fn printFuncpointers(self: *const @This(), writer: *Writer) Writer.Error!void {
         var it = self.funcpointers.iterator();
@@ -729,6 +739,9 @@ const Registry = struct {
             try writer.writeByte(',');
         }
         try writer.writeAll("};\n");
+        for (elem.aliases) |alias| {
+            try writer.print("pub const {s}={s};", .{ alias, name });
+        }
     }
     fn printStructsAndUnions(self: *const @This(), writer: *Writer) Writer.Error!void {
         {
@@ -744,12 +757,96 @@ const Registry = struct {
             }
         }
     }
+    fn countAuthorLen(text: []const u8) usize {
+        const last = text.ptr + text.len;
+        var ptr = last;
+        while (ptr != text.ptr) {
+            ptr -= 1;
+            if (std.ascii.isLower(ptr[0])) {
+                ptr += 1;
+                break;
+            }
+        }
+        return last - ptr;
+    }
+    fn stripAuthor(text: []u8) []u8 {
+        const author_len = countAuthorLen(text);
+        return text[0 .. text.len - author_len];
+    }
+    fn getEnumPrefixLen(enum_name: []const u8, entry_name: []const u8) usize {
+        const author_len = countAuthorLen(enum_name);
+        if (entry_name.len <= enum_name.len - author_len) panic("Entry {s} doesn't start with prefix for enum {s}", .{ entry_name, enum_name });
+        var name_ptr = enum_name.ptr;
+        for (entry_name) |c| {
+            if (c == '_') {
+                name_ptr += 1;
+                continue;
+            }
+            name_ptr += 1;
+            if (std.ascii.toLower(c) != std.ascii.toLower(name_ptr[0])) {
+                break;
+            }
+        }
+        const len = name_ptr - enum_name.ptr;
+        return len;
+    }
 
+    fn printEnums(self: *const @This(), writer: *Writer) Writer.Error!void {
+        var it = self.enums.iterator();
+        while (it.next()) |entry| {
+            try printComment(writer, entry.value_ptr.comment);
+            try writer.writeAll("pub const ");
+            const name = entry.key_ptr.*;
+            if (!(try writeWithoutVkPrefix(writer, name))) panic("Enum name doesn't start with Vk prefix: {s}", .{name});
+            try writer.writeAll("=enum(c_int){");
+            if (entry.value_ptr.entries.len != 0) {
+                const prefix_len = getEnumPrefixLen(name, entry.value_ptr.entries[0].name);
+                for (entry.value_ptr.entries) |e| {
+                    try printComment(writer, e.comment);
+                    const trimmed = slice_tools.safeSubslice(e.name, prefix_len, .unlimited) catch
+                        panic("Failed to remove prefix for enum entry {s}", .{e.name});
+                    _ = std.ascii.lowerString(trimmed, trimmed);
+                    try writer.print("{s}={s},", .{ trimmed, e.value });
+                }
+                const prefix = entry.value_ptr.entries[0].name[0..prefix_len];
+                for (entry.value_ptr.entries) |e| {
+                    const canon = e.name[prefix_len..];
+                    for (e.aliases) |alias| {
+                        if (std.mem.startsWith(u8, alias, prefix)) {
+                            const trimmed = alias[prefix_len..];
+                            _ = std.ascii.lowerString(trimmed, trimmed);
+                            try writer.print("pub const {s}={s};", .{ trimmed, canon });
+                        } else {
+                            try writer.writeAll("pub const ");
+                            if (!(try writeWithoutVkPrefix(writer, alias))) panic("Alias doesn't start with expected prefix or Vk: {s}", .{alias});
+                            try writer.print("={s};", .{canon});
+                        }
+                    }
+                }
+            }
+            try writer.writeAll("};");
+        }
+    }
+
+    fn printBitmasks(self: *const @This(), writer: *Writer) Writer.Error!void {
+        _ = self; // autofix
+        _ = writer; // autofix
+    }
+    fn printConstants(self: *const @This(), writer: *Writer) Writer.Error!void {
+        var it = self.constants.iterator();
+        while (it.next()) |entry| {
+            try printComment(writer, entry.value_ptr.comment);
+            try writer.print("pub const {s}:{t}={s};", .{ entry.key_ptr.*, entry.value_ptr.primitive, entry.value_ptr.value });
+        }
+    }
     pub fn format(self: *const @This(), writer: *Writer) Writer.Error!void {
         try self.printFuncpointers(writer);
         try self.printNonDispatchableHandles(writer);
         try self.printDispatchableHandles(writer);
         try self.printStructsAndUnions(writer);
+        try self.printEnums(writer);
+        try self.printBitmasks(writer);
+        try self.printConstants(writer);
     }
 };
 
@@ -813,14 +910,47 @@ const Parser = struct {
                 if (!self.api.match(kv.value)) return;
             },
             .category => {
-                switch (enumFromName(enum { handle, @"struct", @"union", funcpointer }, kv.value) orelse continue) {
+                switch (enumFromName(enum { handle, @"struct", @"union", funcpointer, @"enum" }, kv.value) orelse continue) {
                     .handle => self.parseHandle(),
                     .@"struct", .@"union" => |e| self.parseStructOrUnion(e == .@"struct"),
                     .funcpointer => self.parseFuncpointer(),
+                    .@"enum" => self.parseTypeEnum(),
                 }
                 return;
             }
         };
+    }
+    fn parseTypeEnum(self: *@This()) void {
+        var name: []u8 = &.{};
+        var alias: []u8 = &.{};
+        while (self.xml_iterator.nextAttr(enum { name, alias })) |kv| switch (kv.key) {
+            .name => {
+                name = self.dupe(kv.value);
+            },
+            .alias => {
+                alias = self.dupe(kv.value);
+            },
+        };
+
+        if (name.len == 0 or alias.len == 0) {
+            self.freeDupe(name);
+            self.freeDupe(alias);
+            return;
+        }
+        const aliases = if (find(name, "FlagBits") != null) blk: {
+            const gp = self.registry.bitmasks.getOrPut(self.allocator, name) catch panics.oom();
+            if (!gp.found_existing) {
+                gp.value_ptr.* = .{};
+            }
+            break :blk &gp.value_ptr.aliases;
+        } else blk: {
+            const gp = self.registry.enums.getOrPut(self.allocator, name) catch panics.oom();
+            if (!gp.found_existing) {
+                gp.value_ptr.* = .{};
+            }
+            break :blk &gp.value_ptr.aliases;
+        };
+        aliases.* = slice_tools.allocated.concat([]u8, aliases.*, &.{alias}, self.allocator) catch panics.oom();
     }
     fn parseHandle(self: *@This()) void {
         if (self.xml_iterator.nextAttr(enum { name })) |kv| {
@@ -985,8 +1115,110 @@ const Parser = struct {
             },
         };
     }
+    fn parseEnum(self: *@This(), new_enum: *Registry.Enum) void {
+        while (true) switch (self.xml_iterator.seekTags(enum { @"enum", @"/enums" })) {
+            .@"enum" => {
+                self.parseEnumEntry(new_enum);
+            },
+            .@"/enums" => return,
+        };
+    }
+    fn parseEnumEntry(self: *@This(), new_enum: *Registry.Enum) void {
+        _ = self; // autofix
+        _ = new_enum; // autofix
+    }
+    fn parseBitmask(self: *@This(), new_bitmask: *Registry.Bitmask) void {
+        while (true) switch (self.xml_iterator.seekTags(enum { @"enum", @"/enums" })) {
+            .@"enum" => {
+                self.parseBitmaskEntry(new_bitmask);
+            },
+            .@"/enums" => return,
+        };
+    }
+    fn parseBitmaskEntry(self: *@This(), new_bitmask: *Registry.Bitmask) void {
+        _ = self; // autofix
+        _ = new_bitmask; // autofix
+    }
+    fn parseConstants(self: *@This()) void {
+        while (true) switch (self.xml_iterator.seekTags(enum { @"enum", @"/enums" })) {
+            .@"/enums" => return,
+            .@"enum" => {
+                var comment: []u8 = &.{};
+                var primitive: Registry.VarType.Primitive = .u32;
+                var name: []u8 = &.{};
+                var value: []u8 = &.{};
+                while (self.xml_iterator.nextAttr(enum { type, name, comment, value })) |kv| switch (kv.key) {
+                    .type => {
+                        primitive = Registry.VarType.Primitive.parse(kv.value) orelse @panic("Unknown primitive type for constant");
+                    },
+                    .name => {
+                        name = self.dupe(kv.value);
+                    },
+                    .comment => {
+                        comment = self.dupe(kv.value);
+                    },
+                    .value => {
+                        value = self.dupe(kv.value);
+                    },
+                };
+                self.registry.addConstant(
+                    name,
+                    .{
+                        .primitive = primitive,
+                        .comment = comment,
+                        .value = value,
+                    },
+                    self.allocator,
+                );
+            },
+        };
+    }
     fn parseEnums(self: *@This()) void {
-        _ = self;
+        var name: []u8 = &.{};
+        const Kind = enum { @"enum", bitmask, constants };
+        var kind: Kind = .@"enum";
+        var comment: []u8 = &.{};
+        var bits: Registry.Bitmask.Bits = .@"32";
+        while (self.xml_iterator.nextAttr(enum { name, type, comment, bitwidth })) |kv| switch (kv.key) {
+            .name => {
+                name = self.dupe(kv.value);
+            },
+            .type => {
+                kind = enumFromName(Kind, kv.value) orelse panic("Unknown enum type {s}", .{name});
+            },
+            .comment => {
+                comment = self.dupe(kv.value);
+            },
+            .bitwidth => {
+                bits = enumFromName(Registry.Bitmask.Bits, kv.value) orelse panic("Unknown bitwidth: {s}", .{kv.value});
+            },
+        };
+        switch (kind) {
+            .@"enum" => {
+                const gp = self.registry.enums.getOrPut(self.allocator, name) catch panics.oom();
+                if (!gp.found_existing) {
+                    gp.value_ptr.* = .{
+                        .comment = comment,
+                    };
+                }
+                self.parseEnum(gp.value_ptr);
+            },
+            .bitmask => {
+                const gp = self.registry.bitmasks.getOrPut(self.allocator, name) catch panics.oom();
+                if (!gp.found_existing) {
+                    gp.value_ptr.* = .{
+                        .comment = comment,
+                        .bits = bits,
+                    };
+                }
+                self.parseBitmask(gp.value_ptr);
+            },
+            .constants => {
+                self.freeDupe(name);
+                self.freeDupe(comment);
+                self.parseConstants();
+            },
+        }
     }
     fn parseCommands(self: *@This()) void {
         _ = self;
