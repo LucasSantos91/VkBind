@@ -374,6 +374,16 @@ const Registry = struct {
         if (try writeWithoutPfnPrefix(writer, text)) return;
         try writer.writeAll(text);
     }
+    fn writeWithoutVK_PrefixAndLower(writer: *Writer, text: []const u8) Writer.Error!bool {
+        if (std.mem.startsWith(u8, text, "VK_")) {
+            try writeLower(text["VK_".len..], writer);
+            return true;
+        }
+        return false;
+    }
+    fn writeWithoutVK_PrefixAndLowerOrPanic(writer: *Writer, text: []const u8) Writer.Error!void {
+        if (!(try writeWithoutVK_PrefixAndLower(writer, text))) panic("Failed to remove VK_ prefix from: {s}", .{text});
+    }
     const CType = struct {
         const Kind = enum {
             @"const",
@@ -581,10 +591,7 @@ const Registry = struct {
                     if (ar.is_literal) {
                         try writer.writeAll(ar.data);
                     } else {
-                        const trimmed = slice_tools.safeSubslice(ar.data, "VK_".len, .unlimited) catch
-                            panic("Failed to remove \"VK_\" prefix from: {s}", .{ar.data});
-                        _ = std.ascii.lowerString(trimmed, trimmed);
-                        try writer.writeAll(trimmed);
+                        try writeWithoutVK_PrefixAndLowerOrPanic(writer, ar.data);
                     }
                     try writer.writeByte(']');
                 },
@@ -677,16 +684,16 @@ const Registry = struct {
             try writer.print("={f}", .{elem.value_ptr.*});
         }
     }
-    fn writeWithoutVkPrefixOfPanic(writer: *Writer, text: []const u8) Writer.Error!void {
+    fn writeWithoutVkPrefixOrPanic(writer: *Writer, text: []const u8) Writer.Error!void {
         if (!(try writeWithoutVkPrefix(writer, text))) panic("Type doesn't start with Vk: {s}", .{text});
     }
     fn printHandleCommon(writer: *Writer, name: []const u8, aliases: []const []const u8, enum_backing_int: []const u8) Writer.Error!void {
         try writer.writeAll("pub const ");
-        try writeWithoutVkPrefixOfPanic(writer, name);
+        try writeWithoutVkPrefixOrPanic(writer, name);
         try writer.print("=enum({s}){{null_handle, _}};", .{enum_backing_int});
         for (aliases) |alias| {
             try writer.writeAll("pub const ");
-            try writeWithoutVkPrefixOfPanic(writer, alias);
+            try writeWithoutVkPrefixOrPanic(writer, alias);
             try writer.print("={s};", .{
                 name[2..], // We already know it starts with Vk
             });
@@ -715,7 +722,7 @@ const Registry = struct {
     fn printStructsAndUnionsCommon(writer: *Writer, name: []const u8, elem: *StructOrUnion, is_struct: bool) Writer.Error!void {
         try printComment(writer, elem.comment);
         try writer.writeAll("pub const ");
-        try writeWithoutVkPrefixOfPanic(writer, name);
+        try writeWithoutVkPrefixOrPanic(writer, name);
         try writer.print("=extern {s}{{", .{if (is_struct) "struct" else "union"});
         var members = elem.members;
         if (elem.s_type.len != 0) {
@@ -740,7 +747,9 @@ const Registry = struct {
         }
         try writer.writeAll("};\n");
         for (elem.aliases) |alias| {
-            try writer.print("pub const {s}={s};", .{ alias, name });
+            try writer.writeAll("pub const ");
+            try writeWithoutVkPrefixOrPanic(writer, alias);
+            try writer.print("={s};", .{name["VK".len..]});
         }
     }
     fn printStructsAndUnions(self: *const @This(), writer: *Writer) Writer.Error!void {
@@ -832,14 +841,38 @@ const Registry = struct {
         _ = self; // autofix
         _ = writer; // autofix
     }
-    fn printConstants(self: *const @This(), writer: *Writer) Writer.Error!void {
+    fn writeLower(text: []const u8, writer: *Writer) Writer.Error!void {
+        for (text) |c|
+            try writer.writeByte(std.ascii.toLower(c));
+    }
+    fn printConstants(self: *@This(), writer: *Writer) Writer.Error!void {
+        const overrides: []const []const u8 = &.{ "VK_TRUE", "VK_FALSE" };
+        for (overrides) |o| {
+            _ = self.constants.remove(o);
+        }
         var it = self.constants.iterator();
         while (it.next()) |entry| {
             try printComment(writer, entry.value_ptr.comment);
-            try writer.print("pub const {s}:{t}={s};", .{ entry.key_ptr.*, entry.value_ptr.primitive, entry.value_ptr.value });
+            try writer.writeAll("pub const ");
+            try writeWithoutVK_PrefixAndLowerOrPanic(writer, entry.key_ptr.*);
+            var negate = false;
+            var value = entry.value_ptr.value;
+            if (findScalar(value, '~')) |i| {
+                value = value[i + 1 ..];
+                negate = true;
+            }
+            if (findNone(value, "0123456789.")) |i| {
+                value = value[0..i];
+            }
+            try writer.print(":{t}=", .{entry.value_ptr.primitive});
+            if (negate) {
+                try writer.print("~@as({t}, {s});", .{ entry.value_ptr.primitive, value });
+            } else {
+                try writer.print("{s};", .{value});
+            }
         }
     }
-    pub fn format(self: *const @This(), writer: *Writer) Writer.Error!void {
+    pub fn format(self: *@This(), writer: *Writer) Writer.Error!void {
         try self.printFuncpointers(writer);
         try self.printNonDispatchableHandles(writer);
         try self.printDispatchableHandles(writer);
@@ -1261,6 +1294,5 @@ pub fn main(init: std.process.Init) void {
 
     var parser: Parser = .init(&stdin_reader.interface, allocator, api);
     parser.parse();
-    const registry = parser.registry;
-    writer.print("{s}\n{f}", .{ @embedFile("preamble.zig"), registry });
+    writer.print("{s}\n{f}", .{ @embedFile("preamble.zig"), &parser.registry });
 }
