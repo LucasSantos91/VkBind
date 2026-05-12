@@ -778,25 +778,21 @@ const Registry = struct {
         }
         return last - ptr;
     }
-    fn stripAuthor(text: []u8) []u8 {
+    fn stripAuthor(text: []const u8) []const u8 {
         const author_len = countAuthorLen(text);
         return text[0 .. text.len - author_len];
     }
     fn getEnumPrefixLen(enum_name: []const u8, entry_name: []const u8) usize {
-        const author_len = countAuthorLen(enum_name);
-        if (entry_name.len <= enum_name.len - author_len) panic("Entry {s} doesn't start with prefix for enum {s}", .{ entry_name, enum_name });
-        var name_ptr = enum_name.ptr;
-        for (entry_name) |c| {
-            if (c == '_') {
-                name_ptr += 1;
-                continue;
-            }
-            name_ptr += 1;
-            if (std.ascii.toLower(c) != std.ascii.toLower(name_ptr[0])) {
-                break;
-            }
+        const no_author = stripAuthor(enum_name);
+        if (entry_name.len <= no_author.len) panic("Entry {s} doesn't start with prefix for enum {s}", .{ entry_name, enum_name });
+        var entry_ptr = entry_name.ptr;
+        for (no_author) |a| {
+            while (entry_ptr[0] == '_') entry_ptr += 1;
+            const b = entry_ptr[0];
+            if (std.ascii.toLower(a) != std.ascii.toLower(b)) break;
+            entry_ptr += 1;
         }
-        const len = name_ptr - enum_name.ptr;
+        const len = entry_ptr - entry_name.ptr + 1;
         return len;
     }
 
@@ -815,21 +811,19 @@ const Registry = struct {
                     const trimmed = slice_tools.safeSubslice(e.name, prefix_len, .unlimited) catch
                         panic("Failed to remove prefix for enum entry {s}", .{e.name});
                     _ = std.ascii.lowerString(trimmed, trimmed);
-                    try writer.print("{s}={s},", .{ trimmed, e.value });
+                    try writer.print("@\"{s}\"={s},", .{ trimmed, e.value });
                 }
                 const prefix = entry.value_ptr.entries[0].name[0..prefix_len];
                 for (entry.value_ptr.entries) |e| {
                     const canon = e.name[prefix_len..];
                     for (e.aliases) |alias| {
-                        if (std.mem.startsWith(u8, alias, prefix)) {
-                            const trimmed = alias[prefix_len..];
-                            _ = std.ascii.lowerString(trimmed, trimmed);
-                            try writer.print("pub const {s}={s};", .{ trimmed, canon });
-                        } else {
-                            try writer.writeAll("pub const ");
-                            if (!(try writeWithoutVkPrefix(writer, alias))) panic("Alias doesn't start with expected prefix or Vk: {s}", .{alias});
-                            try writer.print("={s};", .{canon});
-                        }
+                        const trimmed = if (std.mem.startsWith(u8, alias, prefix))
+                            alias[prefix_len..]
+                        else
+                            slice_tools.safeSubslice(alias, "VK_".len, .unlimited) catch
+                                panic("Alias doesn't start with expected prefix or Vk: {s}", .{alias});
+                        _ = std.ascii.lowerString(trimmed, trimmed);
+                        try writer.print("pub const @\"{s}\"=@This().@\"{s}\";", .{ trimmed, canon });
                     }
                 }
             }
@@ -1149,17 +1143,39 @@ const Parser = struct {
         };
     }
     fn parseEnum(self: *@This(), new_enum: *Registry.Enum) void {
-        while (true) switch (self.xml_iterator.seekTags(enum { @"enum", @"/enums" })) {
+        var entries: std.ArrayList(Registry.Enum.Entry) = .empty;
+        entry_loop: while (true) switch (self.xml_iterator.seekTags(enum { @"enum", @"/enums" })) {
             .@"enum" => {
-                self.parseEnumEntry(new_enum);
+                const new = entries.addOne(self.allocator) catch panics.oom();
+                new.* = .{};
+                while (self.xml_iterator.nextAttr(enum { value, name, comment, alias })) |kv| switch (kv.key) {
+                    .value => {
+                        new.value = self.dupe(kv.value);
+                    },
+                    .name => {
+                        new.name = self.dupe(kv.value);
+                    },
+                    .comment => {
+                        new.comment = self.dupe(kv.value);
+                    },
+                    .alias => {
+                        entries.items.len -= 1;
+                        for (entries.items) |*e| {
+                            if (std.mem.eql(u8, e.name, kv.value)) {
+                                e.aliases = slice_tools.allocated.concat([]u8, e.aliases, &.{new.name}, self.allocator) catch panics.oom();
+                                continue :entry_loop;
+                            }
+                        } else panic("Failed to find enum that alias refers to: {s}", .{kv.value});
+                    },
+                };
             },
-            .@"/enums" => return,
+            .@"/enums" => {
+                new_enum.entries = entries.toOwnedSlice(self.allocator) catch panics.oom();
+                return;
+            },
         };
     }
-    fn parseEnumEntry(self: *@This(), new_enum: *Registry.Enum) void {
-        _ = self; // autofix
-        _ = new_enum; // autofix
-    }
+
     fn parseBitmask(self: *@This(), new_bitmask: *Registry.Bitmask) void {
         while (true) switch (self.xml_iterator.seekTags(enum { @"enum", @"/enums" })) {
             .@"enum" => {
