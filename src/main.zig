@@ -795,8 +795,36 @@ const Registry = struct {
         const len = entry_ptr - entry_name.ptr + 1;
         return len;
     }
+    fn stripPrefixOrVk(name: []const u8, prefix: []const u8) []const u8 {
+        return if (std.mem.startsWith(u8, name, prefix))
+            name[prefix.len..]
+        else
+            slice_tools.safeSubslice(name, "VK_".len, .unlimited) catch
+                panic("Failed to determine enum prefix: {s}", .{name});
+    }
 
-    fn printEnums(self: *const @This(), writer: *Writer) Writer.Error!void {
+    fn printEnums(self: *@This(), writer: *Writer) Writer.Error!void {
+        {
+            const result_kv = self.enums.fetchRemove("VkResult") orelse @panic("Missing VkResult");
+            const result = result_kv.value;
+            try printComment(writer, result.comment);
+            try writer.writeAll("pub const Result=enum(c_int){");
+            for (result.entries) |e| {
+                try printComment(writer, e.comment);
+                try writeWithoutVK_PrefixAndLowerOrPanic(writer, e.name);
+                try writer.print("={s},", .{e.value});
+            }
+            for (result.entries) |e| {
+                for (e.aliases) |alias| {
+                    try writer.writeAll("pub const ");
+                    try writeWithoutVK_PrefixAndLowerOrPanic(writer, alias);
+                    try writer.writeAll("=@This().");
+                    try writeWithoutVK_PrefixAndLowerOrPanic(writer, e.name);
+                    try writer.writeByte(';');
+                }
+            }
+            try writer.writeAll("};");
+        }
         var it = self.enums.iterator();
         while (it.next()) |entry| {
             try printComment(writer, entry.value_ptr.comment);
@@ -805,25 +833,25 @@ const Registry = struct {
             if (!(try writeWithoutVkPrefix(writer, name))) panic("Enum name doesn't start with Vk prefix: {s}", .{name});
             try writer.writeAll("=enum(c_int){");
             if (entry.value_ptr.entries.len != 0) {
-                const prefix_len = getEnumPrefixLen(name, entry.value_ptr.entries[0].name);
+                const first_name = entry.value_ptr.entries[0].name;
+                const prefix_len = getEnumPrefixLen(name, first_name);
+                const prefix = first_name[0..prefix_len];
                 for (entry.value_ptr.entries) |e| {
                     try printComment(writer, e.comment);
-                    const trimmed = slice_tools.safeSubslice(e.name, prefix_len, .unlimited) catch
-                        panic("Failed to remove prefix for enum entry {s}", .{e.name});
-                    _ = std.ascii.lowerString(trimmed, trimmed);
-                    try writer.print("@\"{s}\"={s},", .{ trimmed, e.value });
+                    const trimmed = stripPrefixOrVk(e.name, prefix);
+                    try writer.writeAll("@\"");
+                    try writeLower(trimmed, writer);
+                    try writer.print("\"={s},", .{e.value});
                 }
-                const prefix = entry.value_ptr.entries[0].name[0..prefix_len];
                 for (entry.value_ptr.entries) |e| {
-                    const canon = e.name[prefix_len..];
+                    const canon = stripPrefixOrVk(e.name, prefix);
                     for (e.aliases) |alias| {
-                        const trimmed = if (std.mem.startsWith(u8, alias, prefix))
-                            alias[prefix_len..]
-                        else
-                            slice_tools.safeSubslice(alias, "VK_".len, .unlimited) catch
-                                panic("Alias doesn't start with expected prefix or Vk: {s}", .{alias});
-                        _ = std.ascii.lowerString(trimmed, trimmed);
-                        try writer.print("pub const @\"{s}\"=@This().@\"{s}\";", .{ trimmed, canon });
+                        const trimmed = stripPrefixOrVk(alias, prefix);
+                        try writer.writeAll("pub const @\"");
+                        try writeLower(trimmed, writer);
+                        try writer.writeAll("\"=@This().@\"");
+                        try writeLower(canon, writer);
+                        try writer.writeAll("\";");
                     }
                 }
             }
@@ -832,8 +860,28 @@ const Registry = struct {
     }
 
     fn printBitmasks(self: *const @This(), writer: *Writer) Writer.Error!void {
-        _ = self; // autofix
-        _ = writer; // autofix
+        var it = self.bitmasks.iterator();
+        while (it.next()) |entry| {
+            try printComment(writer, entry.value_ptr.comment);
+            try writer.writeAll("pub const ");
+            const name = entry.key_ptr.*;
+            const bitmask = entry.value_ptr;
+            if (!(try writeWithoutVkPrefix(writer, name))) panic("Bitmask name doesn't start with Vk prefix: {s}", .{name});
+            try writer.print("=enum(u{t}){{", .{bitmask.bits});
+            if (bitmask.entries.len != 0) {
+                const first_name = bitmask.entries[0].name;
+                const prefix_len = getEnumPrefixLen(name, first_name);
+                const prefix = first_name[0..prefix_len];
+                for (bitmask.entries) |e| {
+                    try printComment(writer, e.comment);
+                    const trimmed = stripPrefixOrVk(e.name, prefix);
+                    try writer.writeAll("@\"");
+                    try writeLower(trimmed, writer);
+                    try writer.print("\"=1<<{},", .{e.bitpos});
+                }
+            }
+            try writer.writeAll("};");
+        }
     }
     fn writeLower(text: []const u8, writer: *Writer) Writer.Error!void {
         for (text) |c|
