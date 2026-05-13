@@ -159,7 +159,7 @@ const XmlIterator = struct {
                     return false;
                 },
                 '/' => {
-                    self.reader.toss(not_space_index + 1);
+                    self.reader.toss(not_space_index + 2);
                     return false;
                 },
                 else => {
@@ -183,10 +183,10 @@ const XmlIterator = struct {
         return self.reader.takeDelimiter('"');
     }
 
-    pub fn nextAttr(self: @This(), comptime KeysOfInterest: type) ?struct { key: KeysOfInterest, value: []u8 } {
+    pub fn nextAttr(self: @This(), comptime KeysOfInterest: type) ?KeysOfInterest {
         while (self.getAttrKey()) |text| {
             if (enumFromName(KeysOfInterest, text)) |key| {
-                return .{ .key = key, .value = self.getAttrValue() };
+                return key;
             } else {
                 self.discardAttrValue();
             }
@@ -419,6 +419,9 @@ const Registry = struct {
         pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
             try writer.writeAll(self.data);
         }
+        pub fn eql(lhs: @This(), rhs: @This()) bool {
+            return std.mem.eql(u8, lhs.data, rhs.data);
+        }
     };
     pub const NameVersion = struct {
         data: u8 = 0,
@@ -435,6 +438,9 @@ const Registry = struct {
             if (self.data != 0) {
                 try writer.print("{}", .{self.data});
             }
+        }
+        pub fn eql(lhs: @This(), rhs: @This()) bool {
+            return lhs.data == rhs.data;
         }
     };
     pub const VulkanName = struct {
@@ -492,6 +498,23 @@ const Registry = struct {
                 self.version,
             });
         }
+        pub fn eql(lhs: @This(), rhs: @This()) bool {
+            return lhs.version.eql(rhs.version) and
+                lhs.author.eql(rhs.author) and
+                std.mem.eql(u8, lhs.root, rhs.root);
+        }
+        pub fn eqlRaw(self: @This(), text: []const u8, authors: []const AuthorTag) bool {
+            const version_index = getVersionIndex(text);
+            const version_text = text[version_index..];
+            const version: NameVersion = .parseText(version_text);
+            if (!version.eql(self.version)) return false;
+            const without_version = text[0..version_index];
+            const author_index = getAuthorIndex(without_version, authors);
+            const author: AuthorTag = .{ .data = without_version[author_index..] };
+            if (!author.eql(self.author)) return false;
+            const root = without_version[0..author_index];
+            return std.mem.eql(u8, self.root, root);
+        }
     };
     pub const FuncpointerTypeName = struct {
         name: VulkanName = .{},
@@ -512,11 +535,16 @@ const Registry = struct {
         pub fn parse(ctx: *const ParseContext, exclude_suffix: []const u8) ?@This() {
             if (!stripPrefix(ctx.reader, "Vk")) return null;
             const ret: @This() = .{ .name = .parse(ctx, exclude_suffix) };
-            expect(ctx.reader, "/type>");
             return ret;
         }
         pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
             try writer.print("{f}", .{self.name});
+        }
+        pub fn eql(lhs: @This(), rhs: @This()) bool {
+            return lhs.name.eql(rhs.name);
+        }
+        pub fn eqlRaw(self: @This(), authors: []const AuthorTag, text: []const u8) bool {
+            return self.name.eqlRaw(text, authors);
         }
     };
     pub const GenericTypeName = union(enum) {
@@ -715,7 +743,7 @@ const Registry = struct {
         comment: Comment = .{},
         entries: []Entry = &.{},
         aggregates: []Enum.Entry = &.{},
-        aliases: []Enum.Alias = &.{},
+        aliases: []Alias = &.{},
 
         pub fn sort(self: *@This()) void {
             const lessThan = struct {
@@ -773,15 +801,16 @@ const Registry = struct {
         }
     };
 
-    const Enum = struct {
-        const Alias = struct {
-            alias: VkTypeName = .{},
-            comment: Comment = .{},
+    const Alias = struct {
+        alias: VkTypeName = .{},
+        comment: Comment = .{},
 
-            pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
-                try writer.print("{f}pub const {f}=@This().", .{ self.comment, self.alias });
-            }
-        };
+        pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+            try writer.print("{f}pub const {f}=@This().", .{ self.comment, self.alias });
+        }
+    };
+
+    const Enum = struct {
         const Entry = struct {
             name: EnumEntryName = .{},
             value: []u8 = &.{},
@@ -826,6 +855,7 @@ const Registry = struct {
         };
         name: VkTypeName,
         kind: Kind,
+        aliases: []Alias,
 
         pub fn parse(ctx: *const ParseContext) @This() {
             for (0..2) |_| {
@@ -850,6 +880,10 @@ const Registry = struct {
                     .non_dispatchable => "u64",
                 },
             });
+        }
+        pub fn addAlias(self: *@This(), ctx: *const ParseContext, alias: Alias) void {
+            self.aliases = ctx.allocator.realloc(self.aliases, self.aliases.len + 1) catch panics.oom();
+            self.aliases[self.aliases.len - 1] = alias;
         }
     };
     const StructOrUnion = struct {
@@ -1111,11 +1145,27 @@ const Registry = struct {
         value: []u8,
     };
 
+    const Handles = struct {
+        handles: []Handle,
+        pub fn find(self: @This(), authors: []const AuthorTag, name: []const u8) ?*Handle {
+            var p = self.handles.ptr + self.handles.len;
+            while (p != self.handles.ptr) {
+                p -= 1;
+                if (p[0].name.eqlRaw(name, ctx)) return p - self.handles.ptr;
+            }
+            return null;
+        }
+        pub fn get(self: @This(), authors: []const AuthorTag, name: []const u8) ?*Handle {
+            const i = self.find(authors, name) orelse return null;
+            return &self.handles[i];
+        }
+    };
+
     authors: []AuthorTag = &.{},
     bitmasks: []Bitmask = &.{},
     enums: []Enum = &.{},
     funcpointers: []Funcpointer = &.{},
-    handles: []Handle = &.{},
+    handles: Handles = &.{},
     structs: []StructOrUnion = &.{},
     unions: []StructOrUnion = &.{},
     constants: []Constant = &.{},
@@ -1172,19 +1222,21 @@ const Registry = struct {
         const xml_iterator = ctx.getXmlIterator();
         type_loop: while (true) switch (xml_iterator.seekTags(enum { type, @"/types" })) {
             .@"/types" => break,
-            .type => while (xml_iterator.nextAttr(enum { category, api })) |kv| switch (kv.key) {
+            .type => while (xml_iterator.nextAttr(enum { category, api })) |k| switch (k) {
                 .api => {
                     if (!ctx.api.match(kv.value)) continue :type_loop;
                 },
                 .category => {
                     const cat = enumFromName(enum { handle }, kv.value) orelse continue :type_loop;
                     switch (cat) {
-                        .handle => handles.append(ctx.allocator, .parse(ctx)) catch panics.oom(),
+                        .handle => {
+                            handles.append(ctx.allocator, .parse(ctx)) catch panics.oom();
+                        },
                     }
-                },
+                }
             }
         };
-        self.handles = handles.toOwnedSlice(ctx.allocator) catch panics.oom();
+        self.handles = .{ .handles = handles.toOwnedSlice(ctx.allocator) catch panics.oom() };
     }
 
     pub fn parseEnums(self: *@This(), ctx: *const ParseContext) void {
