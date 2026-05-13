@@ -285,12 +285,12 @@ const Registry = struct {
         }
     };
     pub const Comment = struct {
-        data: []u8 = &.{},
+        data: []const u8 = &.{},
 
         fn parseCommon(ctx: *const ParseContext, delimiter: u8) @This() {
             _ = stripPrefix(ctx.reader, "// ");
-            const ret = .{
-                .data = allocToDelimiter(ctx.allocator, delimiter),
+            const ret: @This() = .{
+                .data = allocToDelimiter(ctx.reader, ctx.allocator, delimiter),
             };
             return ret;
         }
@@ -387,7 +387,7 @@ const Registry = struct {
         }
     };
     pub const AuthorTag = struct {
-        data: []u8 = &.{},
+        data: []const u8 = &.{},
 
         pub fn lessThan(_: void, lhs: @This(), rhs: @This()) bool {
             return std.mem.lessThan(u8, lhs.data, rhs.data);
@@ -484,8 +484,8 @@ const Registry = struct {
                 .version = version,
             };
         }
-        pub fn parse(ctx: *const ParseContext, exclude_suffix: []const u8) @This() {
-            const peek = ctx.reader.takeDelimiter('<') catch |e| switch (e) {
+        pub fn parse(ctx: *const ParseContext, exclude_suffix: []const u8, delimiter: u8) @This() {
+            const peek = ctx.reader.takeDelimiter(delimiter) catch |e| switch (e) {
                 error.ReadFailed => panics.readFailed(),
                 error.StreamTooLong => panics.streamTooLong(),
             } orelse @panic("Unexpected end of stream while parsing name");
@@ -532,9 +532,9 @@ const Registry = struct {
     pub const VkTypeName = struct {
         name: VulkanName = .{},
 
-        pub fn parse(ctx: *const ParseContext, exclude_suffix: []const u8) ?@This() {
+        pub fn parse(ctx: *const ParseContext, exclude_suffix: []const u8, delimiter: u8) ?@This() {
             if (!stripPrefix(ctx.reader, "Vk")) return null;
-            const ret: @This() = .{ .name = .parse(ctx, exclude_suffix) };
+            const ret: @This() = .{ .name = .parse(ctx, exclude_suffix, delimiter) };
             return ret;
         }
         pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
@@ -544,7 +544,8 @@ const Registry = struct {
             return lhs.name.eql(rhs.name);
         }
         pub fn eqlRaw(self: @This(), authors: []const AuthorTag, text: []const u8) bool {
-            return self.name.eqlRaw(text, authors);
+            if (!std.mem.startsWith(u8, text, "Vk")) return false;
+            return self.name.eqlRaw(text[2..], authors);
         }
     };
     pub const GenericTypeName = union(enum) {
@@ -855,21 +856,19 @@ const Registry = struct {
         };
         name: VkTypeName,
         kind: Kind,
-        aliases: []Alias,
+        aliases: []Alias = &.{},
 
         pub fn parse(ctx: *const ParseContext) @This() {
-            for (0..2) |_| {
-                _ = ctx.reader.discardDelimiterInclusive('>') catch |e| panics.reader(e);
-            }
+            _ = ctx.reader.discardDelimiterInclusive('>') catch |e| panics.reader(e);
             const kind_len = ctx.reader.discardDelimiterInclusive('<') catch |e| panics.reader(e);
-            const kind: Kind = switch (kind_len == "VK_DEFINE_HANDLE".len) {
+            const kind: Kind = switch (kind_len == "VK_DEFINE_HANDLE".len + 1) {
                 true => .dispatchable,
                 false => .non_dispatchable,
             };
             for (0..2) |_| {
                 _ = ctx.reader.discardDelimiterInclusive('>') catch |e| panics.reader(e);
             }
-            const name = VkTypeName.parse(ctx, "") orelse @panic("Handle doesn't start with Vk prefix");
+            const name = VkTypeName.parse(ctx, "", '<') orelse @panic("Handle doesn't start with Vk prefix");
             return .{ .name = name, .kind = kind };
         }
         pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
@@ -1146,12 +1145,12 @@ const Registry = struct {
     };
 
     const Handles = struct {
-        handles: []Handle,
-        pub fn find(self: @This(), authors: []const AuthorTag, name: []const u8) ?*Handle {
+        handles: []Handle = &.{},
+        pub fn find(self: @This(), authors: []const AuthorTag, name: []const u8) ?usize {
             var p = self.handles.ptr + self.handles.len;
             while (p != self.handles.ptr) {
                 p -= 1;
-                if (p[0].name.eqlRaw(name, ctx)) return p - self.handles.ptr;
+                if (p[0].name.eqlRaw(authors, name)) return p - self.handles.ptr;
             }
             return null;
         }
@@ -1165,7 +1164,7 @@ const Registry = struct {
     bitmasks: []Bitmask = &.{},
     enums: []Enum = &.{},
     funcpointers: []Funcpointer = &.{},
-    handles: Handles = &.{},
+    handles: Handles = .{},
     structs: []StructOrUnion = &.{},
     unions: []StructOrUnion = &.{},
     constants: []Constant = &.{},
@@ -1177,7 +1176,7 @@ const Registry = struct {
         for (self.enums) |e| {
             try writer.print("{f}", .{e});
         }
-        for (self.handles) |e| {
+        for (self.handles.handles) |e| {
             try writer.print("{f}", .{e});
         }
     }
@@ -1224,12 +1223,28 @@ const Registry = struct {
             .@"/types" => break,
             .type => while (xml_iterator.nextAttr(enum { category, api })) |k| switch (k) {
                 .api => {
-                    if (!ctx.api.match(kv.value)) continue :type_loop;
+                    if (!ctx.api.match(xml_iterator.getAttrValue())) continue :type_loop;
                 },
                 .category => {
-                    const cat = enumFromName(enum { handle }, kv.value) orelse continue :type_loop;
+                    const cat = enumFromName(enum { handle }, xml_iterator.getAttrValue()) orelse continue :type_loop;
                     switch (cat) {
                         .handle => {
+                            if (xml_iterator.nextAttr(enum { name })) |_| {
+                                // It's an alias
+                                _ = ctx.reader.discardDelimiterInclusive('"') catch |e| panics.reader(e);
+                                const name = VkTypeName.parse(ctx, "", '"') orelse @panic("Failed to parse name");
+                                _ = xml_iterator.nextAttr(enum { alias }) orelse panic("Missing alias for {f}", .{name});
+                                const alias = xml_iterator.getAttrValue();
+                                const h = Handles.get(.{ .handles = handles.items }, ctx.authors, alias) orelse panic("Failed to find handle: {s}", .{alias});
+
+                                const comment: Comment = if (xml_iterator.nextAttr(enum { comment })) |_|
+                                    Comment.parseQuotes(ctx)
+                                else
+                                    .{};
+                                h.addAlias(ctx, .{ .alias = name, .comment = comment });
+                                continue :type_loop;
+                            }
+
                             handles.append(ctx.allocator, .parse(ctx)) catch panics.oom();
                         },
                     }
