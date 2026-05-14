@@ -8,23 +8,6 @@ const panic = std.debug.panic;
 const slice_tools = @import("slice_tools");
 const enumFromName = slice_tools.enums.fromName;
 
-pub fn find(haystack: []const u8, needle: []const u8) ?usize {
-    return std.mem.find(u8, haystack, needle);
-}
-pub fn findScalar(haystack: []const u8, scalar: u8) ?usize {
-    return std.mem.findScalar(u8, haystack, scalar);
-}
-pub fn sliceTo(text: []u8, end: u8) ?[]u8 {
-    const i = findScalar(text, end) orelse return null;
-    return text[0..i];
-}
-pub fn findAny(text: []const u8, values: []const u8) ?usize {
-    return std.mem.findAny(u8, text, values);
-}
-pub fn findNone(text: []const u8, values: []const u8) ?usize {
-    return std.mem.findNone(u8, text, values);
-}
-
 const panics = struct {
     fn unexpectedEnd() noreturn {
         @panic("Unexpected end of stream");
@@ -60,149 +43,79 @@ const panics = struct {
         @panic("OOM");
     }
 };
-const ReaderWrap = struct {
-    reader: *Reader,
 
-    pub fn takeByte(self: @This()) u8 {
-        return self.reader.takeByte() catch |e| panics.reader(e);
+const xml = struct {
+    pub fn goToTag(reader: *Reader) void {
+        _ = reader.discardDelimiterInclusive('<') catch |e| panics.reader(e);
     }
-    pub fn peekByte(self: @This()) u8 {
-        return self.reader.peekByte() catch |e| panics.reader(e);
+    pub fn closeTag(reader: *Reader) void {
+        _ = reader.discardDelimiterInclusive('<') catch |e| panics.reader(e);
     }
-    pub fn peekDelimiterInclusive(self: @This(), delimiter: u8) []u8 {
-        return self.reader.peekDelimiterInclusive(delimiter) catch |e| panics.delimiter(e);
-    }
-    pub fn peekDelimiterExclusive(self: @This(), delimiter: u8) []u8 {
-        return self.reader.peekDelimiterExclusive(delimiter) catch |e| panics.delimiter(e);
-    }
-    pub fn discardDelimiterInclusive(self: @This(), delimiter: u8) void {
-        _ = self.reader.discardDelimiterInclusive(delimiter) catch |e| panics.reader(e);
-    }
-    pub fn peek(self: @This(), len: usize) []u8 {
-        self.reader.peek(len) catch |e| panics.reader(e);
-    }
-    pub fn toss(self: @This(), len: usize) void {
-        self.reader.toss(len);
-    }
-    pub fn tossBuffered(self: @This(), len: usize) void {
-        self.reader.tossBuffered(len);
-    }
-    pub fn takeDelimiter(self: @This(), delimiter: u8) []u8 {
-        return self.reader.takeDelimiter(delimiter) catch |e| panics.delimiter(e) orelse panics.unexpectedEnd();
-    }
-    pub fn takeDelimiterExclusive(self: @This(), delimiter: u8) []u8 {
-        return self.reader.takeDelimiterExclusive(delimiter) catch |e| panics.delimiter(e) orelse panics.unexpectedEnd();
-    }
-    pub fn peekGreedy(self: @This(), n: usize) []u8 {
-        return self.reader.peekGreedy(n) catch |e| panics.reader(e);
-    }
-    pub fn discardAll(self: @This(), n: usize) void {
-        self.reader.discardAll(n) catch |e| panics.reader(e);
-    }
-};
-
-const WriterWrapper = struct {
-    writer: *Writer,
-
-    pub fn writeByte(self: @This(), byte: u8) void {
-        self.writer.writeByte(byte) catch panics.write();
-    }
-    pub fn writeAll(self: @This(), text: []const u8) void {
-        self.writer.writeAll(text) catch panics.write();
-    }
-    pub fn print(self: @This(), comptime format: []const u8, args: anytype) void {
-        self.writer.print(format, args) catch panics.write();
-    }
-    pub fn flush(self: @This()) void {
-        self.writer.flush() catch panics.write();
-    }
-};
-
-const XmlIterator = struct {
-    reader: ReaderWrap,
-
-    pub fn goToTag(self: @This()) void {
-        self.reader.discardDelimiterInclusive('<');
-    }
-    pub fn closeTag(self: @This()) void {
-        self.reader.discardDelimiterInclusive('>');
-    }
-    pub fn getTagText(self: @This()) []const u8 {
+    pub fn getTagText(reader: *Reader) []const u8 {
         var len: usize = 1;
         while (true) {
-            const text = self.reader.peekGreedy(len);
-            if (findAny(text, " >")) |i| {
-                self.reader.toss(i);
+            const text = reader.peekGreedy(len) catch |e| panics.reader(e);
+            if (std.mem.findAny(u8, text, " >")) |i| {
+                reader.toss(i);
                 return text[0..i];
             }
             len += 1;
         }
     }
-    pub fn seekTags(self: @This(), comptime TagsEnum: type) TagsEnum {
+    pub fn seekTags(reader: *Reader, comptime TagsEnum: type) TagsEnum {
         while (true) {
-            self.goToTag();
-            const text = self.getTagText();
+            goToTag(reader);
+            const text = getTagText(reader);
             if (enumFromName(TagsEnum, text)) |tag| return tag;
         }
     }
 
-    pub fn goToAttrKey(self: @This()) bool {
+    pub fn goToAttrKey(reader: *Reader) bool {
         while (true) {
-            const text = self.reader.peekGreedy(1);
-            const not_space_index = findNone(text, " ") orelse {
-                self.reader.reader.tossBuffered();
+            const text = reader.peekGreedy(1) catch |e| panics.reader(e);
+            const not_space_index = std.mem.findNone(u8, text, " ") orelse {
+                reader.tossBuffered();
                 continue;
             };
             switch (text[not_space_index]) {
                 '>' => {
-                    self.reader.toss(not_space_index + 1);
+                    reader.toss(not_space_index + 1);
                     return false;
                 },
                 '/' => {
-                    self.reader.toss(not_space_index + 2);
+                    reader.toss(not_space_index + 2);
                     return false;
                 },
                 else => {
-                    self.reader.toss(not_space_index);
+                    reader.toss(not_space_index);
                     return true;
                 },
             }
         }
     }
-    pub fn getAttrKey(self: @This()) ?[]u8 {
-        if (!self.goToAttrKey()) return null;
-        return self.reader.takeDelimiter('=');
+    pub fn getAttrKey(reader: *Reader) ?[]u8 {
+        if (!goToAttrKey(reader)) return null;
+        return reader.takeDelimiter('=') catch |e| panics.takeDelimiter(e);
     }
-    pub fn discardAttrValue(self: @This()) void {
+    pub fn discardAttrValue(reader: *Reader) void {
         for (0..2) |_| {
-            _ = self.reader.discardDelimiterInclusive('"');
+            _ = reader.discardDelimiterInclusive('"') catch |e| panics.reader(e);
         }
     }
-    pub fn getAttrValue(self: @This()) []u8 {
-        _ = self.reader.discardDelimiterInclusive('"');
-        return self.reader.takeDelimiter('"');
+    pub fn getAttrValue(reader: *Reader) []u8 {
+        _ = reader.discardDelimiterInclusive('"') catch |e| panics.reader(e);
+        return reader.takeDelimiter('"') catch |e| panics.takeDelimiter(e) orelse panics.unexpectedEnd();
     }
 
-    pub fn nextAttr(self: @This(), comptime KeysOfInterest: type) ?KeysOfInterest {
-        while (self.getAttrKey()) |text| {
+    pub fn nextAttr(reader: *Reader, comptime KeysOfInterest: type) ?KeysOfInterest {
+        while (getAttrKey(reader)) |text| {
             if (enumFromName(KeysOfInterest, text)) |key| {
                 return key;
             } else {
-                self.discardAttrValue();
+                discardAttrValue(reader);
             }
         }
         return null;
-    }
-    pub fn getNextBetweenTags(self: @This()) []u8 {
-        self.goToTag();
-        self.closeTag();
-        return self.reader.takeDelimiter('<');
-    }
-
-    pub fn seekTagAndClose(self: @This(), comptime Tags: type) Tags {
-        const t = self.seekTags(Tags);
-        self.closeTag();
-        return t;
     }
 };
 
@@ -279,10 +192,6 @@ const Registry = struct {
         api: Api,
         authors: []const AuthorTag,
         reader: *Reader,
-
-        pub fn getXmlIterator(self: *const @This()) XmlIterator {
-            return .{ .reader = .{ .reader = self.reader } };
-        }
     };
     pub const Comment = struct {
         data: []const u8 = &.{},
@@ -746,7 +655,7 @@ const Registry = struct {
         aggregates: []Enum.Entry = &.{},
         aliases: []Alias = &.{},
 
-        pub fn sort(self: *@This()) void {
+        pub fn sortBits(self: *@This()) void {
             const lessThan = struct {
                 pub fn lessThan(_: void, lhs: Entry, rhs: Entry) bool {
                     return lhs.bitpos.bitpos < rhs.bitpos.bitpos;
@@ -917,36 +826,36 @@ const Registry = struct {
         ptrs: slice_tools.BoundedArray(Kind, max_ptr_layer) = .{},
         base_type: VarType,
 
-        pub fn parse(it: XmlIterator, allocator: Allocator) @This() {
-            var result: @This() = .{
-                .base_type = undefined,
-            };
-            const b = it.reader.takeDelimiter('<');
-            if (find(b, "const")) |_| {
-                result.ptrs.appendAssumeCapacity(.@"const");
-            }
-            it.closeTag();
-            const t = it.reader.takeDelimiter('<');
-            result.base_type = .parse(t, allocator);
-            it.closeTag();
-            var after_type = it.reader.takeDelimiter('<');
-            if (findScalar(after_type, '*')) |i| {
-                if (result.ptrs.len == 0) result.ptrs.appendAssumeCapacity(.mutable);
-                after_type = after_type[i + 1 ..];
-            }
-            if (findAny(after_type, "*c")) |i| {
-                switch (after_type[i]) {
-                    '*' => result.ptrs.appendAssumeCapacity(.mutable),
-                    'c' => {
-                        // Must be const, but we'll just trust it
-                        assert(std.mem.startsWith(u8, after_type[i..], "const"));
-                        result.ptrs.appendAssumeCapacity(.@"const");
-                    },
-                    else => unreachable,
-                }
-            }
-            return result;
-        }
+        //pub fn parse(it: XmlIterator, allocator: Allocator) @This() {
+        //    var result: @This() = .{
+        //        .base_type = undefined,
+        //    };
+        //    const b = it.reader.takeDelimiter('<');
+        //    if (find(b, "const")) |_| {
+        //        result.ptrs.appendAssumeCapacity(.@"const");
+        //    }
+        //    it.closeTag();
+        //    const t = it.reader.takeDelimiter('<');
+        //    result.base_type = .parse(t, allocator);
+        //    it.closeTag();
+        //    var after_type = it.reader.takeDelimiter('<');
+        //    if (findScalar(after_type, '*')) |i| {
+        //        if (result.ptrs.len == 0) result.ptrs.appendAssumeCapacity(.mutable);
+        //        after_type = after_type[i + 1 ..];
+        //    }
+        //    if (findAny(after_type, "*c")) |i| {
+        //        switch (after_type[i]) {
+        //            '*' => result.ptrs.appendAssumeCapacity(.mutable),
+        //            'c' => {
+        //                // Must be const, but we'll just trust it
+        //                assert(std.mem.startsWith(u8, after_type[i..], "const"));
+        //                result.ptrs.appendAssumeCapacity(.@"const");
+        //            },
+        //            else => unreachable,
+        //        }
+        //    }
+        //    return result;
+        //}
 
         pub fn format(self: *const @This(), writer: *Writer) Writer.Error!void {
             for (self.ptrs.constSlice()) |p| {
@@ -1002,51 +911,51 @@ const Registry = struct {
             }
         }
 
-        pub fn parse(it: XmlIterator, allocator: Allocator) @This() {
-            var result: @This() = .{
-                .type = .parse(it, allocator),
-                .name = undefined,
-                .amount = undefined,
-            };
-            it.closeTag();
-            result.name = allocator.dupe(u8, it.reader.takeDelimiter('<')) catch panics.oom();
-            it.closeTag();
-            const amount = it.reader.peekDelimiterExclusive('<');
-            const i = findAny(amount, ":[") orelse {
-                it.reader.toss(amount.len);
-                result.amount = .single;
-                return result;
-            };
-            switch (amount[i]) {
-                ':' => {
-                    result.amount = .{ .bitfield = allocator.dupe(u8, amount[i + 1 ..]) catch panics.oom() };
-                    it.reader.toss(amount.len + 1);
-                },
-                '[' => {
-                    result.amount = .{ .array = undefined };
-                    const am = &result.amount.array;
-                    it.reader.toss(i + 1);
-                    var inside_brackets = it.reader.takeDelimiter(']');
-                    if (findScalar(inside_brackets, '<')) |j| {
-                        inside_brackets = inside_brackets[j + 1 ..];
-                        var k = findScalar(inside_brackets, '>') orelse @panic("Unclosed tag");
-                        inside_brackets = inside_brackets[k + 1 ..];
-                        k = findScalar(inside_brackets, '<') orelse panic("Failed to find amount end for {s}", .{result.name});
-                        am.* = .{
-                            .is_literal = false,
-                            .data = allocator.dupe(u8, inside_brackets[0..k]) catch panics.oom(),
-                        };
-                    } else {
-                        am.* = .{
-                            .is_literal = true,
-                            .data = allocator.dupe(u8, inside_brackets) catch panics.oom(),
-                        };
-                    }
-                },
-                else => unreachable,
-            }
-            return result;
-        }
+        //pub fn parse(it: XmlIterator, allocator: Allocator) @This() {
+        //    var result: @This() = .{
+        //        .type = .parse(it, allocator),
+        //        .name = undefined,
+        //        .amount = undefined,
+        //    };
+        //    it.closeTag();
+        //    result.name = allocator.dupe(u8, it.reader.takeDelimiter('<')) catch panics.oom();
+        //    it.closeTag();
+        //    const amount = it.reader.peekDelimiterExclusive('<');
+        //    const i = findAny(amount, ":[") orelse {
+        //        it.reader.toss(amount.len);
+        //        result.amount = .single;
+        //        return result;
+        //    };
+        //    switch (amount[i]) {
+        //        ':' => {
+        //            result.amount = .{ .bitfield = allocator.dupe(u8, amount[i + 1 ..]) catch panics.oom() };
+        //            it.reader.toss(amount.len + 1);
+        //        },
+        //        '[' => {
+        //            result.amount = .{ .array = undefined };
+        //            const am = &result.amount.array;
+        //            it.reader.toss(i + 1);
+        //            var inside_brackets = it.reader.takeDelimiter(']');
+        //            if (findScalar(inside_brackets, '<')) |j| {
+        //                inside_brackets = inside_brackets[j + 1 ..];
+        //                var k = findScalar(inside_brackets, '>') orelse @panic("Unclosed tag");
+        //                inside_brackets = inside_brackets[k + 1 ..];
+        //                k = findScalar(inside_brackets, '<') orelse panic("Failed to find amount end for {s}", .{result.name});
+        //                am.* = .{
+        //                    .is_literal = false,
+        //                    .data = allocator.dupe(u8, inside_brackets[0..k]) catch panics.oom(),
+        //                };
+        //            } else {
+        //                am.* = .{
+        //                    .is_literal = true,
+        //                    .data = allocator.dupe(u8, inside_brackets) catch panics.oom(),
+        //                };
+        //            }
+        //        },
+        //        else => unreachable,
+        //    }
+        //    return result;
+        //}
     };
 
     const ZigType = struct {
@@ -1188,14 +1097,13 @@ const Registry = struct {
             .authors = undefined,
             .reader = reader,
         };
-        const xml_iterator = ctx.getXmlIterator();
-        _ = xml_iterator.seekTags(enum { registry });
-        _ = xml_iterator.seekTags(enum { tags });
+        _ = xml.seekTags(ctx.reader, enum { registry });
+        _ = xml.seekTags(ctx.reader, enum { tags });
         var result: @This() = .{};
         result.parseAuthors(&ctx);
         ctx.authors = result.authors;
 
-        while (true) switch (xml_iterator.seekTags(enum { types, enums, commands, extensions, @"/registry" })) {
+        while (true) switch (xml.seekTags(ctx.reader, enum { types, enums, commands, extensions, @"/registry" })) {
             .types => result.parseTypes(&ctx),
             .enums => result.parseEnums(&ctx),
             .commands => result.parseCommands(&ctx),
@@ -1206,8 +1114,7 @@ const Registry = struct {
 
     pub fn parseAuthors(self: *@This(), ctx: *const ParseContext) void {
         var authors: std.ArrayList(AuthorTag) = .empty;
-        const xml_iterator = ctx.getXmlIterator();
-        while (true) switch (xml_iterator.seekTags(enum { tag, @"/tags" })) {
+        while (true) switch (xml.seekTags(ctx.reader, enum { tag, @"/tags" })) {
             .@"/tags" => break,
             .tag => {
                 const new = authors.addOne(ctx.allocator) catch panics.oom();
@@ -1218,26 +1125,25 @@ const Registry = struct {
     }
     pub fn parseTypes(self: *@This(), ctx: *const ParseContext) void {
         var handles: std.ArrayList(Handle) = .empty;
-        const xml_iterator = ctx.getXmlIterator();
-        type_loop: while (true) switch (xml_iterator.seekTags(enum { type, @"/types" })) {
+        type_loop: while (true) switch (xml.seekTags(ctx.reader, enum { type, @"/types" })) {
             .@"/types" => break,
-            .type => while (xml_iterator.nextAttr(enum { category, api })) |k| switch (k) {
+            .type => while (xml.nextAttr(ctx.reader, enum { category, api })) |k| switch (k) {
                 .api => {
-                    if (!ctx.api.match(xml_iterator.getAttrValue())) continue :type_loop;
+                    if (!ctx.api.match(xml.getAttrValue(ctx.reader))) continue :type_loop;
                 },
                 .category => {
-                    const cat = enumFromName(enum { handle }, xml_iterator.getAttrValue()) orelse continue :type_loop;
+                    const cat = enumFromName(enum { handle }, xml.getAttrValue(ctx.reader)) orelse continue :type_loop;
                     switch (cat) {
                         .handle => {
-                            if (xml_iterator.nextAttr(enum { name })) |_| {
+                            if (xml.nextAttr(ctx.reader, enum { name })) |_| {
                                 // It's an alias
                                 _ = ctx.reader.discardDelimiterInclusive('"') catch |e| panics.reader(e);
                                 const name = VkTypeName.parse(ctx, "", '"') orelse @panic("Failed to parse name");
-                                _ = xml_iterator.nextAttr(enum { alias }) orelse panic("Missing alias for {f}", .{name});
-                                const alias = xml_iterator.getAttrValue();
+                                _ = xml.nextAttr(ctx.reader, enum { alias }) orelse panic("Missing alias for {f}", .{name});
+                                const alias = xml.getAttrValue(ctx.reader);
                                 const h = Handles.get(.{ .handles = handles.items }, ctx.authors, alias) orelse panic("Failed to find handle: {s}", .{alias});
 
-                                const comment: Comment = if (xml_iterator.nextAttr(enum { comment })) |_|
+                                const comment: Comment = if (xml.nextAttr(ctx.reader, enum { comment })) |_|
                                     Comment.parseQuotes(ctx)
                                 else
                                     .{};
