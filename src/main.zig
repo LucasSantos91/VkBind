@@ -977,8 +977,35 @@ const Registry = struct {
                 }
                 return result;
             }
-            pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
-                try writer.print("{f}{f},", .{ self.comment, self.member });
+            fn formatAsStruct(self: @This(), writer: *Writer) Writer.Error!void {
+                try writer.print("{f}{f}", .{ self.comment, self.member });
+                const t = &self.member.type;
+                if (t.ptr_extra[0].optional) {
+                    try writer.print("=nullValue({f})", .{self.member.type});
+                }
+            }
+            fn formatAsUnion(self: @This(), writer: *Writer) Writer.Error!void {
+                try writer.print("{f}{f}", .{ self.comment, self.member });
+            }
+            pub const AsStruct = struct {
+                member: *const Member,
+
+                pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+                    try self.member.formatAsStruct(writer);
+                }
+            };
+            pub const AsUnion = struct {
+                member: *const Member,
+
+                pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+                    try self.member.formatAsUnion(writer);
+                }
+            };
+            pub fn asStruct(self: *const @This()) @This().AsStruct {
+                return .{ .member = self };
+            }
+            pub fn asUnion(self: *const @This()) @This().AsUnion {
+                return .{ .member = self };
             }
         };
         name: VkTypeName = .{},
@@ -1021,17 +1048,29 @@ const Registry = struct {
             new.members = members.toOwnedSlice(ctx.allocator) catch panics.oom();
         }
 
-        fn formatImpl(self: *const @This(), is_struct: bool, writer: *Writer) Writer.Error!void {
-            try writer.print("{f}pub const {f}=extern {s}{{", .{ self.comment, self.name, if (is_struct) "struct" else "union" });
+        fn formatStruct(self: *const @This(), writer: *Writer) Writer.Error!void {
+            try writer.print("{f}pub const {f}=extern struct{{", .{ self.comment, self.name });
+            var members = self.members;
+            if (self.s_type.name.name.data.len != 0) {
+                try writer.print("{f}=.{f},", .{ self.members[0].asStruct(), self.s_type });
+                members = members[1..];
+            }
+            for (members) |m| {
+                try writer.print("{f},", .{m.asStruct()});
+            }
+            try writer.writeAll("};");
+        }
+        fn formatUnion(self: *const @This(), writer: *Writer) Writer.Error!void {
+            try writer.print("{f}pub const {f}=extern union{{", .{ self.comment, self.name });
             for (self.members) |m| {
-                try writer.print("{f}", .{m});
+                try writer.print("{f},", .{m.asUnion()});
             }
             try writer.writeAll("};");
         }
         pub const AsStruct = struct {
             self: *const StructOrUnion,
             pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
-                try self.self.formatImpl(true, writer);
+                try self.self.formatStruct(writer);
             }
         };
         pub fn asStruct(self: *const @This()) AsStruct {
@@ -1040,7 +1079,7 @@ const Registry = struct {
         pub const AsUnion = struct {
             self: *const StructOrUnion,
             pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
-                try self.self.formatImpl(false, writer);
+                try self.self.formatUnion(writer);
             }
         };
         pub fn asUnion(self: *const @This()) AsUnion {

@@ -67,3 +67,13 @@ pub fn FlagBitsMixin(comptime Flags: type, comptime FlagBits: type) type {
         }
     };
 }
+
+fn nullValue(comptime T: type) T {
+    const info = @typeInfo(T);
+    return switch (info) {
+        .@"enum" => @enumFromInt(0),
+        .pointer => null,
+        .array => @splat(@bitCast(0)),
+        else => @bitCast(0),
+    };
+}
