@@ -221,12 +221,13 @@ const Registry = struct {
         }
 
         /// Parses <comment>...</comment>. Assumes we are at the '<comment>'
-        fn parseTags(ctx: *const ParseContext, allocator: Allocator) @This() {
-            const ret = parseCommon(ctx, allocator, '<');
+        fn parseTags(ctx: *const ParseContext) @This() {
+            const ret = parseCommon(ctx, '<');
             expect(ctx.reader, "/comment>");
             return ret;
         }
         pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+            if (self.data.len == 0) return;
             try writer.print("\n/// {s}\n", .{self.data});
         }
     };
@@ -284,6 +285,12 @@ const Registry = struct {
                 .size_t => .usize,
             };
         }
+        pub fn eql(lhs: @This(), rhs: @This()) bool {
+            return lhs == rhs;
+        }
+        pub fn eqlRaw(lhs: @This(), rhs: []const u8) bool {
+            return std.mem.eql(u8, @tagName(lhs), rhs);
+        }
     };
 
     pub const PrimitiveTypeName = struct {
@@ -296,6 +303,12 @@ const Registry = struct {
         }
         pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
             try writer.print("{t}", .{self.primitive});
+        }
+        pub fn eql(lhs: @This(), rhs: @This()) bool {
+            return lhs.primitive == rhs.primitive;
+        }
+        pub fn eqlRaw(lhs: @This(), rhs: []const u8) bool {
+            return lhs.primitive.eqlRaw(rhs);
         }
     };
     pub const AuthorTag = struct {
@@ -378,6 +391,10 @@ const Registry = struct {
         pub fn eql(lhs: @This(), rhs: @This()) bool {
             return lhs.data == rhs.data;
         }
+        pub fn eqlRaw(lhs: @This(), rhs: []const u8) bool {
+            const n = std.fmt.parseInt(u8, rhs, 10) catch return false;
+            return lhs.data == n;
+        }
     };
     pub const VulkanName = struct {
         root: []u8 = &.{},
@@ -445,13 +462,21 @@ const Registry = struct {
     pub const FuncpointerTypeName = struct {
         name: VulkanName = .{},
 
+        const prefix = "PFN_vk";
         pub fn parse(ctx: *const ParseContext) ?@This() {
-            if (!stripPrefix(ctx.reader, "PFN_vk")) return null;
+            if (!stripPrefix(ctx.reader, prefix)) return null;
             const ret: @This() = .{ .name = .parse(ctx, "", '<') };
             return ret;
         }
         pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
             try writer.print("Pfn{f}", .{self.name});
+        }
+        pub fn eql(lhs: @This(), rhs: @This()) bool {
+            return lhs.name.eql(rhs.name);
+        }
+        pub fn eqlRaw(lhs: @This(), ctx: *const ParseContext, rhs: []const u8) bool {
+            if (!std.mem.startsWith(u8, rhs, prefix)) return false;
+            return lhs.name.eqlRaw(rhs[prefix.len..], ctx);
         }
     };
     pub const VkTypeName = struct {
@@ -482,6 +507,12 @@ const Registry = struct {
         pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
             try writer.print("{s}", .{self.data});
         }
+        pub fn eql(lhs: @This(), rhs: @This()) bool {
+            return lhs.eqlRaw(rhs.data);
+        }
+        pub fn eqlRaw(lhs: @This(), rhs: []const u8) bool {
+            return std.mem.eql(u8, lhs.data, rhs);
+        }
     };
     pub const GenericTypeName = union(enum) {
         funcptr: FuncpointerTypeName,
@@ -508,18 +539,41 @@ const Registry = struct {
                 inline else => |n| try writer.print("{f}", .{n}),
             }
         }
+        pub fn eql(lhs: @This(), rhs: @This()) bool {
+            if (lhs != rhs) return false;
+            return switch (lhs) {
+                .funcptr => lhs.funcptr.eql(rhs.funcpointer),
+                .primitive => lhs.primitive.eql(rhs.primitive),
+                .vk_type => lhs.vk_type.eql(rhs.vk_type),
+                .foreign => lhs.foreign.eql(rhs.foreign),
+            };
+        }
+        pub fn eqlRaw(lhs: @This(), rhs: []const u8, ctx: *const ParseContext) bool {
+            return switch (lhs) {
+                .funcptr => lhs.funcptr.eqlRaw(ctx, rhs),
+                .primitive => lhs.primitive.eqlRaw(rhs),
+                .vk_type => lhs.vk_type.eqlRaw(ctx, rhs),
+                .foreign => lhs.foreign.eqlRaw(rhs),
+            };
+        }
     };
 
     pub const ConstantName = struct {
-        data: []const u8,
+        data: []const u8 = &.{},
 
         pub fn parse(ctx: *const ParseContext) @This() {
             if (!stripPrefix(ctx.reader, "VK_")) @panic("Constant doesn't start with VK_");
-            return .{ .data = allocToDelimiterAsLower(ctx.reader, ctx.allocator, '"') };
+            return parseIgnoreVK_(ctx);
         }
         pub fn parseText(ctx: *const ParseContext, text: []const u8) @This() {
             if (!std.mem.startsWith(u8, text, "VK_")) panic("Constant name doesn't start with VK_: {s}", .{text});
-            return .{ .data = ctx.allocator.dupe(u8, text["VK_".len..]) catch panics.oom() };
+            return parseTextIgnoreVK_(ctx, text["VK_".len..]);
+        }
+        pub fn parseIgnoreVK_(ctx: *const ParseContext) @This() {
+            return .{ .data = allocToDelimiterAsLower(ctx.reader, ctx.allocator, '"') };
+        }
+        pub fn parseTextIgnoreVK_(ctx: *const ParseContext, text: []const u8) @This() {
+            return .{ .data = std.ascii.allocLowerString(ctx.allocator, text) catch panics.oom() };
         }
         pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
             try writer.writeAll(self.data);
@@ -531,7 +585,7 @@ const Registry = struct {
 
             pub fn parse(ctx: *const ParseContext, root: VkTypeName) @This() {
                 if (!stripPrefix(ctx.reader, "VK_")) @panic("Flag bit doesn't start with VK_");
-                const root_name = root.name.root;
+                var root_name = root.name.root;
                 var alloc_writer: Writer.Allocating = .init(ctx.allocator);
                 const writer = &alloc_writer.writer;
                 writer.writeAll("VK_") catch panics.oom();
@@ -563,22 +617,43 @@ const Registry = struct {
             pub fn discard(self: @This(), ctx: *const ParseContext) bool {
                 return stripPrefix(ctx.reader, self.data);
             }
+            pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+                try writer.writeAll(self.data);
+            }
         };
 
-        name: []u8 = &.{},
+        name: ConstantName = .{},
+        author: Authors.MaybeAuthor = .{},
 
+        fn parseCommon(ctx: *const ParseContext) @This() {
+            const peek = ctx.reader.takeDelimiterExclusive('"') catch |e| panics.delimiter(e);
+            const bit_suffix = "_BIT";
+            const bit_index = std.mem.findLast(u8, peek, bit_suffix) orelse panic("Bit name doesn't have _BIT suffix: {s}", .{peek});
+            const name: ConstantName = .parseTextIgnoreVK_(peek[0..bit_index]);
+            const after_suffix = peek[bit_index + bit_suffix.len ..];
+            if (after_suffix.len == 0) return .{ .name = name };
+            assert(after_suffix[0] == '_'); // We won't check this, we'll just trust it
+            after_suffix = after_suffix[1..];
+            return .{ .name = name, .author = ctx.authors.find(after_suffix) };
+        }
         pub fn parseFirst(ctx: *const ParseContext, enum_name: VkTypeName) struct { @This(), EnumEntryName.Prefix } {
             const prefix: Prefix = .parse(ctx, enum_name);
             const ret: @This() = .{ .name = allocToDelimiterAsLower(ctx.allocator, '"') };
             return .{ ret, prefix };
         }
         pub fn parse(ctx: *const ParseContext, prefix: Prefix) @This() {
-            prefix.discard(ctx);
-            return .{ .name = allocToDelimiterAsLower(ctx.allocator, '"') };
+            if (!prefix.discard(ctx)) @panic("Entry doesn't start with prefix: {f}");
+            return .{ .name = .parseIgnoreVK_(ctx) };
         }
 
         pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
-            try writer.print("@\"{s}\"", .{self.name});
+            try writer.print("@\"{f}\"", .{self.name});
+            if (self.author.ptr) |p| {
+                try writer.writeByte('_');
+                for (p.data) |c| {
+                    try writer.writeByte(std.ascii.toLower(c));
+                }
+            }
         }
     };
     const Bitmask = struct {
@@ -605,7 +680,7 @@ const Registry = struct {
             };
         };
         const BitName = struct {
-            name: EnumEntryName,
+            name: EnumEntryName = .{},
 
             pub fn parseFirst(ctx: *const ParseContext, enum_name: VkTypeName) struct { @This(), EnumEntryName.Prefix } {
                 if (!std.mem.endsWith(u8, enum_name.name.root, "FlagBits")) panic("Flag doesn't end with FlagBits: {f}", .{enum_name});
@@ -841,12 +916,140 @@ const Registry = struct {
     const StructOrUnion = struct {
         const Member = struct {
             member: ZigVar,
-            comment: []u8,
+            comment: Comment = .{},
+
+            pub fn parse(ctx: *const ParseContext, s_type: *Bitmask.BitName, members: []const Member) @This() {
+                var result: @This() = .{ .member = .{
+                    .name = &.{},
+                    .type = .{
+                        .c_type = undefined,
+                    },
+                } };
+                while (xml.nextAttr(ctx.reader, enum { values, optional, len })) |t| switch (t) {
+                    .values => {
+                        s_type.* = .parse(ctx, .{ .data = "VK_STRUCTURE_TYPE_" });
+                    },
+                    .optional => {
+                        var it: CommaIterator = .{ .text = xml.getAttrValue(ctx.reader) };
+                        var ptr: [*]ZigType.PtrExtra = &result.member.type.ptr_extra;
+                        const limit = ptr + BaseCType.max_ptr_layer;
+                        while (it.next()) |text| {
+                            if (ptr == limit) @panic("Too many layers of pointers");
+                            ptr[0].optional = std.mem.eql(u8, text, "true");
+                            ptr += 1;
+                        }
+                    },
+                    .len => {
+                        var it: CommaIterator = .{ .text = xml.getAttrValue(ctx.reader) };
+                        var ptr: [*]ZigType.PtrExtra = &result.member.type.ptr_extra;
+                        const limit = ptr + BaseCType.max_ptr_layer;
+                        while (it.next()) |text| {
+                            if (ptr == limit) @panic("Too many layers of pointers");
+                            if (enumFromName(enum { null_terminated, @"1" }, text)) |k| {
+                                switch (k) {
+                                    .null_terminated => {
+                                        ptr[0].size = .null_terminated;
+                                    },
+                                    .@"1" => {
+                                        ptr[0].size = .single;
+                                    },
+                                }
+                            } else {
+                                ptr[0].optional = blk: {
+                                    for (members) |m| {
+                                        if (std.mem.eql(u8, m.member.name, text)) {
+                                            break :blk m.member.type.ptr_extra[0].optional;
+                                        }
+                                    }
+                                    break :blk true;
+                                };
+                            }
+                        }
+                        ptr += 1;
+                    },
+                };
+
+                const c_var: CVar = .parse(ctx);
+                result.member.type.c_type = c_var.type;
+                result.member.name = c_var.name;
+
+                switch (xml.seekTagsAndClose(ctx.reader, enum { comment, @"/member" })) {
+                    .comment => {
+                        result.comment = .parseTags(ctx);
+                    },
+                    .@"/member" => {},
+                }
+                return result;
+            }
+            pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+                try writer.print("{f}{f},", .{ self.comment, self.member });
+            }
         };
-        comment: []u8 = &.{},
+        name: VkTypeName = .{},
+        comment: Comment = .{},
         members: []Member = &.{},
-        aliases: [][]u8 = &.{},
-        s_type: []u8 = &.{},
+        aliases: []VkTypeName = &.{},
+        s_type: Bitmask.BitName = .{},
+
+        pub fn parse(ctx: *const ParseContext, structs: *std.ArrayList(StructOrUnion)) void {
+            _ = xml.nextAttr(ctx.reader, enum { name }) orelse @panic("Struct/Union without name");
+            const name: VkTypeName = VkTypeName.parse(ctx, "", '"') orelse @panic("Struct/Union name doesn't start with Vk");
+            var comment: Comment = .{};
+            while (xml.nextAttr(ctx.reader, enum { alias, comment })) |t| switch (t) {
+                .alias => {
+                    const alias = xml.getAttrValue(ctx.reader);
+                    for (structs.items) |*i| {
+                        if (i.name.eqlRaw(ctx, alias)) {
+                            i.aliases = slice_tools.allocated.concat(VkTypeName, i.aliases, &.{name}, ctx.allocator) catch panics.oom();
+                            return;
+                        }
+                    }
+                },
+                .comment => {
+                    comment = .parseQuotes(ctx);
+                },
+            };
+            const new = structs.addOne(ctx.allocator) catch panics.oom();
+            new.* = .{
+                .name = name,
+                .comment = comment,
+                .members = undefined,
+            };
+            var members: std.ArrayList(Member) = .empty;
+            while (true) switch (xml.seekTags(ctx.reader, enum { member, @"/type" })) {
+                .member => {
+                    members.append(ctx.allocator, .parse(ctx, &new.s_type, members.items)) catch panics.oom();
+                },
+                .@"/type" => break,
+            };
+            new.members = members.toOwnedSlice(ctx.allocator) catch panics.oom();
+        }
+
+        fn formatImpl(self: *const @This(), is_struct: bool, writer: *Writer) Writer.Error!void {
+            try writer.print("{f}pub const {f}=extern {s}{{", .{ self.comment, self.name, if (is_struct) "struct" else "union" });
+            for (self.members) |m| {
+                try writer.print("{f}", .{m});
+            }
+            try writer.writeAll("};");
+        }
+        pub const AsStruct = struct {
+            self: *const StructOrUnion,
+            pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+                try self.self.formatImpl(true, writer);
+            }
+        };
+        pub fn asStruct(self: *const @This()) AsStruct {
+            return .{ .self = self };
+        }
+        pub const AsUnion = struct {
+            self: *const StructOrUnion,
+            pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+                try self.self.formatImpl(false, writer);
+            }
+        };
+        pub fn asUnion(self: *const @This()) AsUnion {
+            return .{ .self = self };
+        }
     };
 
     const BaseCType = struct {
@@ -865,7 +1068,7 @@ const Registry = struct {
         const max_ptr_layer = 2;
 
         ptrs: slice_tools.BoundedArray(Kind, max_ptr_layer) = .{},
-        base_type: GenericTypeName,
+        base_type: GenericTypeName = undefined,
 
         pub fn parse(ctx: *const ParseContext) @This() {
             var result: @This() = .{
@@ -934,7 +1137,7 @@ const Registry = struct {
                 }
             }
             pub fn parse(ctx: *const ParseContext) @This() {
-                const amount = ctx.reader.takeDelimiterExclusive('<') catch |e| panics.delimiter(e);
+                const amount = ctx.reader.peekDelimiterExclusive('<') catch |e| panics.delimiter(e);
                 const i = std.mem.findAny(u8, amount, ":[") orelse {
                     ctx.reader.toss(amount.len);
                     return .single;
@@ -960,8 +1163,8 @@ const Registry = struct {
                 }
             }
         };
-        base: BaseCType,
-        amount: Amount,
+        base: BaseCType = .{},
+        amount: Amount = .single,
 
         pub fn parseBase(ctx: *const ParseContext) @This() {
             return .{ .base = .parse(ctx), .amount = undefined };
@@ -980,10 +1183,10 @@ const Registry = struct {
 
     const CVar = struct {
         type: CType,
-        name: GenericTypeName,
+        name: []const u8,
 
         pub fn format(self: *const @This(), writer: *Writer) Writer.Error!void {
-            try writer.print("{f}:{f}", .{ self.name, self.type });
+            try writer.print("{s}:{f}", .{ self.name, self.type });
         }
 
         pub fn parse(ctx: *const ParseContext) @This() {
@@ -992,7 +1195,8 @@ const Registry = struct {
                 .name = undefined,
             };
             _ = xml.seekTagsAndClose(ctx.reader, enum { name });
-            result.name = .parse(ctx);
+            result.name = allocToDelimiter(ctx.reader, ctx.allocator, '<');
+            xml.closeTag(ctx.reader);
             result.type.parseAmount(ctx);
             return result;
         }
@@ -1005,11 +1209,11 @@ const Registry = struct {
             null_terminated,
 
             pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
-                try writer.writeAll("{s}", .{switch (self) {
+                try writer.writeAll(switch (self) {
                     .single => "*",
                     .many => "[*]",
                     .null_terminated => "[*:0]",
-                }});
+                });
             }
         };
         const PtrExtra = struct {
@@ -1017,8 +1221,8 @@ const Registry = struct {
             size: Size = .single,
         };
 
-        c_type: CType,
-        ptr_extra: [BaseCType.max_ptr_layer]PtrExtra,
+        c_type: CType = .{},
+        ptr_extra: [BaseCType.max_ptr_layer]PtrExtra = @splat(.{}),
 
         pub fn format(self: *const @This(), writer: *Writer) Writer.Error!void {
             if (self.c_type.amount == .bitfield) {
@@ -1027,25 +1231,26 @@ const Registry = struct {
             }
             const ptrs = self.c_type.base.ptrs.constSlice();
             for (ptrs, self.ptr_extra[0..ptrs.len]) |kind, extra| {
-                try writer.print("{s}{f}{f}", .{ if (self.optional) "?" else "", extra.size, kind });
+                try writer.print("{s}{f}{f}", .{ if (extra.optional) "?" else "", extra.size, kind });
             }
             switch (self.c_type.amount) {
                 .single => {},
                 .array => |ar| {
-                    try writer.print("{f}", .{ar.data});
+                    try writer.print("{f}", .{ar});
                 },
                 .bitfield => unreachable,
             }
-            if (self.ptrs.len != 0 and self.base_type == .primitive and self.base_type.primitive == .void) {
+            const base = &self.c_type.base;
+            if (base.ptrs.len != 0 and base.base_type == .primitive and base.base_type.primitive.primitive == .void) {
                 try writer.writeAll("anyopaque");
             } else {
-                try writer.print("{f}", .{self.c_type.base_type});
+                try writer.print("{f}", .{base.base_type});
             }
         }
     };
     const ZigVar = struct {
-        name: GenericTypeName,
-        type: ZigType,
+        name: []const u8,
+        type: ZigType = .{},
 
         pub fn format(self: *const @This(), writer: *Writer) Writer.Error!void {
             try writer.print("{s}:{f}", .{ self.name, self.type });
@@ -1122,6 +1327,12 @@ const Registry = struct {
         for (self.funcpointers) |e| {
             try writer.print("{f}", .{e});
         }
+        for (self.structs) |e| {
+            try writer.print("{f}", .{e.asStruct()});
+        }
+        for (self.unions) |e| {
+            try writer.print("{f}", .{e.asUnion()});
+        }
     }
 
     const TempAlias = struct {
@@ -1166,6 +1377,8 @@ const Registry = struct {
     pub fn parseTypes(self: *@This(), ctx: *const ParseContext, enum_aliases: *std.ArrayList(TempAlias)) void {
         var handles: std.ArrayList(Handle) = .empty;
         var funcpointers: std.ArrayList(Funcpointer) = .empty;
+        var structs: std.ArrayList(StructOrUnion) = .empty;
+        var unions: std.ArrayList(StructOrUnion) = .empty;
         type_loop: while (true) switch (xml.seekTags(ctx.reader, enum { type, @"/types" })) {
             .@"/types" => break,
             .type => while (xml.nextAttr(ctx.reader, enum { category, api })) |k| switch (k) {
@@ -1173,7 +1386,7 @@ const Registry = struct {
                     if (!ctx.api.match(xml.getAttrValue(ctx.reader))) continue :type_loop;
                 },
                 .category => {
-                    const cat = enumFromName(enum { handle, @"enum", funcpointer }, xml.getAttrValue(ctx.reader)) orelse continue :type_loop;
+                    const cat = enumFromName(enum { handle, @"enum", funcpointer, @"struct", @"union" }, xml.getAttrValue(ctx.reader)) orelse continue :type_loop;
                     switch (cat) {
                         .handle => {
                             if (xml.nextAttr(ctx.reader, enum { name })) |_| {
@@ -1201,6 +1414,12 @@ const Registry = struct {
                             new.alias = VkTypeName.parse(ctx, "", '"') orelse panic("Alias doesn't start with Vk: {s}", .{new.name});
                         },
                         .funcpointer => funcpointers.append(ctx.allocator, .parse(ctx)) catch panics.oom(),
+                        .@"struct" => {
+                            StructOrUnion.parse(ctx, &structs);
+                        },
+                        .@"union" => {
+                            StructOrUnion.parse(ctx, &unions);
+                        },
                     }
                     continue :type_loop;
                 }
@@ -1208,6 +1427,8 @@ const Registry = struct {
         };
         self.handles = .{ .handles = handles.toOwnedSlice(ctx.allocator) catch panics.oom() };
         self.funcpointers = funcpointers.toOwnedSlice(ctx.allocator) catch panics.oom();
+        self.structs = structs.toOwnedSlice(ctx.allocator) catch panics.oom();
+        self.unions = unions.toOwnedSlice(ctx.allocator) catch panics.oom();
     }
 
     pub fn parseEnums(self: *@This(), ctx: *const ParseContext) void {
