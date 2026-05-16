@@ -209,14 +209,10 @@ const Registry = struct {
             };
             return ret;
         }
-        /// Parses comment="..". Assumes we are at the '='
+        /// Parses comment="..". Assumes we are at the '="'
         fn parseQuotes(
             ctx: *const ParseContext,
         ) @This() {
-            _ = ctx.reader.discardDelimiterInclusive('"') catch |e| switch (e) {
-                Reader.Error.ReadFailed => panics.readFailed(),
-                Reader.Error.EndOfStream => @panic("Failed to find beginning of comment"),
-            };
             return parseCommon(ctx, '"');
         }
 
