@@ -348,10 +348,21 @@ const Registry = struct {
                 const ptr = self.ptr orelse return name;
                 return slice_tools.decreaseLen(name, ptr.data.len);
             }
+            pub fn eqlRaw(lhs: @This(), rhs: []const u8) bool {
+                if (lhs.ptr) |p| {
+                    return std.mem.eql(u8, p.data, rhs);
+                } else return rhs.len == 0;
+            }
         };
         pub fn find(self: @This(), name: []const u8) MaybeAuthor {
             for (self.authors) |*a| {
                 if (a.endsInAuthor(name)) return .{ .ptr = a };
+            }
+            return .{};
+        }
+        pub fn findExact(self: @This(), name: []const u8) MaybeAuthor {
+            for (self.authors) |*a| {
+                if (std.mem.eql(u8, a.data, name)) return .{ .ptr = a };
             }
             return .{};
         }
@@ -393,7 +404,7 @@ const Registry = struct {
         }
     };
     pub const VulkanName = struct {
-        root: []u8 = &.{},
+        root: []const u8 = &.{},
         author: Authors.MaybeAuthor = .{},
         version: NameVersion = .{},
 
@@ -409,33 +420,31 @@ const Registry = struct {
             }
             return i;
         }
-        pub fn parseText(ctx: *const ParseContext, name: []u8, exclude_suffix: []const u8) @This() {
-            const version_index = getVersionIndex(name);
-            const version_text = name[version_index..];
+        pub fn parseText(ctx: *const ParseContext, name: []u8) @This() {
+            const author = ctx.authors.find(name);
+            const without_author = author.stripAuthor(name);
+            const version_index = getVersionIndex(without_author);
+            const version_text = without_author[version_index..];
             const version: NameVersion = .parseText(version_text);
-            const without_version = name[0..version_index];
-            const author = ctx.authors.find(without_version);
-            const root = author.stripAuthor(without_version);
-            if (!std.mem.endsWith(u8, root, exclude_suffix))
-                panic("Name {s} doesn't end with suffix {s}", .{ name, exclude_suffix });
+            const root = without_author[0..version_index];
             return .{
-                .root = ctx.allocator.dupe(u8, slice_tools.decreaseLen(root, exclude_suffix.len)) catch panics.oom(),
+                .root = ctx.allocator.dupe(u8, root) catch panics.oom(),
                 .author = author,
                 .version = version,
             };
         }
-        pub fn parse(ctx: *const ParseContext, exclude_suffix: []const u8, delimiter: u8) @This() {
+        pub fn parse(ctx: *const ParseContext, delimiter: u8) @This() {
             const peek = ctx.reader.takeDelimiter(delimiter) catch |e| switch (e) {
                 error.ReadFailed => panics.readFailed(),
                 error.StreamTooLong => panics.streamTooLong(),
             } orelse @panic("Unexpected end of stream while parsing name");
-            return parseText(ctx, peek, exclude_suffix);
+            return parseText(ctx, peek);
         }
         pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
             try writer.print("{s}{f}{f}", .{
                 self.root,
-                self.author,
                 self.version,
+                self.author,
             });
         }
         pub fn eql(lhs: @This(), rhs: @This()) bool {
@@ -461,7 +470,7 @@ const Registry = struct {
         const prefix = "PFN_vk";
         pub fn parse(ctx: *const ParseContext) ?@This() {
             if (!stripPrefix(ctx.reader, prefix)) return null;
-            const ret: @This() = .{ .name = .parse(ctx, "", '<') };
+            const ret: @This() = .{ .name = .parse(ctx, '<') };
             return ret;
         }
         pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
@@ -478,9 +487,9 @@ const Registry = struct {
     pub const VkTypeName = struct {
         name: VulkanName = .{},
 
-        pub fn parse(ctx: *const ParseContext, exclude_suffix: []const u8, delimiter: u8) ?@This() {
+        pub fn parse(ctx: *const ParseContext, delimiter: u8) ?@This() {
             if (!stripPrefix(ctx.reader, "Vk")) return null;
-            const ret: @This() = .{ .name = .parse(ctx, exclude_suffix, delimiter) };
+            const ret: @This() = .{ .name = .parse(ctx, delimiter) };
             return ret;
         }
         pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
@@ -525,7 +534,7 @@ const Registry = struct {
             if (PrimitiveTypeName.parse(ctx)) |n| {
                 return .{ .primitive = n };
             }
-            if (VkTypeName.parse(ctx, "", '<')) |n| {
+            if (VkTypeName.parse(ctx, '<')) |n| {
                 return .{ .vk_type = n };
             }
             return .{ .foreign = .parse(ctx) };
@@ -555,7 +564,8 @@ const Registry = struct {
     };
 
     pub const ConstantName = struct {
-        data: []const u8 = &.{},
+        root: []const u8 = &.{},
+        author: Authors.MaybeAuthor = .{},
 
         pub fn parse(ctx: *const ParseContext) @This() {
             if (!stripPrefix(ctx.reader, "VK_")) @panic("Constant doesn't start with VK_");
@@ -566,98 +576,70 @@ const Registry = struct {
             return parseTextIgnoreVK_(ctx, text["VK_".len..]);
         }
         pub fn parseIgnoreVK_(ctx: *const ParseContext) @This() {
-            return .{ .data = allocToDelimiterAsLower(ctx.reader, ctx.allocator, '"') };
+            const raw = ctx.reader.takeDelimiter('"') catch |e| panics.takeDelimiter(e) orelse panics.unexpectedEnd();
+            return parseTextIgnoreVK_(ctx, raw);
         }
-        pub fn parseTextIgnoreVK_(ctx: *const ParseContext, text: []const u8) @This() {
-            return .{ .data = std.ascii.allocLowerString(ctx.allocator, text) catch panics.oom() };
+        pub fn parseTextIgnoreVK_(ctx: *const ParseContext, raw_: []const u8) @This() {
+            const author = ctx.authors.find(raw_);
+            var raw = raw_;
+            if (author.ptr) |a| {
+                raw = slice_tools.decreaseLen(raw, a.data.len);
+                if (raw.len != 0) raw = slice_tools.decreaseLen(raw, 1);
+            }
+            const data = ctx.allocator.alloc(u8, raw.len) catch panics.oom();
+            _ = std.ascii.lowerString(data, raw);
+            return .{
+                .root = data,
+                .author = author,
+            };
         }
         pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
-            try writer.writeAll(self.data);
-        }
-    };
-    pub const EnumEntryName = struct {
-        const Prefix = struct {
-            data: []const u8 = &.{},
-
-            pub fn parse(ctx: *const ParseContext, root: VkTypeName) @This() {
-                if (!stripPrefix(ctx.reader, "VK_")) @panic("Flag bit doesn't start with VK_");
-                var root_name = root.name.root;
-                var alloc_writer: Writer.Allocating = .init(ctx.allocator);
-                const writer = &alloc_writer.writer;
-                writer.writeAll("VK_") catch panics.oom();
-                const possible_version = blk: while (true) {
-                    const slice = ctx.reader.peekDelimiterExclusive('_') catch |e| switch (e) {
-                        Reader.DelimiterError.ReadFailed => panics.readFailed(),
-                        Reader.DelimiterError.StreamTooLong => panics.streamTooLong(),
-                    } orelse @panic("unexpected end while parsing FlagBits prefix");
-                    if (slice.len > root_name.len) break :blk slice;
-                    for (root_name[0..slice.len], slice) |r, s| {
-                        const r_cap = std.ascii.toUpper(r);
-                        if (r_cap != s) break :blk slice;
-                    }
-                    root_name = root_name[slice.len..];
-                    writer.writeAll(slice) catch panics.oom();
-                    writer.writeByte('_') catch panics.oom();
-                    ctx.reader.toss(slice.len + 1);
-                };
-                if (std.fmt.parseInt(u8, 10, possible_version)) |n| {
-                    if (n == root_name.name.version) {
-                        writer.writeAll(possible_version) catch panics.oom();
-                        writer.writeByte('_') catch panics.oom();
-                        ctx.reader.toss(possible_version.len + 1);
-                    }
-                }
-                return .{ .data = alloc_writer.toOwnedSlice() catch panics.oom() };
-            }
-
-            pub fn discard(self: @This(), ctx: *const ParseContext) bool {
-                return stripPrefix(ctx.reader, self.data);
-            }
-            pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
-                try writer.writeAll(self.data);
-            }
-        };
-
-        name: ConstantName = .{},
-        author: Authors.MaybeAuthor = .{},
-
-        fn parseCommon(ctx: *const ParseContext) @This() {
-            const peek = ctx.reader.takeDelimiterExclusive('"') catch |e| panics.delimiter(e);
-            const bit_suffix = "_BIT";
-            const bit_index = std.mem.findLast(u8, peek, bit_suffix) orelse panic("Bit name doesn't have _BIT suffix: {s}", .{peek});
-            const name: ConstantName = .parseTextIgnoreVK_(peek[0..bit_index]);
-            const after_suffix = peek[bit_index + bit_suffix.len ..];
-            if (after_suffix.len == 0) return .{ .name = name };
-            assert(after_suffix[0] == '_'); // We won't check this, we'll just trust it
-            after_suffix = after_suffix[1..];
-            return .{ .name = name, .author = ctx.authors.find(after_suffix) };
-        }
-        pub fn parseFirst(ctx: *const ParseContext, enum_name: VkTypeName) struct { @This(), EnumEntryName.Prefix } {
-            const prefix: Prefix = .parse(ctx, enum_name);
-            const ret: @This() = .{ .name = allocToDelimiterAsLower(ctx.allocator, '"') };
-            return .{ ret, prefix };
-        }
-        pub fn parse(ctx: *const ParseContext, prefix: Prefix) @This() {
-            if (!prefix.discard(ctx)) @panic("Entry doesn't start with prefix: {f}");
-            return .{ .name = .parseIgnoreVK_(ctx) };
-        }
-
-        pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
-            try writer.print("@\"{f}\"", .{self.name});
+            try writer.print("@\"{s}", .{self.root});
             if (self.author.ptr) |p| {
-                try writer.writeByte('_');
-                for (p.data) |c| {
-                    try writer.writeByte(std.ascii.toLower(c));
-                }
-            }
+                try writer.print("_{f}\"", .{p});
+            } else try writer.writeByte('"');
+        }
+        pub fn eql(lhs: @This(), rhs: @This()) bool {
+            return lhs.author == rhs.author and std.mem.eql(u8, lhs.root, rhs.root);
+        }
+        pub fn eqlRaw(lhs: @This(), rhs: []const u8) bool {
+            if (!std.mem.eql(u8, rhs, "VK_")) return false;
+            if (!std.mem.startsWith(u8, rhs, lhs.root)) return false;
+            var remaining = rhs[lhs.root.len..];
+            if (remaining.len == 0) return true;
+            remaining = remaining[1..];
+            return lhs.author.eqlRaw(remaining);
         }
     };
+    pub fn discardPrefix(ctx: *const ParseContext, root: VkTypeName) void {
+        if (!stripPrefix(ctx.reader, "VK_")) @panic("Enum doesn't start with VK_");
+        var root_name = root.name.root;
+        const possible_version = blk: while (true) {
+            const slice = ctx.reader.peekDelimiterExclusive('_') catch |e| panics.delimiter(e);
+            if (slice.len > root_name.len) break :blk slice;
+            for (root_name[0..slice.len], slice) |r, s| {
+                const r_cap = std.ascii.toUpper(r);
+                if (r_cap != s) break :blk slice;
+            }
+            root_name = root_name[slice.len..];
+            ctx.reader.toss(slice.len + 1);
+        };
+        if (root.name.version.eqlRaw(possible_version)) {
+            ctx.reader.toss(possible_version.len + 1);
+        }
+    }
+
     const Bitmask = struct {
         const BitmaskName = struct {
             name: VkTypeName = .{},
 
-            pub fn parseFromFlagBits(ctx: *const ParseContext) @This() {
-                return .{ .name = .parse(ctx, "FlagBits") };
+            pub fn fromVkTypeName(name: VkTypeName) @This() {
+                const suffix = "FlagBits";
+                if (!std.mem.endsWith(u8, name.name.root, suffix)) panic("Bitmask name doesn't end with FlagBits: {f}", .{name});
+                var result: @This() = .{ .name = name };
+                const root = &result.name.name.root;
+                root.* = slice_tools.decreaseLen(root.*, suffix.len);
+                return result;
             }
             pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
                 const base = self.name.name;
@@ -676,22 +658,37 @@ const Registry = struct {
             };
         };
         const BitName = struct {
-            name: EnumEntryName = .{},
+            name: ConstantName = .{},
 
-            pub fn parseFirst(ctx: *const ParseContext, enum_name: VkTypeName) struct { @This(), EnumEntryName.Prefix } {
-                if (!std.mem.endsWith(u8, enum_name.name.root, "FlagBits")) panic("Flag doesn't end with FlagBits: {f}", .{enum_name});
-                var copy = enum_name;
-                copy.name.root = slice_tools.decreaseLen(copy.name.root, "FlagBits".len);
-                const name, const prefix = EnumEntryName.parseFirst(ctx, copy);
-                const ret: @This() = .{ .name = name };
-                return .{ ret, prefix };
-            }
-            pub fn parse(ctx: *const ParseContext, prefix: EnumEntryName.Prefix) @This() {
-                const ret = EnumEntryName.parse(ctx, prefix);
-                return .{ .name = ret };
+            const bit_suffix = "_BIT";
+            fn parseRemaining(ctx: *const ParseContext) @This() {
+                const text = ctx.reader.takeDelimiter('"') catch |e| panics.takeDelimiter(e) orelse panics.unexpectedEnd();
+                const i = std.mem.findLast(u8, text, bit_suffix) orelse {
+                    return .{ .name = .parseTextIgnoreVK_(ctx, text) };
+                };
+                const root = text[0..i];
+                const author_text = text[i + bit_suffix.len ..];
+                const output = ctx.allocator.alloc(u8, root.len) catch panics.oom();
+                _ = std.ascii.lowerString(output, root);
+                const result: @This() = .{ .name = .{
+                    .root = output,
+                    .author = if (author_text.len != 0) ctx.authors.findExact(author_text[1..]) else .{},
+                } };
+                return result;
             }
             pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
                 try writer.print("{f}", .{self.name});
+            }
+
+            pub fn eql(lhs: @This(), rhs: @This()) bool {
+                return lhs.name.eql(rhs.name);
+            }
+            pub fn eqlRaw(lhs: @This(), rhs: []const u8) bool {
+                const i = std.mem.findLast(u8, rhs, bit_suffix) orelse return false;
+                const root = rhs[0..i];
+                const author_text = rhs[i + bit_suffix.len ..];
+                if (!lhs.name.author.eqlRaw(author_text)) return false;
+                return std.mem.eql(u8, lhs.name.root, root);
             }
         };
 
@@ -700,13 +697,12 @@ const Registry = struct {
                 bitpos: u8,
 
                 pub fn parse(ctx: *const ParseContext) @This() {
-                    _ = ctx.reader.discardDelimiterInclusive('"') catch |e| panics.reader(e);
                     const slice = ctx.reader.takeDelimiter('"') catch |e| switch (e) {
-                        Reader.Error.ReadFailed => panics.readFailed(),
-                        Reader.DelimiterError.StreamTooLong => panics.streamTooLong(),
+                        error.ReadFailed => panics.readFailed(),
+                        error.StreamTooLong => panics.streamTooLong(),
                     } orelse
                         @panic("Failed to find bitpos delimiter");
-                    const n = std.fmt.parseInt(u8, 10, slice) catch |e| switch (e) {
+                    const n = std.fmt.parseInt(u8, slice, 10) catch |e| switch (e) {
                         error.Overflow => @panic("Bitpos too big"),
                         error.InvalidCharacter => @panic("Invalid bitpos"),
                     };
@@ -729,7 +725,6 @@ const Registry = struct {
             name: BitName,
             bitpos: Bitpos,
             comment: Comment,
-            aliases: []BitAlias,
 
             pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
                 try writer.print("{f}{f}=1<<{f},", .{ self.comment, self.name, self.bitpos });
@@ -750,19 +745,18 @@ const Registry = struct {
             @"32",
             @"64",
 
-            pub fn parse(vk_flags: []const u8) @This() {
-                const e = enumFromName(enum { VkFlags, VkFlags64 }, vk_flags) orelse panic("Unknown bitwidth: {s}", .{vk_flags});
-                return switch (e) {
-                    .VkFlags => .@"32",
-                    .VkFlags64 => .@"64",
-                };
+            pub fn parse(ctx: *const ParseContext) @This() {
+                const text = ctx.reader.takeDelimiter('"') catch |e| panics.takeDelimiter(e) orelse panics.unexpectedEnd();
+                return parseFromText(text);
+            }
+            pub fn parseFromText(vk_flags: []const u8) @This() {
+                return enumFromName(@This(), vk_flags) orelse panic("Unknown bitwidth: {s}", .{vk_flags});
             }
             pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
                 try writer.print("u{t}", .{self});
             }
         };
 
-        prefix: EnumEntryName.Prefix = .{},
         name: BitmaskName = .{},
         bits: Bits = .@"32",
         comment: Comment = .{},
@@ -788,15 +782,7 @@ const Registry = struct {
             for (self.entries) |e| {
                 try writer.print("{f}", .{e});
             }
-            for (self.entries) |e| {
-                for (e.aliases) |alias| {
-                    try writer.print("{f}{f};", .{ alias, e.name });
-                }
-            }
-            for (self.aliases) |e| {
-                try writer.print("{f}", .{e});
-            }
-            try writer.print("}};{[comment]f}pub const {[flags_name]f}=packed({[bits]f}{{", .{
+            try writer.print("}};{[comment]f}pub const {[flags_name]f}=packed struct({[bits]f}){{", .{
                 .comment = self.comment,
                 .flags_name = self.name.asFlags(),
                 .bits = self.bits,
@@ -807,22 +793,73 @@ const Registry = struct {
                 for (self.entries[1..]) |e| {
                     const diff = e.bitpos.bitpos - last_bitpos;
                     if (diff > 1) {
-                        try writer.print("_reserved{f}:bool=false,", .{e.bitpos});
+                        try writer.print("_reserved{f}:u{}=false,", .{ e.bitpos, diff });
                     }
                     last_bitpos = e.bitpos.bitpos;
                     try writer.print("{f}", .{e.asFlags()});
-                }
-            }
-
-            for (self.entries) |e| {
-                for (e.aliases) |alias| {
-                    try writer.print("{f}pub const {f}:@This() = @bitCast(1<<{f});", .{ alias.comment, alias.alias, e.bitpos });
                 }
             }
             for (self.aggregates) |e| {
                 try writer.print("{f}pub const {f}:@This() = @bitCast({s});", .{ e.comment, e.name, e.value });
             }
             try writer.writeAll("};");
+        }
+        pub fn parseEntries(self: *@This(), ctx: *const ParseContext) void {
+            var entries: std.ArrayList(Entry) = .empty;
+            var aggregates: std.ArrayList(Enum.Entry) = .empty;
+            while (true) switch (xml.seekTags(ctx.reader, enum { @"enum", @"/enums" })) {
+                .@"enum" => self.parseEntry(ctx, &entries, &aggregates),
+
+                .@"/enums" => break,
+            };
+            self.entries = entries.toOwnedSlice(ctx.allocator) catch panics.oom();
+            self.aggregates = aggregates.toOwnedSlice(ctx.allocator) catch panics.oom();
+        }
+        pub fn parseEntry(self: *@This(), ctx: *const ParseContext, entries: *std.ArrayList(Entry), aggregates: *std.ArrayList(Enum.Entry)) void {
+            const E = enum { value, bitpos, api };
+            sw: switch (xml.nextAttr(ctx.reader, E) orelse return) {
+                .api => {
+                    if (!ctx.api.match(xml.getAttrValue(ctx.reader))) return;
+                    const next = xml.nextAttr(ctx.reader, enum { value, bitpos }) orelse return;
+                    const enum_trick: E = @enumFromInt(@intFromEnum(next));
+                    continue :sw enum_trick;
+                },
+                .value => aggregates.append(ctx.allocator, self.parseAggregate(ctx)) catch panics.oom(),
+                .bitpos => entries.append(ctx.allocator, self.parseBitpos(ctx)) catch panics.oom(),
+            }
+        }
+        fn discardBitPrefix(self: *const @This(), ctx: *const ParseContext) void {
+            _ = xml.nextAttr(ctx.reader, enum { name }) orelse @panic("Nameless bit");
+            discardPrefix(ctx, self.name.name);
+        }
+        fn parseAggregate(self: *@This(), ctx: *const ParseContext) Enum.Entry {
+            const v = xml.getAttrValue(ctx.reader);
+            const value = ctx.allocator.dupe(u8, v) catch panics.oom();
+            self.discardBitPrefix(ctx);
+            const name: ConstantName = .parseIgnoreVK_(ctx);
+            const comment: Comment = if (xml.nextAttr(ctx.reader, enum { comment })) |_|
+                .parseQuotes(ctx)
+            else
+                .{};
+            return .{
+                .name = name,
+                .value = value,
+                .comment = comment,
+            };
+        }
+        fn parseBitpos(self: *@This(), ctx: *const ParseContext) Entry {
+            const bitpos: Entry.Bitpos = .parse(ctx);
+            self.discardBitPrefix(ctx);
+            const name: BitName = .parseRemaining(ctx);
+            const comment: Comment = if (xml.nextAttr(ctx.reader, enum { comment })) |_|
+                .parseQuotes(ctx)
+            else
+                .{};
+            return .{
+                .name = name,
+                .bitpos = bitpos,
+                .comment = comment,
+            };
         }
     };
 
@@ -837,10 +874,9 @@ const Registry = struct {
 
     const Enum = struct {
         const Entry = struct {
-            name: EnumEntryName = .{},
+            name: ConstantName = .{},
             value: []u8 = &.{},
             comment: Comment = .{},
-            aliases: []Alias = &.{},
 
             pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
                 try writer.print("{f}{f}={s},", .{ self.comment, self.name, self.value });
@@ -853,16 +889,47 @@ const Registry = struct {
         aliases: []Alias = &.{},
 
         pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
-            try writer.print("{f}{f}=enum(c_int){{", .{ self.comment, self.name });
+            try writer.print("{f}pub const {f}=enum(c_int){{", .{ self.comment, self.name });
             for (self.entries) |e| {
                 try writer.print("{f}", .{e});
             }
-            for (self.entries) |e| {
-                for (e.aliases) |alias| {
-                    try writer.print("{f}{f};", .{ alias, e.name });
-                }
-            }
             try writer.writeAll("};");
+        }
+        pub fn parseEntries(self: *@This(), ctx: *const ParseContext) void {
+            var entries: std.ArrayList(Entry) = .empty;
+            while (true) switch (xml.seekTags(ctx.reader, enum { @"enum", @"/enums" })) {
+                .@"enum" => self.parseEntry(ctx, &entries),
+
+                .@"/enums" => break,
+            };
+            self.entries = entries.toOwnedSlice(ctx.allocator) catch panics.oom();
+        }
+        pub fn parseEntry(self: *@This(), ctx: *const ParseContext, entries: *std.ArrayList(Entry)) void {
+            const E = enum { value, api };
+            sw: switch (xml.nextAttr(ctx.reader, E) orelse return) {
+                .api => {
+                    if (!ctx.api.match(xml.getAttrValue(ctx.reader))) return;
+                    _ = xml.nextAttr(ctx.reader, enum { value }) orelse return;
+                    continue :sw .value;
+                },
+                .value => entries.append(ctx.allocator, self.parseEnumValue(ctx)) catch panics.oom(),
+            }
+        }
+        fn parseEnumValue(self: *@This(), ctx: *const ParseContext) Entry {
+            const v = xml.getAttrValue(ctx.reader);
+            const value = ctx.allocator.dupe(u8, v) catch panics.oom();
+            _ = xml.nextAttr(ctx.reader, enum { name }) orelse @panic("Nameless enum entry");
+            discardPrefix(ctx, self.name);
+            const name: ConstantName = .parseIgnoreVK_(ctx);
+            const comment: Comment = if (xml.nextAttr(ctx.reader, enum { comment })) |_|
+                .parseQuotes(ctx)
+            else
+                .{};
+            return .{
+                .name = name,
+                .value = value,
+                .comment = comment,
+            };
         }
     };
 
@@ -892,7 +959,7 @@ const Registry = struct {
             for (0..2) |_| {
                 _ = ctx.reader.discardDelimiterInclusive('>') catch |e| panics.reader(e);
             }
-            const name = VkTypeName.parse(ctx, "", '<') orelse @panic("Handle doesn't start with Vk prefix");
+            const name = VkTypeName.parse(ctx, '<') orelse @panic("Handle doesn't start with Vk prefix");
             return .{ .name = name, .kind = kind };
         }
         pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
@@ -914,7 +981,7 @@ const Registry = struct {
             member: ZigVar,
             comment: Comment = .{},
 
-            pub fn parse(ctx: *const ParseContext, s_type: *Bitmask.BitName, members: []const Member) @This() {
+            pub fn parse(ctx: *const ParseContext, s_type: *ConstantName, members: []const Member) @This() {
                 var result: @This() = .{ .member = .{
                     .name = &.{},
                     .type = .{
@@ -923,7 +990,8 @@ const Registry = struct {
                 } };
                 while (xml.nextAttr(ctx.reader, enum { values, optional, len })) |t| switch (t) {
                     .values => {
-                        s_type.* = .parse(ctx, .{ .data = "VK_STRUCTURE_TYPE_" });
+                        discardPrefix(ctx, .{ .name = .{ .root = "VK_STRUCTURE_TYPE_" } });
+                        s_type.* = .parseIgnoreVK_(ctx);
                     },
                     .optional => {
                         var it: CommaIterator = .{ .text = xml.getAttrValue(ctx.reader) };
@@ -1012,11 +1080,11 @@ const Registry = struct {
         comment: Comment = .{},
         members: []Member = &.{},
         aliases: []VkTypeName = &.{},
-        s_type: Bitmask.BitName = .{},
+        s_type: ConstantName = .{},
 
         pub fn parse(ctx: *const ParseContext, structs: *std.ArrayList(StructOrUnion)) void {
             _ = xml.nextAttr(ctx.reader, enum { name }) orelse @panic("Struct/Union without name");
-            const name: VkTypeName = VkTypeName.parse(ctx, "", '"') orelse @panic("Struct/Union name doesn't start with Vk");
+            const name: VkTypeName = VkTypeName.parse(ctx, '"') orelse @panic("Struct/Union name doesn't start with Vk");
             var comment: Comment = .{};
             while (xml.nextAttr(ctx.reader, enum { alias, comment })) |t| switch (t) {
                 .alias => {
@@ -1051,7 +1119,7 @@ const Registry = struct {
         fn formatStruct(self: *const @This(), writer: *Writer) Writer.Error!void {
             try writer.print("{f}pub const {f}=extern struct{{", .{ self.comment, self.name });
             var members = self.members;
-            if (self.s_type.name.name.data.len != 0) {
+            if (self.s_type.root.len != 0) {
                 try writer.print("{f}=.{f},", .{ self.members[0].asStruct(), self.s_type });
                 members = members[1..];
             }
@@ -1389,13 +1457,18 @@ const Registry = struct {
         ctx.authors = result.authors;
 
         var enum_aliases: std.ArrayList(TempAlias) = .empty;
+        var enums: std.ArrayList(Enum) = .empty;
+        var bitmasks: std.ArrayList(Bitmask) = .empty;
         while (true) switch (xml.seekTags(ctx.reader, enum { types, enums, commands, extensions, @"/registry" })) {
             .types => result.parseTypes(&ctx, &enum_aliases),
-            .enums => result.parseEnums(&ctx),
+            .enums => result.parseEnums(&ctx, &enums, &bitmasks),
             .commands => result.parseCommands(&ctx),
             .extensions => result.parseExtensions(&ctx),
-            .@"/registry" => return result,
+            .@"/registry" => break,
         };
+        result.bitmasks = bitmasks.toOwnedSlice(ctx.allocator) catch panics.oom();
+        result.enums = enums.toOwnedSlice(ctx.allocator) catch panics.oom();
+        return result;
     }
 
     pub fn parseAuthors(self: *@This(), ctx: *const ParseContext) void {
@@ -1426,7 +1499,7 @@ const Registry = struct {
                         .handle => {
                             if (xml.nextAttr(ctx.reader, enum { name })) |_| {
                                 // It's an alias
-                                const name = VkTypeName.parse(ctx, "", '"') orelse @panic("Failed to parse name");
+                                const name = VkTypeName.parse(ctx, '"') orelse @panic("Failed to parse name");
                                 _ = xml.nextAttr(ctx.reader, enum { alias }) orelse panic("Missing alias for {f}", .{name});
                                 const alias = xml.getAttrValue(ctx.reader);
                                 const h = Handles.get(.{ .handles = handles.items }, ctx, alias) orelse panic("Failed to find handle: {s}", .{alias});
@@ -1446,7 +1519,7 @@ const Registry = struct {
                             const new = enum_aliases.addOne(ctx.allocator) catch panics.oom();
                             new.name = allocToDelimiter(ctx.reader, ctx.allocator, '"');
                             _ = xml.nextAttr(ctx.reader, enum { alias }) orelse panic("Expected alias for {s}", .{new.name});
-                            new.alias = VkTypeName.parse(ctx, "", '"') orelse panic("Alias doesn't start with Vk: {s}", .{new.name});
+                            new.alias = VkTypeName.parse(ctx, '"') orelse panic("Alias doesn't start with Vk: {s}", .{new.name});
                         },
                         .funcpointer => funcpointers.append(ctx.allocator, .parse(ctx)) catch panics.oom(),
                         .@"struct" => {
@@ -1466,7 +1539,51 @@ const Registry = struct {
         self.unions = unions.toOwnedSlice(ctx.allocator) catch panics.oom();
     }
 
-    pub fn parseEnums(self: *@This(), ctx: *const ParseContext) void {
+    pub fn parseEnums(self: *@This(), ctx: *const ParseContext, enums: *std.ArrayList(Enum), bitmasks: *std.ArrayList(Bitmask)) void {
+        _ = xml.nextAttr(ctx.reader, enum { name }) orelse @panic("Nameless enum");
+        const name: VkTypeName = VkTypeName.parse(ctx, '"') orelse {
+            // Must be the constants
+            self.parseConstants(ctx);
+            return;
+        };
+        _ = xml.nextAttr(ctx.reader, enum { type }) orelse panic("Failed to find type for: {f}", .{name});
+        const kind_text = xml.getAttrValue(ctx.reader);
+        const kind = enumFromName(enum { bitmask, @"enum" }, kind_text) orelse panic("Unknown enum kind for {f}: {s}", .{ name, kind_text });
+
+        var comment: Comment = .{};
+        var bits: Bitmask.Bits = .@"32";
+        while (xml.nextAttr(ctx.reader, enum { comment, bitwidth })) |t| {
+            switch (t) {
+                .comment => {
+                    comment = .parseQuotes(ctx);
+                },
+                .bitwidth => {
+                    bits = .parse(ctx);
+                }
+            }
+        }
+
+        switch (kind) {
+            .bitmask => {
+                const new = bitmasks.addOne(ctx.allocator) catch panics.oom();
+                new.* = .{
+                    .name = .fromVkTypeName(name),
+                    .comment = comment,
+                    .bits = bits,
+                };
+                new.parseEntries(ctx);
+            },
+            .@"enum" => {
+                const new = enums.addOne(ctx.allocator) catch panics.oom();
+                new.* = .{
+                    .name = name,
+                    .comment = comment,
+                };
+                new.parseEntries(ctx);
+            },
+        }
+    }
+    pub fn parseConstants(self: *@This(), ctx: *const ParseContext) void {
         _ = self;
         _ = ctx;
     }
