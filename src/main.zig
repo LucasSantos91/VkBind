@@ -785,6 +785,8 @@ const Registry = struct {
         }
 
         pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+            const flag_bits_functions: []const []const u8 = &.{ "toFlags", "fromFlags", "toInt", "fromInt" };
+            const flags_functions: []const []const u8 = &.{ "toInt", "fromInt", "merge", "intersection", "negation", "difference", "toBit", "fromBit", "set", "unset" };
             try writer.print("{[comment]f}pub const {[name]f}=enum({[bits]f}){{", .{
                 .comment = self.comment,
                 .name = self.name,
@@ -792,6 +794,13 @@ const Registry = struct {
             });
             for (self.entries) |e| {
                 try writer.print("{f}", .{e});
+            }
+            for (flag_bits_functions) |f| {
+                try writer.print("pub const {[f_name]s}=FlagBitsMixin({[flags_name]f},{[flag_bits_name]f}).{[f_name]s};", .{
+                    .f_name = f,
+                    .flags_name = self.name.asFlags(),
+                    .flag_bits_name = self.name,
+                });
             }
             try writer.writeAll("};");
             for (self.aliases) |alias| {
@@ -816,6 +825,13 @@ const Registry = struct {
             }
             for (self.aggregates) |e| {
                 try writer.print("{f}pub const {f}:@This() = @bitCast({s});", .{ e.comment, e.name, e.value });
+            }
+            for (flags_functions) |f| {
+                try writer.print("pub const {[f_name]s}=FlagsMixin({[flags_name]f},{[flag_bits_name]f}).{[f_name]s};", .{
+                    .f_name = f,
+                    .flags_name = self.name.asFlags(),
+                    .flag_bits_name = self.name,
+                });
             }
             try writer.writeAll("};");
             for (self.aliases) |alias| {
