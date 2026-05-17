@@ -589,6 +589,14 @@ const Registry = struct {
                 raw = slice_tools.decreaseLen(raw, a.data.len);
                 if (raw.len != 0) raw = slice_tools.decreaseLen(raw, 1);
             }
+            if (raw.len == 0) {
+                // Because of VkVendorId
+                const p = author.ptr orelse @panic("Empty constant name");
+                return .{
+                    .root = p.data,
+                    .author = .{},
+                };
+            }
             const data = ctx.allocator.alloc(u8, raw.len) catch panics.oom();
             _ = std.ascii.lowerString(data, raw);
             return .{
@@ -597,10 +605,7 @@ const Registry = struct {
             };
         }
         pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
-            try writer.print("@\"{s}", .{self.root});
-            if (self.author.ptr) |p| {
-                try writer.print("_{f}\"", .{p});
-            } else try writer.writeByte('"');
+            try writer.print("@\"{s}\"", .{self.root});
         }
         pub fn eql(lhs: @This(), rhs: @This()) bool {
             return lhs.author == rhs.author and std.mem.eql(u8, lhs.root, rhs.root);
