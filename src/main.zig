@@ -990,7 +990,7 @@ const Registry = struct {
                 } };
                 while (xml.nextAttr(ctx.reader, enum { values, optional, len })) |t| switch (t) {
                     .values => {
-                        discardPrefix(ctx, .{ .name = .{ .root = "VK_STRUCTURE_TYPE_" } });
+                        discardPrefix(ctx, .{ .name = .{ .root = "StructureType" } });
                         s_type.* = .parseIgnoreVK_(ctx);
                     },
                     .optional => {
