@@ -669,7 +669,7 @@ const Registry = struct {
             }
             pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
                 const base = self.name.name;
-                try writer.print("{s}FlagBits{f}{f}", .{ base.root, base.author, base.version });
+                try writer.print("{s}FlagBits{f}{f}", .{ base.root, base.version, base.author });
             }
             pub fn asFlags(self: @This()) AsFlags {
                 return .{ .name = self.name };
@@ -679,7 +679,7 @@ const Registry = struct {
                 name: VkTypeName,
                 pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
                     const base = self.name.name;
-                    try writer.print("{s}Flags{f}{f}", .{ base.root, base.author, base.version });
+                    try writer.print("{s}Flags{f}{f}", .{ base.root, base.version, base.author });
                 }
             };
         };
