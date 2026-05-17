@@ -353,6 +353,9 @@ const Registry = struct {
                     return std.mem.eql(u8, p.data, rhs);
                 } else return rhs.len == 0;
             }
+            pub fn eql(lhs: @This(), rhs: @This()) bool {
+                return lhs.ptr == rhs.ptr;
+            }
         };
         pub fn find(self: @This(), name: []const u8) MaybeAuthor {
             for (self.authors) |*a| {
@@ -633,13 +636,16 @@ const Registry = struct {
         const BitmaskName = struct {
             name: VkTypeName = .{},
 
-            pub fn fromVkTypeName(name: VkTypeName) @This() {
+            pub fn fromVkTypeName(name: VkTypeName) ?@This() {
                 const suffix = "FlagBits";
-                if (!std.mem.endsWith(u8, name.name.root, suffix)) panic("Bitmask name doesn't end with FlagBits: {f}", .{name});
+                if (!std.mem.endsWith(u8, name.name.root, suffix)) return null;
                 var result: @This() = .{ .name = name };
                 const root = &result.name.name.root;
                 root.* = slice_tools.decreaseLen(root.*, suffix.len);
                 return result;
+            }
+            pub fn eql(lhs: @This(), rhs: @This()) bool {
+                return lhs.name.eql(rhs.name);
             }
             pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
                 const base = self.name.name;
@@ -762,7 +768,7 @@ const Registry = struct {
         comment: Comment = .{},
         entries: []Entry = &.{},
         aggregates: []Enum.Entry = &.{},
-        aliases: []Alias = &.{},
+        aliases: []BitmaskName = &.{},
 
         pub fn sortBits(self: *@This()) void {
             const lessThan = struct {
@@ -791,8 +797,8 @@ const Registry = struct {
                 try writer.print("{f}", .{self.entries[0].asFlags()});
                 var last_bitpos = self.entries[0].bitpos.bitpos;
                 for (self.entries[1..]) |e| {
-                    const diff = e.bitpos.bitpos - last_bitpos;
-                    if (diff > 1) {
+                    const diff = e.bitpos.bitpos - last_bitpos -| 1;
+                    if (diff > 0) {
                         try writer.print("_reserved{f}:u{}=false,", .{ e.bitpos, diff });
                     }
                     last_bitpos = e.bitpos.bitpos;
@@ -863,15 +869,6 @@ const Registry = struct {
         }
     };
 
-    const Alias = struct {
-        alias: VkTypeName = .{},
-        comment: Comment = .{},
-
-        pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
-            try writer.print("{f}pub const {f}=@This().", .{ self.comment, self.alias });
-        }
-    };
-
     const Enum = struct {
         const Entry = struct {
             name: ConstantName = .{},
@@ -886,7 +883,7 @@ const Registry = struct {
         name: VkTypeName = .{},
         comment: Comment = .{},
         entries: []Entry = &.{},
-        aliases: []Alias = &.{},
+        aliases: []VkTypeName = &.{},
 
         pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
             try writer.print("{f}pub const {f}=enum(c_int){{", .{ self.comment, self.name });
@@ -947,7 +944,7 @@ const Registry = struct {
         };
         name: VkTypeName,
         kind: Kind,
-        aliases: []Alias = &.{},
+        aliases: []VkTypeName = &.{},
 
         pub fn parse(ctx: *const ParseContext) @This() {
             _ = ctx.reader.discardDelimiterInclusive('>') catch |e| panics.reader(e);
@@ -971,7 +968,7 @@ const Registry = struct {
                 },
             });
         }
-        pub fn addAlias(self: *@This(), ctx: *const ParseContext, alias: Alias) void {
+        pub fn addAlias(self: *@This(), ctx: *const ParseContext, alias: VkTypeName) void {
             self.aliases = ctx.allocator.realloc(self.aliases, self.aliases.len + 1) catch panics.oom();
             self.aliases[self.aliases.len - 1] = alias;
         }
@@ -1439,7 +1436,7 @@ const Registry = struct {
     }
 
     const TempAlias = struct {
-        name: []const u8,
+        name: VkTypeName,
         alias: VkTypeName,
     };
     pub fn parse(reader: *Reader, allocator: Allocator, api: Api) @This() {
@@ -1468,6 +1465,23 @@ const Registry = struct {
         };
         result.bitmasks = bitmasks.toOwnedSlice(ctx.allocator) catch panics.oom();
         result.enums = enums.toOwnedSlice(ctx.allocator) catch panics.oom();
+
+        outer: for (enum_aliases.items) |alias| {
+            for (result.enums) |*e| {
+                if (e.name.eql(alias.alias)) {
+                    e.aliases = slice_tools.allocated.concat(VkTypeName, e.aliases, &.{alias.name}, ctx.allocator) catch panics.oom();
+                    continue :outer;
+                }
+            }
+            const bit_mask_name: Bitmask.BitmaskName = Bitmask.BitmaskName.fromVkTypeName(alias.alias) orelse continue :outer;
+            for (result.bitmasks) |*e| {
+                if (e.name.eql(bit_mask_name)) {
+                    e.aliases = slice_tools.allocated.concat(Bitmask.BitmaskName, e.aliases, &.{bit_mask_name}, ctx.allocator) catch panics.oom();
+                    continue :outer;
+                }
+            }
+        }
+
         return result;
     }
 
@@ -1504,11 +1518,7 @@ const Registry = struct {
                                 const alias = xml.getAttrValue(ctx.reader);
                                 const h = Handles.get(.{ .handles = handles.items }, ctx, alias) orelse panic("Failed to find handle: {s}", .{alias});
 
-                                const comment: Comment = if (xml.nextAttr(ctx.reader, enum { comment })) |_|
-                                    Comment.parseQuotes(ctx)
-                                else
-                                    .{};
-                                h.addAlias(ctx, .{ .alias = name, .comment = comment });
+                                h.addAlias(ctx, name);
                                 continue :type_loop;
                             }
 
@@ -1517,9 +1527,9 @@ const Registry = struct {
                         .@"enum" => {
                             _ = xml.nextAttr(ctx.reader, enum { name }) orelse continue :type_loop;
                             const new = enum_aliases.addOne(ctx.allocator) catch panics.oom();
-                            new.name = allocToDelimiter(ctx.reader, ctx.allocator, '"');
-                            _ = xml.nextAttr(ctx.reader, enum { alias }) orelse panic("Expected alias for {s}", .{new.name});
-                            new.alias = VkTypeName.parse(ctx, '"') orelse panic("Alias doesn't start with Vk: {s}", .{new.name});
+                            new.name = VkTypeName.parse(ctx, '"') orelse panic("Alias doesn't start with Vk: {f}", .{new.name});
+                            _ = xml.nextAttr(ctx.reader, enum { alias }) orelse panic("Expected alias for {f}", .{new.name});
+                            new.alias = VkTypeName.parse(ctx, '"') orelse panic("Alias doesn't start with Vk: {f}", .{new.name});
                         },
                         .funcpointer => funcpointers.append(ctx.allocator, .parse(ctx)) catch panics.oom(),
                         .@"struct" => {
@@ -1567,7 +1577,7 @@ const Registry = struct {
             .bitmask => {
                 const new = bitmasks.addOne(ctx.allocator) catch panics.oom();
                 new.* = .{
-                    .name = .fromVkTypeName(name),
+                    .name = Bitmask.BitmaskName.fromVkTypeName(name) orelse panic("Expected name to contain FlagBits: {f}", .{name}),
                     .comment = comment,
                     .bits = bits,
                 };
