@@ -793,7 +793,11 @@ const Registry = struct {
             for (self.entries) |e| {
                 try writer.print("{f}", .{e});
             }
-            try writer.print("}};{[comment]f}pub const {[flags_name]f}=packed struct({[bits]f}){{", .{
+            try writer.writeAll("};");
+            for (self.aliases) |alias| {
+                try writer.print("pub const {f}={f};", .{ alias, self.name });
+            }
+            try writer.print("{[comment]f}pub const {[flags_name]f}=packed struct({[bits]f}){{", .{
                 .comment = self.comment,
                 .flags_name = self.name.asFlags(),
                 .bits = self.bits,
@@ -814,6 +818,9 @@ const Registry = struct {
                 try writer.print("{f}pub const {f}:@This() = @bitCast({s});", .{ e.comment, e.name, e.value });
             }
             try writer.writeAll("};");
+            for (self.aliases) |alias| {
+                try writer.print("pub const {f}={f};", .{ alias.asFlags(), self.name.asFlags() });
+            }
         }
         pub fn parseEntries(self: *@This(), ctx: *const ParseContext) void {
             var entries: std.ArrayList(Entry) = .empty;
@@ -896,6 +903,9 @@ const Registry = struct {
                 try writer.print("{f}", .{e});
             }
             try writer.writeAll("};");
+            for (self.aliases) |alias| {
+                try writer.print("pub const {f}={f};", .{ alias, self.name });
+            }
         }
         pub fn parseEntries(self: *@This(), ctx: *const ParseContext) void {
             var entries: std.ArrayList(Entry) = .empty;
@@ -972,6 +982,9 @@ const Registry = struct {
                     .non_dispatchable => "u64",
                 },
             });
+            for (self.aliases) |alias| {
+                try writer.print("pub const {f}={f};", .{ alias, self.name });
+            }
         }
         pub fn addAlias(self: *@This(), ctx: *const ParseContext, alias: VkTypeName) void {
             self.aliases = ctx.allocator.realloc(self.aliases, self.aliases.len + 1) catch panics.oom();
@@ -983,14 +996,17 @@ const Registry = struct {
             member: ZigVar,
             comment: Comment = .{},
 
-            pub fn parse(ctx: *const ParseContext, s_type: *ConstantName, members: []const Member) @This() {
+            pub fn parse(ctx: *const ParseContext, s_type: *ConstantName, members: []const Member) ?@This() {
                 var result: @This() = .{ .member = .{
                     .name = &.{},
                     .type = .{
                         .c_type = undefined,
                     },
                 } };
-                while (xml.nextAttr(ctx.reader, enum { values, optional, len })) |t| switch (t) {
+                while (xml.nextAttr(ctx.reader, enum { api, values, optional, len })) |t| switch (t) {
+                    .api => {
+                        if (!ctx.api.match(xml.getAttrValue(ctx.reader))) return null;
+                    },
                     .values => {
                         discardPrefix(ctx, .{ .name = .{ .root = "StructureType" } });
                         s_type.* = .parseIgnoreVK_(ctx);
@@ -1011,9 +1027,9 @@ const Registry = struct {
                         const limit = ptr + BaseCType.max_ptr_layer;
                         while (it.next()) |text| {
                             if (ptr == limit) @panic("Too many layers of pointers");
-                            if (enumFromName(enum { null_terminated, @"1" }, text)) |k| {
+                            if (enumFromName(enum { @"null-terminated", @"1" }, text)) |k| {
                                 switch (k) {
-                                    .null_terminated => {
+                                    .@"null-terminated" => {
                                         ptr[0].size = .null_terminated;
                                     },
                                     .@"1" => {
@@ -1021,6 +1037,7 @@ const Registry = struct {
                                     },
                                 }
                             } else {
+                                ptr[0].size = .many;
                                 ptr[0].optional = blk: {
                                     for (members) |m| {
                                         if (std.mem.eql(u8, m.member.name, text)) {
@@ -1111,7 +1128,7 @@ const Registry = struct {
             var members: std.ArrayList(Member) = .empty;
             while (true) switch (xml.seekTags(ctx.reader, enum { member, @"/type" })) {
                 .member => {
-                    members.append(ctx.allocator, .parse(ctx, &new.s_type, members.items)) catch panics.oom();
+                    members.append(ctx.allocator, Member.parse(ctx, &new.s_type, members.items) orelse continue) catch panics.oom();
                 },
                 .@"/type" => break,
             };
@@ -1129,6 +1146,7 @@ const Registry = struct {
                 try writer.print("{f},", .{m.asStruct()});
             }
             try writer.writeAll("};");
+            try self.printAliases(writer);
         }
         fn formatUnion(self: *const @This(), writer: *Writer) Writer.Error!void {
             try writer.print("{f}pub const {f}=extern union{{", .{ self.comment, self.name });
@@ -1136,6 +1154,7 @@ const Registry = struct {
                 try writer.print("{f},", .{m.asUnion()});
             }
             try writer.writeAll("};");
+            try self.printAliases(writer);
         }
         pub const AsStruct = struct {
             self: *const StructOrUnion,
@@ -1154,6 +1173,11 @@ const Registry = struct {
         };
         pub fn asUnion(self: *const @This()) AsUnion {
             return .{ .self = self };
+        }
+        pub fn printAliases(self: *const @This(), writer: *Writer) Writer.Error!void {
+            for (self.aliases) |alias| {
+                try writer.print("pub const {f}={f};", .{ alias, self.name });
+            }
         }
     };
 
@@ -1478,10 +1502,11 @@ const Registry = struct {
                     continue :outer;
                 }
             }
-            const bit_mask_name: Bitmask.BitmaskName = Bitmask.BitmaskName.fromVkTypeName(alias.alias) orelse continue :outer;
+            const alias_as_bit_mask: Bitmask.BitmaskName = Bitmask.BitmaskName.fromVkTypeName(alias.alias) orelse continue :outer;
             for (result.bitmasks) |*e| {
-                if (e.name.eql(bit_mask_name)) {
-                    e.aliases = slice_tools.allocated.concat(Bitmask.BitmaskName, e.aliases, &.{bit_mask_name}, ctx.allocator) catch panics.oom();
+                if (e.name.eql(alias_as_bit_mask)) {
+                    const name_bitmask = Bitmask.BitmaskName.fromVkTypeName(alias.name) orelse panic("Expected bitmask name: {}", .{alias.name});
+                    e.aliases = slice_tools.allocated.concat(Bitmask.BitmaskName, e.aliases, &.{name_bitmask}, ctx.allocator) catch panics.oom();
                     continue :outer;
                 }
             }
