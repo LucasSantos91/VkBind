@@ -1181,8 +1181,25 @@ const Registry = struct {
                 try writer.print("{f}=.{f},", .{ self.members[0].asStruct(), self.s_type });
                 members = members[1..];
             }
+            var in_bitfield = false;
+            var bitfield_count: usize = 0;
             for (members) |m| {
+                if (m.member.type.c_type.amount == .bitfield) {
+                    if (!in_bitfield) {
+                        in_bitfield = true;
+                        try writer.print("p{}: packed struct{{", .{bitfield_count});
+                        bitfield_count += 1;
+                    }
+                } else {
+                    if (in_bitfield) {
+                        in_bitfield = false;
+                        try writer.writeAll("},");
+                    }
+                }
                 try writer.print("{f},", .{m.asStruct()});
+            }
+            if (in_bitfield) {
+                try writer.writeAll("},");
             }
             try writer.writeAll("};");
             try self.printAliases(writer);
