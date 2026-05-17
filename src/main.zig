@@ -1387,7 +1387,7 @@ const Registry = struct {
             }
             const base = &self.c_type.base;
             if (base.ptrs.len != 0 and base.base_type == .primitive and base.base_type.primitive.primitive == .void) {
-                try writer.writeAll("anyopaque");
+                try writer.writeAll(if (self.ptr_extra[base.ptrs.len - 1].size == .many) "u8" else "anyopaque");
             } else {
                 try writer.print("{f}", .{base.base_type});
             }
