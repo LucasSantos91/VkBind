@@ -255,8 +255,8 @@ const Registry = struct {
             size_t,
         };
 
-        pub fn parse(ctx: *const ParseContext) ?@This() {
-            const text = ctx.reader.peekDelimiterExclusive('<') catch |e| switch (e) {
+        pub fn parse(ctx: *const ParseContext, delimiter: u8) ?@This() {
+            const text = ctx.reader.peekDelimiterExclusive(delimiter) catch |e| switch (e) {
                 Reader.DelimiterError.ReadFailed => panics.readFailed(),
                 Reader.DelimiterError.EndOfStream => @panic("Failed to find ending of primitive type"),
                 Reader.DelimiterError.StreamTooLong => panics.streamTooLong(),
@@ -292,9 +292,9 @@ const Registry = struct {
     pub const PrimitiveTypeName = struct {
         primitive: Primitive,
 
-        pub fn parse(ctx: *const ParseContext) ?@This() {
+        pub fn parse(ctx: *const ParseContext, delimiter: u8) ?@This() {
             return .{
-                .primitive = Primitive.parse(ctx) orelse return null,
+                .primitive = Primitive.parse(ctx, delimiter) orelse return null,
             };
         }
         pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
@@ -534,7 +534,7 @@ const Registry = struct {
             if (FuncpointerTypeName.parse(ctx)) |n| {
                 return .{ .funcptr = n };
             }
-            if (PrimitiveTypeName.parse(ctx)) |n| {
+            if (PrimitiveTypeName.parse(ctx, '<')) |n| {
                 return .{ .primitive = n };
             }
             if (VkTypeName.parse(ctx, '<')) |n| {
@@ -1429,9 +1429,48 @@ const Registry = struct {
         }
     };
     const Constant = struct {
-        comment: []u8,
-        primitive: Primitive,
+        name: ConstantName,
+        comment: Comment,
+        primitive: PrimitiveTypeName,
         value: []u8,
+        is_negation: bool,
+
+        pub fn parse(ctx: *const ParseContext) @This() {
+            var new: @This() = undefined;
+            _ = xml.nextAttr(ctx.reader, enum { type }) orelse @panic("Constant without type");
+            new.primitive = PrimitiveTypeName.parse(ctx, '"') orelse @panic("Failed to parse constant type");
+            _ = xml.nextAttr(ctx.reader, enum { value }) orelse @panic("Constant without value");
+            new.value = xml.getAttrValue(ctx.reader);
+            new.is_negation = if (std.mem.findScalar(u8, new.value, '~')) |i| blk: {
+                new.value = new.value[i..];
+                break :blk true;
+            } else false;
+            const numbers = "0123456789.";
+            const start_number = std.mem.findAny(u8, new.value, numbers) orelse panic("Constant without a value: {f}", .{new.name});
+            new.value = new.value[start_number..];
+            const end_number = std.mem.findLastAny(u8, new.value, numbers) orelse unreachable;
+            new.value = new.value[0 .. end_number + 1];
+            new.value = ctx.allocator.dupe(u8, new.value) catch panics.oom();
+            _ = xml.nextAttr(ctx.reader, enum { name }) orelse @panic("Constant without a name");
+            new.name = .parse(ctx);
+            if (xml.nextAttr(ctx.reader, enum { comment })) |_| {
+                new.comment = .parseQuotes(ctx);
+            } else new.comment = .{};
+            return new;
+        }
+        pub fn format(self: *const @This(), writer: *Writer) Writer.Error!void {
+            try writer.print("{[comment]f}pub const {[name]f}:{[type]f}=", .{
+                .comment = self.comment,
+                .name = self.name,
+                .type = self.primitive,
+            });
+            if (self.is_negation) {
+                try writer.print("~@as({[type]f}, {[value]s})", .{ .type = self.primitive, .value = self.value });
+            } else {
+                try writer.writeAll(self.value);
+            }
+            try writer.writeByte(';');
+        }
     };
 
     const Handles = struct {
@@ -1477,6 +1516,9 @@ const Registry = struct {
         }
         for (self.unions) |e| {
             try writer.print("{f}", .{e.asUnion()});
+        }
+        for (self.constants) |e| {
+            try writer.print("{f}", .{e});
         }
     }
 
@@ -1640,8 +1682,15 @@ const Registry = struct {
         }
     }
     pub fn parseConstants(self: *@This(), ctx: *const ParseContext) void {
-        _ = self;
-        _ = ctx;
+        var constants: std.ArrayList(Constant) = .empty;
+        while (true) switch (xml.seekTags(ctx.reader, enum { @"enum", @"/enums" })) {
+            .@"enum" => {
+                constants.append(ctx.allocator, .parse(ctx)) catch panics.oom();
+            },
+            .@"/enums" => break,
+        };
+
+        self.constants = constants.toOwnedSlice(ctx.allocator) catch panics.oom();
     }
     pub fn parseCommands(self: *@This(), ctx: *const ParseContext) void {
         _ = self;
