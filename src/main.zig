@@ -1041,7 +1041,10 @@ const Registry = struct {
                                 ptr[0].optional = blk: {
                                     for (params) |p| {
                                         if (std.mem.eql(u8, p.param.name, text)) {
-                                            break :blk p.param.type.ptr_extra[0].optional;
+                                            for (p.param.type.ptr_extra) |extra| {
+                                                if (extra.optional) break :blk true;
+                                            }
+                                            break :blk false;
                                         }
                                     }
                                     break :blk true;
@@ -1215,7 +1218,10 @@ const Registry = struct {
                                 ptr[0].optional = blk: {
                                     for (members) |m| {
                                         if (std.mem.eql(u8, m.member.name, text)) {
-                                            break :blk m.member.type.ptr_extra[0].optional;
+                                            for (m.member.type.ptr_extra) |extra| {
+                                                if (extra.optional) break :blk true;
+                                            }
+                                            break :blk false;
                                         }
                                     }
                                     break :blk true;
