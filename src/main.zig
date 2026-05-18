@@ -129,11 +129,16 @@ const CommaIterator = struct {
     text: []u8,
 
     pub fn next(self: *@This()) ?[]u8 {
-        const comma = std.mem.find(u8, self.text, ",");
-        const this = if (comma) |i| self.text[0..i] else self.text;
-        if (this.len == 0) return null;
-        self.text = self.text[this.len..];
-        return this;
+        if (self.text.len == 0) return null;
+        if (std.mem.find(u8, self.text, ",")) |comma| {
+            const ret = self.text[0..comma];
+            self.text = self.text[comma + 1 ..];
+            return ret;
+        } else {
+            const ret = self.text;
+            self.text = &.{};
+            return ret;
+        }
     }
 };
 
@@ -984,12 +989,151 @@ const Registry = struct {
         }
     };
 
+    const CommandName = struct {
+        name: VulkanName,
+
+        pub fn parse(ctx: *const ParseContext, delimiter: u8) @This() {
+            if (!stripPrefix(ctx.reader, "vk")) @panic("Command name doesn't start with vk");
+            const name = allocToDelimiter(ctx.reader, ctx.allocator, delimiter);
+            name[0] = std.ascii.toLower(name[0]);
+            return .{ .name = .parseText(ctx, name, "") };
+        }
+        pub fn eql(lhs: @This(), rhs: @This()) bool {
+            return lhs.name.eql(rhs.name);
+        }
+        pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+            try writer.print("{f}", .{self.name});
+        }
+    };
     const Command = struct {
-        return_value: ZigType,
-        params: []ZigVar = &.{},
-        success_codes: []u8 = &.{},
-        error_codes: []u8 = &.{},
-        aliases: [][]u8 = &.{},
+        pub const Param = struct {
+            param: ZigVar,
+
+            pub fn parse(ctx: *const ParseContext, params: []const Param) ?@This() {
+                var result: @This() = .{ .param = .{
+                    .name = &.{},
+                    .type = .{
+                        .c_type = undefined,
+                    },
+                } };
+                while (xml.nextAttr(ctx.reader, enum { api, optional, len })) |t| switch (t) {
+                    .api => {
+                        if (!ctx.api.match(xml.getAttrValue(ctx.reader))) return null;
+                    },
+                    .optional => result.param.type.parseOptionalAttribute(ctx),
+                    .len => {
+                        var it: CommaIterator = .{ .text = xml.getAttrValue(ctx.reader) };
+                        var ptr: [*]ZigType.PtrExtra = &result.param.type.ptr_extra;
+                        const limit = ptr + BaseCType.max_ptr_layer;
+                        while (it.next()) |text| {
+                            if (ptr == limit) @panic("Too many layers of pointers");
+                            if (enumFromName(enum { @"null-terminated", @"1" }, text)) |k| {
+                                switch (k) {
+                                    .@"null-terminated" => {
+                                        ptr[0].size = .null_terminated;
+                                    },
+                                    .@"1" => {
+                                        ptr[0].size = .single;
+                                    },
+                                }
+                            } else {
+                                ptr[0].size = .many;
+                                ptr[0].optional = blk: {
+                                    for (params) |p| {
+                                        if (std.mem.eql(u8, p.param.name, text)) {
+                                            break :blk p.param.type.ptr_extra[0].optional;
+                                        }
+                                    }
+                                    break :blk true;
+                                };
+                            }
+                        }
+                        ptr += 1;
+                    },
+                };
+
+                const c_var: CVar = .parse(ctx);
+                result.param.type.c_type = c_var.type;
+                result.param.name = c_var.name;
+                return result;
+            }
+            pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+                try writer.print("{f}", .{self.param});
+            }
+        };
+
+        name: CommandName,
+        return_value: BaseCType,
+        params: []Param = &.{},
+        success_codes: []ConstantName = &.{},
+        error_codes: []ConstantName = &.{},
+        aliases: []CommandName = &.{},
+        comment: Comment = .{},
+
+        pub fn parse(ctx: *const ParseContext, commands: []Command) ?@This() {
+            var success_codes: std.ArrayList(ConstantName) = .empty;
+            var error_codes: std.ArrayList(ConstantName) = .empty;
+            var comment: Comment = .{};
+
+            while (xml.nextAttr(ctx.reader, enum { api, successcodes, errorcodes, name, comment })) |t| switch (t) {
+                .api => if (!ctx.api.match(xml.getAttrValue(ctx.reader))) return null,
+                .successcodes => {
+                    var it: CommaIterator = .{ .text = xml.getAttrValue(ctx.reader) };
+                    while (it.next()) |name| {
+                        success_codes.append(ctx.allocator, .parseText(ctx, name)) catch panics.oom();
+                    }
+                },
+                .errorcodes => {
+                    var it: CommaIterator = .{ .text = xml.getAttrValue(ctx.reader) };
+                    while (it.next()) |name| {
+                        error_codes.append(ctx.allocator, .parseText(ctx, name)) catch panics.oom();
+                    }
+                },
+                .name => {
+                    const name: CommandName = .parse(ctx, '"');
+                    _ = xml.nextAttr(ctx.reader, enum { alias }) orelse panic("Expected alias for command: {f}", .{name});
+                    const alias: CommandName = .parse(ctx, '"');
+                    for (commands) |*c| {
+                        if (c.name.eql(alias)) {
+                            c.aliases = slice_tools.allocated.concat(CommandName, c.aliases, &.{name}, ctx.allocator) catch panics.oom();
+                            return null;
+                        }
+                    }
+                },
+                .comment => {
+                    comment = .parseQuotes(ctx);
+                },
+            };
+            _ = xml.seekTagsAndClose(ctx.reader, enum { proto });
+            var ret: @This() = .{
+                .name = undefined,
+                .params = undefined,
+                .return_value = .parse(ctx),
+                .success_codes = success_codes.toOwnedSlice(ctx.allocator) catch panics.oom(),
+                .error_codes = success_codes.toOwnedSlice(ctx.allocator) catch panics.oom(),
+                .comment = comment,
+            };
+            _ = ctx.reader.discardDelimiterInclusive('>') catch |e| panics.reader(e);
+            ret.name = .parse(ctx, '<');
+            _ = xml.seekTagsAndClose(ctx.reader, enum { @"/proto" });
+            var params: std.ArrayList(Param) = .empty;
+            while (true) switch (xml.seekTags(ctx.reader, enum { param, @"/command", implicitexternsyncparams })) {
+                .@"/command" => break,
+                .param => params.append(ctx.allocator, Param.parse(ctx, params.items) orelse continue) catch panics.oom(),
+                .implicitexternsyncparams => {
+                    _ = xml.seekTagsAndClose(ctx.reader, enum { @"/implicitexternsyncparams" });
+                },
+            };
+            ret.params = params.toOwnedSlice(ctx.allocator) catch panics.oom();
+            return ret;
+        }
+        pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+            try writer.print("{f}pub const {f} = *const fn(", .{ self.comment, self.name });
+            for (self.params) |p| {
+                try writer.print("{f},", .{p});
+            }
+            try writer.print("){f};", .{self.return_value});
+        }
     };
     const Handle = struct {
         const Kind = enum {
@@ -1050,16 +1194,7 @@ const Registry = struct {
                         discardPrefix(ctx, .{ .name = .{ .root = "StructureType" } });
                         s_type.* = .parseIgnoreVK_(ctx);
                     },
-                    .optional => {
-                        var it: CommaIterator = .{ .text = xml.getAttrValue(ctx.reader) };
-                        var ptr: [*]ZigType.PtrExtra = &result.member.type.ptr_extra;
-                        const limit = ptr + BaseCType.max_ptr_layer;
-                        while (it.next()) |text| {
-                            if (ptr == limit) @panic("Too many layers of pointers");
-                            ptr[0].optional = std.mem.eql(u8, text, "true");
-                            ptr += 1;
-                        }
-                    },
+                    .optional => result.member.type.parseOptionalAttribute(ctx),
                     .len => {
                         var it: CommaIterator = .{ .text = xml.getAttrValue(ctx.reader) };
                         var ptr: [*]ZigType.PtrExtra = &result.member.type.ptr_extra;
@@ -1432,6 +1567,17 @@ const Registry = struct {
                 try writer.print("{f}", .{base.base_type});
             }
         }
+
+        pub fn parseOptionalAttribute(self: *@This(), ctx: *const ParseContext) void {
+            var it: CommaIterator = .{ .text = xml.getAttrValue(ctx.reader) };
+            var ptr: [*]ZigType.PtrExtra = &self.ptr_extra;
+            const limit = ptr + BaseCType.max_ptr_layer;
+            while (it.next()) |text| {
+                if (ptr == limit) @panic("Too many layers of pointers");
+                ptr[0].optional = std.mem.eql(u8, text, "true");
+                ptr += 1;
+            }
+        }
     };
     const ZigVar = struct {
         name: []const u8,
@@ -1537,6 +1683,7 @@ const Registry = struct {
     structs: []StructOrUnion = &.{},
     unions: []StructOrUnion = &.{},
     constants: []Constant = &.{},
+    commands: []Command = &.{},
 
     pub fn format(self: *const @This(), writer: *Writer) Writer.Error!void {
         for (self.bitmasks) |e| {
@@ -1558,6 +1705,9 @@ const Registry = struct {
             try writer.print("{f}", .{e.asUnion()});
         }
         for (self.constants) |e| {
+            try writer.print("{f}", .{e});
+        }
+        for (self.commands) |e| {
             try writer.print("{f}", .{e});
         }
     }
@@ -1736,8 +1886,12 @@ const Registry = struct {
         self.constants = constants.toOwnedSlice(ctx.allocator) catch panics.oom();
     }
     pub fn parseCommands(self: *@This(), ctx: *const ParseContext) void {
-        _ = self;
-        _ = ctx;
+        var commands: std.ArrayList(Command) = .empty;
+        while (true) switch (xml.seekTags(ctx.reader, enum { command, @"/commands" })) {
+            .command => commands.append(ctx.allocator, Command.parse(ctx, commands.items) orelse continue) catch panics.oom(),
+            .@"/commands" => break,
+        };
+        self.commands = commands.toOwnedSlice(ctx.allocator) catch panics.oom();
     }
     pub fn parseExtensions(self: *@This(), ctx: *const ParseContext) void {
         _ = self;
