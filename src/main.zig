@@ -343,7 +343,33 @@ pub const Registry = struct {
         dispatchable: bool,
     };
     const Enum = struct {};
-    const Bitmask = struct {};
+    const Flags = struct {
+        const Bitwidth = enum { @"32", @"64" };
+        bitwidth: Bitwidth = .@"32",
+        bit_flags: ?[]const u8 = null,
+    };
+    const FlagBits = struct {
+        const Bitpos = u8;
+        const Bit = struct {
+            bitpos: Bitpos,
+            name: []const u8,
+            comment: ?[]const u8,
+        };
+        const Aggregate = struct {
+            name: []const u8,
+            comment: ?[]const u8,
+            value: []const u8,
+        };
+        const BitAlias = struct {
+            name: []const u8,
+            alias: []const u8,
+            comment: ?[]const u8,
+        };
+        bits: []const Bit = &.{},
+        aggregates: []const Aggregate = &.{},
+        bit_aliases: []const BitAlias = &.{},
+        flags: []const u8,
+    };
     const Basetype = struct {};
     const Foreign = struct {};
     const Funcpointer = struct {};
@@ -353,7 +379,8 @@ pub const Registry = struct {
         @"union": Union,
         handle: Handle,
         @"enum": Enum,
-        bitmask: Bitmask,
+        flags: Flags,
+        flag_bits: FlagBits,
         basetype: Basetype,
         foreign: Foreign,
         alias: Alias,
@@ -419,8 +446,23 @@ pub const Registry = struct {
     }
 
     fn parseBitmask(self: *@This(), xml: XmlNode) void {
-        _ = self;
-        _ = xml;
+        const kind = getTextInChild(xml, "type");
+        const bitwidth: Flags.Bitwidth = if (kind.len == "VK_FLAGS".len) .@"32" else .@"64";
+        const name = getTextInChild(xml, "name");
+        const new = self.addType(name);
+        new.* = .{ .type = .{ .flags = .{
+            .bitwidth = bitwidth,
+            .bit_flags = switch (bitwidth) {
+                .@"32" => if (xml.attr.get("requires")) |r| r.* else null,
+                .@"64" => if (xml.attr.get("bitvalues")) |r| r.* else null,
+            },
+        } } };
+        if (new.type.flags.bit_flags) |bit_flags| {
+            const new_bit_flags = self.addType(bit_flags);
+            new_bit_flags.* = .{ .type = .{ .flag_bits = .{
+                .flags = name,
+            } } };
+        }
     }
     fn parseEnum(self: *@This(), xml: XmlNode) void {
         _ = self;
@@ -592,10 +634,23 @@ const render = struct {
         }
         try writer.print("\n/// {s}\n", .{text});
     }
-    fn printBitmask(name: []const u8, e: Registry.Bitmask, writer: *Writer) Writer.Error!void {
-        _ = name;
-        _ = e;
-        _ = writer;
+    fn printFlags(registry: Registry, name: []const u8, e: Registry.Flags, writer: *Writer) Writer.Error!void {
+        try writer.print("pub const {s}=packed struct(u{t}){{", .{ stripPrefix(name, "Vk"), e.bitwidth });
+        if (e.bit_flags) |flag_bits_name| {
+            const flag_bits_ = registry.types.get(flag_bits_name) orelse panic("Missing BitFlags ({s}) for Flags {s}", .{ flag_bits_name, name });
+            if (flag_bits_.type != .flag_bits) panic("Expected {s} to be FlagBits", .{flag_bits_name});
+            const flag_bits = flag_bits_.type.flag_bits;
+            _ = flag_bits;
+        }
+        try writer.writeAll("};");
+    }
+    fn printFlagBits(registry: Registry, name: []const u8, e: Registry.FlagBits, writer: *Writer) Writer.Error!void {
+        const flags_ = registry.types.get(e.flags) orelse panic("Missing Flags ({s}) for FlagBits {s}", .{ e.flags, name });
+        if (flags_.type != .flags) panic("Expected {s} to be Flags", .{name});
+        const flags = flags_.type.flags;
+
+        try writer.print("pub const {s}=enum(u{t}){{", .{ stripPrefix(name, "Vk"), flags.bitwidth });
+        try writer.writeAll("};");
     }
     fn printEnum(name: []const u8, e: Registry.Enum, writer: *Writer) Writer.Error!void {
         _ = name;
@@ -647,7 +702,8 @@ const render = struct {
             const v = entry.value_ptr.*;
             try printComment(v.comment, writer);
             switch (v.type) {
-                .bitmask => |e| try printBitmask(name, e, writer),
+                .flags => |e| try printFlags(registry, name, e, writer),
+                .flag_bits => |e| try printFlagBits(registry, name, e, writer),
                 .@"enum" => |e| try printEnum(name, e, writer),
                 .@"struct" => |e| try printStruct(name, e, writer),
                 .@"union" => |e| try printUnion(name, e, writer),
