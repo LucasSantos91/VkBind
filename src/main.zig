@@ -219,9 +219,9 @@ const XmlNode = struct {
 };
 
 const CommaIterator = struct {
-    text: []u8,
+    text: []const u8,
 
-    pub fn next(self: *@This()) ?[]u8 {
+    pub fn next(self: *@This()) ?[]const u8 {
         if (self.text.len == 0) return null;
         if (std.mem.find(u8, self.text, ",")) |comma| {
             const ret = self.text[0..comma];
@@ -236,52 +236,6 @@ const CommaIterator = struct {
 };
 
 pub const Registry = struct {
-    const VkTypeName = struct {
-        data: []const u8,
-
-        pub fn parse(name: []const u8) @This() {
-            if (name.len <= 2) panic("Name doesn't start with Vk: {s}", .{name});
-            return .{ .data = name[2..] };
-        }
-    };
-    const AuthorTag = struct {
-        tag: []const u8,
-        pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
-            try writer.writeAll(self.tag);
-        }
-        pub fn parse(name: []const u8) @This() {
-            return .{ .tag = name };
-        }
-    };
-    const Authors = struct {
-        authors: []const AuthorTag = &.{},
-    };
-    const ZigVar = struct {};
-    const Comment = struct {};
-    const Field = struct {
-        member: ZigVar,
-        comment: Comment,
-    };
-    const Struct = struct {
-        name: VkTypeName,
-        members: []const Field,
-        s_type: ?[]const u8,
-    };
-    const Union = struct {
-        name: VkTypeName,
-        members: []const Field,
-    };
-
-    authors: Authors = .{},
-
-    pub fn format(self: *const @This(), writer: *Writer) Writer.Error!void {
-        for (self.authors.authors) |a| {
-            try writer.print("{f}\n", .{a});
-        }
-    }
-};
-
-pub const Parser = struct {
     const Api = enum {
         vulkan,
         vulkansc,
@@ -289,71 +243,195 @@ pub const Parser = struct {
         pub fn eqlRaw(self: @This(), name: []const u8) bool {
             return std.mem.eql(u8, @tagName(self), name);
         }
+
+        pub fn contains(self: @This(), names: []const u8) bool {
+            var comma_it: CommaIterator = .{ .text = names };
+            while (comma_it.next()) |name| {
+                if (self.eqlRaw(name)) return true;
+            }
+            return false;
+        }
     };
+    const Field = struct {
+        name: []const u8,
+        comment: []const u8,
+    };
+    const Struct = struct {
+        members: []const Field,
+        s_type: ?[]const u8,
+    };
+    const Union = struct {
+        members: []const Field,
+    };
+    const Handle = struct {
+        dispatchable: bool,
+    };
+    const Enum = struct {};
+    const Bitmask = struct {};
+    const Basetype = struct {};
+    const Foreign = struct {};
+    const Funcpointer = struct {};
+
+    const Type = union(enum) {
+        @"struct": Struct,
+        @"union": Union,
+        handle: Handle,
+        @"enum": Enum,
+        bitmask: Bitmask,
+        basetype: Basetype,
+        foreign: Foreign,
+        alias: Alias,
+        funcpointer: Funcpointer,
+    };
+    const Alias = struct {
+        canonical: []const u8,
+    };
+    const TypeCommon = struct {
+        type: Type,
+        comment: ?[]const u8 = null,
+    };
+
+    const VkTypes = std.StringHashMapUnmanaged(TypeCommon);
+
     api: Api,
     allocator: Allocator,
-    authors: Registry.Authors = .{},
+    authors: []const []const u8 = &.{},
+    types: VkTypes = .{},
 
     fn parseAuthorTags(self: *@This(), xml: XmlNode) void {
-        var list: std.ArrayList(Registry.AuthorTag) = .{
-            .items = @constCast(self.authors.authors),
-            .capacity = self.authors.authors.len,
-        };
-        for (xml.children) |c| {
-            if (c == .text) continue;
-            const n = c.node;
-            const name = n.attr.get("name") orelse @panic("Nameless author");
-            list.append(self.allocator, .parse(name.*)) catch @panic("oom");
-        }
-        self.authors = .{ .authors = list.toOwnedSlice(self.allocator) catch @panic("oom") };
-    }
-    fn parseAuthors(self: *@This(), xml: XmlNode) void {
+        if (self.authors.len != 0) @panic("Duplicate tags section");
+        var list: std.ArrayList([]const u8) = .empty;
         for (xml.children) |child| {
-            if (child == .text) continue;
-            const node = child.node;
-            const tag = enumFromName(enum { tags }, node.tag) orelse continue;
-            switch (tag) {
-                .tags => self.parseAuthorTags(node),
+            const node = self.getNode(child) orelse continue;
+            const name = node.attr.get("name") orelse @panic("Nameless author");
+            list.append(self.allocator, name.*) catch @panic("oom");
+        }
+        self.authors = list.toOwnedSlice(self.allocator) catch @panic("oom");
+    }
+    fn parseForeign(self: *@This(), xml: XmlNode) void {
+        const name = xml.attr.get("name") orelse @panic("Nameless foreign type");
+        const gp = self.types.getOrPut(self.allocator, name.*) catch @panic("oom");
+        if (gp.found_existing) panic("Duplicate foreign type: {s}", .{name.*});
+        gp.value_ptr.* = .{
+            .type = .{ .foreign = .{} },
+        };
+    }
+    fn matchApiText(self: *const @This(), api: []const u8) bool {
+        return self.api.contains(api);
+    }
+    fn matchApi(self: *const @This(), xml: XmlNode) bool {
+        const api = xml.attr.get("api") orelse return true;
+        return self.matchApiText(api.*);
+    }
+    fn getNode(self: *const @This(), node_or_text: XmlNode.NodeOrText) ?XmlNode {
+        if (node_or_text == .text) return null;
+        const node = node_or_text.node;
+        if (!self.matchApi(node)) return null;
+        return node;
+    }
+
+    fn parseBitmask(self: *@This(), xml: XmlNode) void {
+        _ = self;
+        _ = xml;
+    }
+    fn parseEnum(self: *@This(), xml: XmlNode) void {
+        _ = self;
+        _ = xml;
+    }
+    fn parseStruct(self: *@This(), xml: XmlNode) void {
+        _ = self;
+        _ = xml;
+    }
+    fn parseUnion(self: *@This(), xml: XmlNode) void {
+        _ = self;
+        _ = xml;
+    }
+    fn parseHandle(self: *@This(), xml: XmlNode) void {
+        _ = self;
+        _ = xml;
+    }
+    fn parseFuncpointer(self: *@This(), xml: XmlNode) void {
+        _ = self;
+        _ = xml;
+    }
+    fn parseBasetype(self: *@This(), xml: XmlNode) void {
+        const name = blk: for (xml.children) |n| {
+            const node = self.getNode(n) orelse continue;
+            if (std.mem.eql(u8, node.tag, "name")) {
+                if (node.children.len != 1 and node.children[0] != .text) @panic("Failed to parse basetype name");
+                break :blk node.children[0].text;
+            }
+        } else @panic("Failed to find basetype name");
+        const gp = self.types.getOrPut(self.allocator, name) catch @panic("oom");
+        if (gp.found_existing) panic("Duplicate basetype type: {s}", .{name});
+        gp.value_ptr.* = .{
+            .type = .{ .basetype = .{} },
+            .comment = null,
+        };
+    }
+    fn getComment(xml: XmlNode) ?[]const u8 {
+        const comment_ptr = xml.attr.get("comment");
+        return if (comment_ptr) |c| c.* else null;
+    }
+    fn parseAlias(self: *@This(), alias: []const u8, xml: XmlNode) void {
+        const name_ = xml.attr.get("name") orelse panic("Missing name for alias: {s}", .{alias});
+        const name = name_.*;
+        const gp = self.types.getOrPut(self.allocator, name) catch @panic("oom");
+        if (gp.found_existing) panic("Duplicate name: {s}", .{name});
+        const v = gp.value_ptr;
+        v.* = .{
+            .type = .{
+                .alias = .{
+                    .canonical = alias,
+                },
+            },
+            .comment = getComment(xml),
+        };
+    }
+    fn parseTypes(self: *@This(), xml: XmlNode) void {
+        for (xml.children) |child| {
+            const node = self.getNode(child) orelse continue;
+            if (!std.mem.eql(u8, node.tag, "type")) continue;
+            if (node.attr.get("alias")) |alias| {
+                self.parseAlias(alias.*, node);
+                continue;
+            }
+            if (node.attr.get("category")) |category| {
+                const c = enumFromName(enum { tags, bitmask, @"enum", @"struct", @"union", handle, basetype, funcpointer }, category.*) orelse continue;
+                switch (c) {
+                    .bitmask => self.parseBitmask(node),
+                    .@"enum" => self.parseEnum(node),
+                    .@"struct" => self.parseStruct(node),
+                    .@"union" => self.parseUnion(node),
+                    .handle => self.parseHandle(node),
+                    .basetype => self.parseBasetype(node),
+                    .tags => self.parseAuthorTags(node),
+                    .funcpointer => self.parseFuncpointer(node),
+                }
+            } else {
+                self.parseForeign(node);
             }
         }
     }
-    fn parseTypes(self: *@This(), xml: XmlNode) void {
-        _ = self; // autofix
-        _ = xml; // autofix {
-    }
-    fn parseAllTypes(self: *@This(), xml: XmlNode) void {
+
+    pub fn parse(api: Api, xml: XmlNode, allocator: Allocator) @This() {
+        var self: @This() = .{ .api = api, .allocator = allocator };
+        if (!std.mem.eql(u8, xml.tag, "registry")) @panic("Missing registry");
+
         for (xml.children) |child| {
-            if (child == .text) continue;
-            const node = child.node;
-            const tag = enumFromName(enum { types, enums, commands }, node.tag) orelse continue;
+            const node = self.getNode(child) orelse continue;
+            const tag = enumFromName(enum { types, enums, commands, feature, extensions, tags }, node.tag) orelse continue;
             switch (tag) {
                 .types => self.parseTypes(node),
                 .enums => self.parseEnums(node),
                 .commands => self.parseCommands(node),
-            }
-        }
-    }
-    pub fn parse(api: Api, xml: XmlNode, allocator: Allocator) Registry {
-        var self: @This() = .{ .api = api, .allocator = allocator };
-        if (!std.mem.eql(u8, xml.tag, "registry")) @panic("Missing registry");
-        self.parseAuthors(xml);
-        self.parseAllTypes(xml);
-
-        for (xml.children) |child| {
-            if (child == .text) continue;
-            const node = child.node;
-            const tag = enumFromName(enum { feature, extensions }, node.tag) orelse continue;
-            switch (tag) {
                 .feature => self.parseFeature(node),
                 .extensions => self.parseExtensions(node),
+                .tags => self.parseAuthorTags(node),
             }
         }
 
-        return self.toRegistry();
-    }
-
-    fn toRegistry(self: *@This()) Registry {
-        return .{ .authors = self.authors };
+        return self;
     }
 
     fn parseEnums(self: *@This(), xml: XmlNode) void {
@@ -374,6 +452,117 @@ pub const Parser = struct {
     }
 };
 
+const render = struct {
+    const Primitives = enum {
+        void,
+        char,
+        float,
+        double,
+        int8_t,
+        uint8_t,
+        int16_t,
+        uint16_t,
+        uint32_t,
+        uint64_t,
+        int32_t,
+        int64_t,
+        size_t,
+        int,
+
+        pub fn toZig(self: @This()) []const u8 {
+            return switch (self) {
+                .void => "void",
+                .char => "u8",
+                .float => "f32",
+                .double => "f64",
+                .int8_t => "i8",
+                .uint8_t => "u8",
+                .int16_t => "i16",
+                .uint16_t => "u16",
+                .uint32_t => "u32",
+                .uint64_t => "u64",
+                .int32_t => "i32",
+                .int64_t => "i64",
+                .size_t => "usize",
+                .int => "c_int",
+            };
+        }
+    };
+    fn printComment(comment_: ?[]const u8, writer: *Writer) Writer.Error!void {
+        if (comment_ == null) return;
+        const prefix = "// ";
+        var text = comment_.?;
+        if (std.mem.startsWith(u8, text, prefix)) {
+            text = text[prefix.len..];
+        }
+        try writer.print("\n/// {s}\n", .{text});
+    }
+    fn printBitmask(name: []const u8, e: Registry.Bitmask, writer: *Writer) Writer.Error!void {
+        _ = name;
+        _ = e;
+        _ = writer;
+    }
+    fn printEnum(name: []const u8, e: Registry.Enum, writer: *Writer) Writer.Error!void {
+        _ = name;
+        _ = e;
+        _ = writer;
+    }
+    fn printStruct(name: []const u8, e: Registry.Struct, writer: *Writer) Writer.Error!void {
+        _ = name;
+        _ = e;
+        _ = writer;
+    }
+    fn printUnion(name: []const u8, e: Registry.Union, writer: *Writer) Writer.Error!void {
+        _ = name;
+        _ = e;
+        _ = writer;
+    }
+    fn printHandle(name: []const u8, e: Registry.Handle, writer: *Writer) Writer.Error!void {
+        try writer.print("pub const {s}=enum({s}){{null_handle,_}};", .{ name, if (e.dispatchable) "usize" else "u64" });
+    }
+    fn printBasetype(name: []const u8, e: Registry.Basetype, writer: *Writer) Writer.Error!void {
+        _ = name;
+        _ = e;
+        _ = writer;
+    }
+    fn printForeign(name: []const u8, e: Registry.Foreign, writer: *Writer) Writer.Error!void {
+        _ = name;
+        _ = e;
+        _ = writer;
+    }
+    fn printFuncpointer(name: []const u8, e: Registry.Funcpointer, writer: *Writer) Writer.Error!void {
+        _ = name;
+        _ = e;
+        _ = writer;
+    }
+    fn printAlias(name: []const u8, e: Registry.Alias, writer: *Writer) Writer.Error!void {
+        const prefix = "Vk";
+        if (!std.mem.startsWith(u8, name, prefix)) panic("Expected name to start with Vk: {s}", .{name});
+        if (!std.mem.startsWith(u8, e.canonical, prefix)) panic("Expected name to start with Vk: {s}", .{e.canonical});
+        try writer.print("pub const {s}={s};", .{ name[prefix.len..], e.canonical[prefix.len..] });
+    }
+    pub fn render(registry: Registry, writer: *Writer) Writer.Error!void {
+        try writer.print("{s}\n", .{@embedFile("preamble.zig")});
+        var it = registry.types.iterator();
+        while (it.next()) |entry| {
+            const name = entry.key_ptr.*;
+            const v = entry.value_ptr.*;
+            try printComment(v.comment, writer);
+            switch (v.type) {
+                .bitmask => |e| try printBitmask(name, e, writer),
+                .@"enum" => |e| try printEnum(name, e, writer),
+                .@"struct" => |e| try printStruct(name, e, writer),
+                .@"union" => |e| try printUnion(name, e, writer),
+                .handle => |e| try printHandle(name, e, writer),
+                .basetype => |e| try printBasetype(name, e, writer),
+                .funcpointer => |e| try printFuncpointer(name, e, writer),
+                .foreign => |e| try printForeign(name, e, writer),
+                .alias => |e| try printAlias(name, e, writer),
+            }
+        }
+    }
+};
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const stdin = std.Io.File.stdin();
@@ -391,7 +580,7 @@ pub fn main(init: std.process.Init) !void {
     const xml: XmlNode = try .parse(reader, allocator);
     defer xml.deinit(allocator);
 
-    var api: Parser.Api = .vulkan;
+    var api: Registry.Api = .vulkan;
 
     {
         var it = init.minimal.args.iterateAllocator(allocator) catch @panic("oom");
@@ -404,14 +593,14 @@ pub fn main(init: std.process.Init) !void {
             switch (op) {
                 .@"-api" => {
                     const a = it.next() orelse @panic("Missing api type");
-                    api = slice_tools.enums.fromName(Parser.Api, a) orelse std.debug.panic("Unknown api: {s}", .{a});
+                    api = slice_tools.enums.fromName(Registry.Api, a) orelse std.debug.panic("Unknown api: {s}", .{a});
                 },
             }
         }
     }
 
-    const registry = Parser.parse(api, xml, allocator);
-    try writer.print("{f}", .{registry});
+    const registry = Registry.parse(api, xml, allocator);
+    try render.render(registry, writer);
 
     try writer.flush();
 }
