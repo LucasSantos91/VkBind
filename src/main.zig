@@ -57,6 +57,18 @@ const XmlNode = struct {
                 .text => |t| try writer.print("{s}\n", .{t}),
             }
         }
+        pub fn getNode(self: @This()) XmlNode {
+            return switch (self) {
+                .node => |n| n,
+                .text => @panic("Expected node"),
+            };
+        }
+        pub fn getText(self: @This()) []const u8 {
+            return switch (self) {
+                .node => @panic("Expected text"),
+                .text => |t| t,
+            };
+        }
     };
 
     tag: []const u8,
@@ -216,6 +228,70 @@ const XmlNode = struct {
         }
         allocator.free(self.children);
     }
+
+    pub const ChildrenIterator = struct {
+        children: []const NodeOrText,
+
+        pub fn NodeAndTag(comptime Filter: type) type {
+            return struct { tag: Filter, node: XmlNode };
+        }
+        pub fn NodeAndTagOrText(comptime Filter: type) type {
+            return union(enum) {
+                node: NodeAndTag(Filter),
+                text: []const u8,
+            };
+        }
+        pub fn nextNodeOrText(self: *@This(), comptime Filter: type) ?NodeAndTagOrText(Filter) {
+            while (true) {
+                if (self.children.len == 0) return null;
+                const this = self.children[0];
+                self.children = self.children[1..];
+                switch (this) {
+                    .text => |t| {
+                        return .{ .text = t };
+                    },
+                    .node => |n| {
+                        const tag = enumFromName(Filter, n.tag) orelse continue;
+                        return .{ .node = .{ .tag = tag, .node = n } };
+                    },
+                }
+            }
+        }
+
+        pub fn nextNodeFilter(self: *@This(), comptime Filter: type) ?NodeAndTag(Filter) {
+            while (true) {
+                const n = self.nextNodeOrText(Filter) orelse return null;
+                if (n == .node) return n.node;
+            }
+        }
+        pub fn nextNode(self: *@This(), comptime tag: []const u8) ?XmlNode {
+            const E = @Enum(u0, .exhaustive, &.{tag}, &.{0});
+            const n = self.nextNodeFilter(E) orelse return null;
+            return n.node;
+        }
+        pub fn nextText(self: *@This()) ?[]const u8 {
+            while (true) {
+                const n = self.nextNodeOrText(enum {}) orelse return null;
+                return n.text;
+            }
+        }
+    };
+    pub fn childrenIterator(self: @This()) ChildrenIterator {
+        return .{ .children = self.children };
+    }
+
+    pub fn getChildNodeFilter(self: @This(), comptime Filter: type) ?ChildrenIterator.NodeAndTag(Filter) {
+        var it = self.childrenIterator();
+        return it.nextNodeFilter(Filter);
+    }
+    pub fn getChildNode(self: @This(), comptime tag: []const u8) ?XmlNode {
+        var it = self.childrenIterator();
+        return it.nextNode(tag);
+    }
+    pub fn getChildText(self: @This()) ?[]const u8 {
+        var it = self.childrenIterator();
+        return it.nextText();
+    }
 };
 
 const CommaIterator = struct {
@@ -329,6 +405,18 @@ pub const Registry = struct {
         if (!self.matchApi(node)) return null;
         return node;
     }
+    fn addType(self: *@This(), name: []const u8) *TypeCommon {
+        const gp = self.types.getOrPut(self.allocator, name) catch @panic("oom");
+        if (gp.found_existing) panic("Duplicate type name: {s}", .{name});
+        return gp.value_ptr;
+    }
+    fn forceGetChild(xml: XmlNode, comptime tag: []const u8) XmlNode {
+        return xml.getChildNode(tag) orelse @panic("Expected child with tag: " ++ tag);
+    }
+    fn getTextInChild(xml: XmlNode, comptime tag: []const u8) []const u8 {
+        const c = forceGetChild(xml, tag);
+        return c.getChildText() orelse @panic("Expected text in child node");
+    }
 
     fn parseBitmask(self: *@This(), xml: XmlNode) void {
         _ = self;
@@ -347,8 +435,11 @@ pub const Registry = struct {
         _ = xml;
     }
     fn parseHandle(self: *@This(), xml: XmlNode) void {
-        _ = self;
-        _ = xml;
+        const kind = getTextInChild(xml, "type");
+        const is_dispatchable = kind.len == "VK_DEFINE_HANDLE".len;
+        const name = getTextInChild(xml, "name");
+        const new = self.addType(name);
+        new.* = .{ .type = .{ .handle = .{ .dispatchable = is_dispatchable } } };
     }
     fn parseFuncpointer(self: *@This(), xml: XmlNode) void {
         _ = self;
@@ -488,6 +579,10 @@ const render = struct {
             };
         }
     };
+    fn stripPrefix(name: []const u8, prefix: []const u8) []const u8 {
+        if (!std.mem.startsWith(u8, name, prefix)) panic("Expected {s} to start with prefix {s}", .{ name, prefix });
+        return name[prefix.len..];
+    }
     fn printComment(comment_: ?[]const u8, writer: *Writer) Writer.Error!void {
         if (comment_ == null) return;
         const prefix = "// ";
@@ -518,7 +613,10 @@ const render = struct {
         _ = writer;
     }
     fn printHandle(name: []const u8, e: Registry.Handle, writer: *Writer) Writer.Error!void {
-        try writer.print("pub const {s}=enum({s}){{null_handle,_}};", .{ name, if (e.dispatchable) "usize" else "u64" });
+        try writer.print("pub const {s}=enum({s}){{null_handle,_}};", .{
+            stripPrefix(name, "Vk"),
+            if (e.dispatchable) "usize" else "u64",
+        });
     }
     fn printBasetype(name: []const u8, e: Registry.Basetype, writer: *Writer) Writer.Error!void {
         _ = name;
@@ -537,9 +635,9 @@ const render = struct {
     }
     fn printAlias(name: []const u8, e: Registry.Alias, writer: *Writer) Writer.Error!void {
         const prefix = "Vk";
-        if (!std.mem.startsWith(u8, name, prefix)) panic("Expected name to start with Vk: {s}", .{name});
-        if (!std.mem.startsWith(u8, e.canonical, prefix)) panic("Expected name to start with Vk: {s}", .{e.canonical});
-        try writer.print("pub const {s}={s};", .{ name[prefix.len..], e.canonical[prefix.len..] });
+        const n = stripPrefix(name, prefix);
+        const c = stripPrefix(e.canonical, prefix);
+        try writer.print("pub const {s}={s};", .{ n, c });
     }
     pub fn render(registry: Registry, writer: *Writer) Writer.Error!void {
         try writer.print("{s}\n", .{@embedFile("preamble.zig")});
