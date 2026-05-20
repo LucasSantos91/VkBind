@@ -529,11 +529,18 @@ pub const Registry = struct {
     };
 
     const VkTypes = std.StringHashMapUnmanaged(TypeCommon);
+    const Constant = struct {
+        name: []const u8,
+        value: []const u8,
+        type: []const u8,
+        comment: ?[]const u8,
+    };
 
     api: Api,
     allocator: Allocator,
     authors: []const []const u8 = &.{},
     types: VkTypes = .{},
+    constants: []const Constant = &.{},
 
     fn parseAuthorTags(self: *@This(), xml: XmlNode) void {
         if (self.authors.len != 0) @panic("Duplicate tags section");
@@ -758,6 +765,34 @@ pub const Registry = struct {
     }
 
     fn parseEnums(self: *@This(), xml: XmlNode) void {
+        const t = xml.attr.get("type") orelse @panic("Enum missing kind");
+        const kind = enumFromName(enum { constants, @"enum", bitmask }, t.*) orelse @panic("Unknown missing kind");
+        switch (kind) {
+            .constants => self.parseConstants(xml),
+            .@"enum" => self.parseEnumBits(xml),
+            .bitmask => self.parseFlagBits(xml),
+        }
+    }
+    fn parseConstants(self: *@This(), xml: XmlNode) void {
+        var constants: std.ArrayList(Constant) = .empty;
+        constants.ensureTotalCapacity(self.allocator, xml.children.len) catch @panic("oom");
+        var it = xml.childrenIterator();
+        while (it.nextNode("enum")) |node| {
+            const new = constants.addOneAssumeCapacity();
+            new.* = .{
+                .name = (node.attr.get("name") orelse @panic("Nameless constant")).*,
+                .value = (node.attr.get("value") orelse @panic("Valueless constant")).*,
+                .type = (node.attr.get("type") orelse @panic("Typeless constant")).*,
+                .comment = getComment(node),
+            };
+        }
+        self.constants = constants.toOwnedSlice(self.allocator) catch @panic("oom");
+    }
+    fn parseEnumBits(self: *@This(), xml: XmlNode) void {
+        _ = self; // autofix
+        _ = xml; // autofix
+    }
+    fn parseFlagBits(self: *@This(), xml: XmlNode) void {
         _ = self; // autofix
         _ = xml; // autofix
     }
@@ -1014,8 +1049,29 @@ const render = struct {
         const c = stripPrefix(e.canonical, prefix);
         try writer.print("pub const {s}={s};", .{ n, c });
     }
+    fn printConstants(constants: []const Registry.Constant, writer: *Writer) Writer.Error!void {
+        for (constants) |c| {
+            try printComment(c.comment, writer);
+            try writer.writeAll("pub const ");
+            try writeConstant(c.name, writer);
+            const zig_type: Primitives = enumFromName(Primitives, c.type) orelse panic("Unknown primitive type: {s}", .{c.type});
+            const zig_type_text = zig_type.toZig();
+            try writer.print(":{s}=", .{zig_type_text});
+            const nums_and_point = "0123456789.";
+            if (std.mem.findScalar(u8, c.value, '~')) |i| {
+                var t = c.value[i + 1 ..];
+                const end = std.mem.findNone(u8, t, nums_and_point) orelse c.value.len;
+                t = t[0..end];
+                try writer.print("~@as({s},{s});", .{ zig_type_text, t });
+            } else {
+                const end = std.mem.findNone(u8, c.value, nums_and_point) orelse c.value.len;
+                try writer.print("{s};", .{c.value[0..end]});
+            }
+        }
+    }
     pub fn render(registry: Registry, writer: *Writer) Writer.Error!void {
         try writer.print("{s}\n", .{@embedFile("preamble.zig")});
+        try printConstants(registry.constants, writer);
         var it = registry.types.iterator();
         while (it.next()) |entry| {
             const name = entry.key_ptr.*;
