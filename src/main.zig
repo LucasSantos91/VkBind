@@ -328,17 +328,12 @@ pub const Registry = struct {
             return false;
         }
     };
-    const Field = struct {
-        name: []const u8,
-        type: []const u8,
-        comment: ?[]const u8,
-    };
     const Struct = struct {
-        members: []const Field,
+        members: []const ZigVar,
         s_type: ?[]const u8,
     };
     const Union = struct {
-        members: []const Field,
+        members: []const ZigVar,
     };
     const Handle = struct {
         dispatchable: bool,
@@ -404,7 +399,6 @@ pub const Registry = struct {
         comment: ?[]const u8,
 
         pub fn parse(xml: XmlNode) @This() {
-            if (xml.children.len < 2) @panic("Failed to parse C variable");
             var result: @This() = .{
                 .type = .{
                     .amount = .single,
@@ -418,21 +412,20 @@ pub const Registry = struct {
             };
             const ptrs = &result.type.base.ptrs;
 
-            var child_index: usize = 0;
-            switch (xml.children[0]) {
-                .text => |t| {
+            var it = xml.childrenIterator();
+            const type_node = switch (it.nextNodeOrText(enum { type }) orelse @panic("Failed to find variable type")) {
+                .text => |t| blk: {
                     if (std.mem.find(u8, t, "const ")) |_| {
                         result.type.base.ptrs.appendAssumeCapacity(.@"const");
                     }
-                    child_index += 1;
+                    break :blk it.nextNode("type") orelse @panic("Failed to find variable type");
                 },
-                .node => {},
-            }
-            result.type.base.name = xml.children[child_index].getNode().getChildText() orelse @panic("Expected type name");
-            child_index += 1;
-            if (child_index >= xml.children.len) @panic("Failed parsing C variable");
-            switch (xml.children[child_index]) {
-                .text => |t| {
+                .node => |n| n.node,
+            };
+            result.type.base.name = type_node.getChildText() orelse @panic("Expected type name");
+
+            const name_node = switch (it.nextNodeOrText(enum { name }) orelse @panic("Failed to find variable name")) {
+                .text => |t| blk: {
                     var text = t;
                     if (std.mem.findScalar(u8, text, '*')) |i| {
                         if (ptrs.len == 0) {
@@ -444,17 +437,13 @@ pub const Registry = struct {
                         const c = text[i];
                         ptrs.appendAssumeCapacity(if (c == '*') .mutable else .@"const");
                     }
-                    child_index += 1;
+                    break :blk it.nextNode("name") orelse @panic("Failed to find variable name");
                 },
-                .node => {},
-            }
-            if (child_index >= xml.children.len) @panic("Failed parsing C variable");
-            result.name = xml.children[child_index].getNode().getChildText() orelse @panic("Expected variable name");
-            child_index += 1;
-            if (child_index >= xml.children.len) return result;
-            if (xml.children[child_index] == .text) blk: {
-                var text = xml.children[child_index].text;
-                child_index += 1;
+                .node => |n| n.node,
+            };
+            result.name = name_node.getChildText() orelse @panic("Expected variable name");
+            if (it.nextText()) |text_| blk: {
+                var text = text_;
                 const i = std.mem.findAny(u8, text, ":[") orelse break :blk;
                 const c = text[i];
                 text = text[i + 1 ..];
@@ -466,19 +455,50 @@ pub const Registry = struct {
                         if (std.mem.findScalar(u8, text, ']')) |j| {
                             result.type.amount = .{ .array = .{ .literal = text[0..j] } };
                         } else {
-                            if (child_index >= xml.children.len) @panic("Unexpected end while parsing array amount");
-                            const n = xml.children[child_index].getNode().getChildText() orelse @panic("Expected constant name in array amount");
+                            const enum_node = it.nextNode("enum") orelse @panic("Failed to find array amount enumeration");
+                            const n = enum_node.getChildText() orelse @panic("Expected constant name in array amount");
                             result.type.amount = .{ .array = .{ .constant = n } };
-                            child_index += 2;
                         }
                     },
                     else => unreachable,
                 }
             }
-            if (child_index >= xml.children.len) return result;
-            const comment_node = xml.children[child_index];
-            if (comment_node == .text) return result;
-            result.comment = comment_node.text;
+            const comment_node = it.nextNode("comment") orelse return result;
+            result.comment = comment_node.getChildText();
+            return result;
+        }
+    };
+
+    const ZigVar = struct {
+        const Ptr = struct {
+            optional: bool,
+            len: []const u8,
+        };
+
+        c_var: CVar,
+        extra: [BaseType.max_ptr]Ptr,
+
+        pub fn parse(xml: XmlNode) @This() {
+            var result: @This() = .{
+                .c_var = .parse(xml),
+                .extra = @splat(.{ .optional = false, .len = &.{} }),
+            };
+            if (xml.attr.get("optional")) |opt| {
+                var it: CommaIterator = .{ .text = opt.* };
+                for (&result.extra) |*e| {
+                    if (it.next()) |text| {
+                        e.optional = std.mem.eql(u8, text, "true");
+                    } else break;
+                }
+            }
+            if (xml.attr.get("len")) |len| {
+                var it: CommaIterator = .{ .text = len.* };
+                for (&result.extra) |*e| {
+                    if (it.next()) |text| {
+                        e.len = text;
+                    } else break;
+                }
+            }
             return result;
         }
     };
@@ -590,8 +610,28 @@ pub const Registry = struct {
         _ = xml;
     }
     fn parseStruct(self: *@This(), xml: XmlNode) void {
-        _ = self;
-        _ = xml;
+        const name = xml.attr.get("name") orelse @panic("Failed to find struct's name");
+        if (xml.children.len == 0) panic("Struct {s} is empty", .{name.*});
+        const new = self.addType(name.*);
+        new.* = .{
+            .comment = getComment(xml),
+            .type = .{ .@"struct" = .{
+                .s_type = null,
+                .members = undefined,
+            } },
+        };
+        const s = &new.type.@"struct";
+        if (xml.children[0].getNode().attr.get("values")) |s_type| {
+            s.s_type = s_type.*;
+        }
+        var members: std.ArrayList(ZigVar) = .empty;
+        for (xml.children) |c| {
+            if (c == .text or !std.mem.eql(u8, c.node.tag, "member")) continue;
+            const n = c.getNode();
+            const new_member = members.addOne(self.allocator) catch @panic("oom");
+            new_member.* = .parse(n);
+        }
+        s.members = members.toOwnedSlice(self.allocator) catch @panic("oom");
     }
     fn parseUnion(self: *@This(), xml: XmlNode) void {
         _ = self;
@@ -796,9 +836,91 @@ const render = struct {
         _ = writer;
     }
     fn printStruct(name: []const u8, e: Registry.Struct, writer: *Writer) Writer.Error!void {
-        _ = name;
-        _ = e;
-        _ = writer;
+        try writer.print("pub const {s}=extern struct{{", .{stripPrefix(name, "Vk")});
+        var members = e.members;
+        if (e.s_type) |s_type| {
+            try writer.print("sType: StructureType=.{s},", .{stripPrefix(s_type, "VK_STRUCTURE_TYPE_")});
+            members = members[1..];
+        }
+        for (members) |m| {
+            const l = m.extra[0].len;
+            if (m.c_var.type.amount == .array and l.len != 0) {
+                if (std.mem.eql(u8, "null-terminated", l))
+                    try writer.writeAll("\n/// Null-terminated\n")
+                else
+                    try writer.print("\n/// length given by {s}\n", .{m.extra[0].len});
+            }
+            try printZigVar(m, members, writer);
+            for (m.extra) |extra| {
+                if (extra.optional) {
+                    try writer.writeAll("=nullValue(");
+                    try printZigType(m, members, writer);
+                    try writer.writeByte(')');
+                    break;
+                }
+            }
+            try writer.writeByte(',');
+        }
+        try writer.writeAll("};");
+    }
+    fn printZigVar(zig_var: Registry.ZigVar, others: []const Registry.ZigVar, writer: *Writer) Writer.Error!void {
+        try printComment(zig_var.c_var.comment, writer);
+        try writer.print("{s}:", .{zig_var.c_var.name});
+        try printZigType(zig_var, others, writer);
+    }
+    fn printZigType(zig_var: Registry.ZigVar, others: []const Registry.ZigVar, writer: *Writer) Writer.Error!void {
+        if (zig_var.c_var.type.amount == .bitfield) {
+            try writer.print("u{s}", .{zig_var.c_var.type.amount.bitfield});
+            return;
+        }
+        const ptrs = zig_var.c_var.type.base.ptrs.constSlice();
+        for (ptrs, zig_var.extra[0..ptrs.len]) |kind, extra| {
+            var optional = extra.optional;
+            const p_text = if (extra.len.len == 0)
+                "*"
+            else if (enumFromName(enum { @"null-terminated", @"1" }, extra.len)) |l| switch (l) {
+                .@"null-terminated" => "[*:0]",
+                .@"1" => "*",
+            } else blk: {
+                if (!optional) {
+                    outer: for (others) |o| {
+                        if (std.mem.eql(u8, o.c_var.name, zig_var.c_var.name)) {
+                            for (o.extra) |e| {
+                                if (e.optional) {
+                                    optional = true;
+                                    break :outer;
+                                }
+                            }
+                        }
+                        optional = true;
+                    }
+                }
+                break :blk "[*]";
+            };
+            if (optional) {
+                try writer.writeByte('?');
+            }
+            try writer.writeAll(p_text);
+            if (kind == .@"const") {
+                try writer.writeAll("const ");
+            }
+        }
+        if (zig_var.c_var.type.amount == .array) {
+            try writer.writeByte('[');
+            switch (zig_var.c_var.type.amount.array) {
+                .literal => |l| try writer.writeAll(l),
+                .constant => |c| try writeConstant(c, writer),
+            }
+            try writer.writeByte(']');
+        }
+        if (zig_var.c_var.type.base.ptrs.len != 0 and std.mem.eql(u8, zig_var.c_var.type.base.name, "void")) {
+            try writer.writeAll("anyopaque");
+        } else {
+            try printGenericTypeName(zig_var.c_var.type.base.name, writer);
+        }
+    }
+    fn writeConstant(name: []const u8, writer: *Writer) Writer.Error!void {
+        try writer.writeAll(name);
     }
     fn printUnion(name: []const u8, e: Registry.Union, writer: *Writer) Writer.Error!void {
         _ = name;
@@ -826,6 +948,8 @@ const render = struct {
             try writer.print("Pfn{s}", .{n});
         } else if (tryStripPrefix(name, "Vk")) |n| {
             try writer.writeAll(n);
+        } else if (enumFromName(Primitives, name)) |n| {
+            try writer.writeAll(n.toZig());
         } else {
             try writer.writeAll(name);
         }
