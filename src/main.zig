@@ -731,11 +731,6 @@ pub fn main(init: std.process.Init) !void {
     var stdin_reader = stdin.reader(init.io, &stdin_buffer);
     const reader = &stdin_reader.interface;
 
-    const stdout = std.Io.File.stdout();
-    var stdout_buffer: [4096]u8 = undefined;
-    var stdout_writer = stdout.writer(init.io, &stdout_buffer);
-    const writer = &stdout_writer.interface;
-
     _ = try reader.discardDelimiterInclusive('>');
     _ = try reader.discardDelimiterInclusive('<');
     const xml: XmlNode = try .parse(reader, allocator);
@@ -760,8 +755,18 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    const registry = Registry.parse(api, xml, allocator);
-    try render.render(registry, writer);
+    const source = blk: {
+        var writer: Writer.Allocating = .init(allocator);
+        const registry = Registry.parse(api, xml, allocator);
+        try render.render(registry, &writer.writer);
+        break :blk try writer.toOwnedSliceSentinel(0);
+    };
 
+    const stdout = std.Io.File.stdout();
+    var stdout_buffer: [4096]u8 = undefined;
+    var stdout_writer = stdout.writer(init.io, &stdout_buffer);
+    const writer = &stdout_writer.interface;
+    const ast = try std.zig.Ast.parse(allocator, source, .zig);
+    try ast.render(allocator, writer, .{});
     try writer.flush();
 }
