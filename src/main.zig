@@ -330,7 +330,8 @@ pub const Registry = struct {
     };
     const Field = struct {
         name: []const u8,
-        comment: []const u8,
+        type: []const u8,
+        comment: ?[]const u8,
     };
     const Struct = struct {
         members: []const Field,
@@ -372,7 +373,120 @@ pub const Registry = struct {
     };
     const Basetype = struct {};
     const Foreign = struct {};
-    const Funcpointer = struct {};
+    const BaseType = struct {
+        pub const max_ptr = 2;
+        const PtrKind = enum {
+            @"const",
+            mutable,
+        };
+        const Ptrs = slice_tools.BoundedArray(PtrKind, max_ptr);
+        ptrs: Ptrs = .empty,
+        name: []const u8,
+    };
+    const CType = struct {
+        const ArrayAmount =
+            union(enum) {
+                literal: []const u8,
+                constant: []const u8,
+            };
+        pub const Amount = union(enum) {
+            single,
+            array: ArrayAmount,
+            bitfield: []const u8,
+        };
+
+        base: BaseType,
+        amount: Amount,
+    };
+    const CVar = struct {
+        type: CType,
+        name: []const u8,
+        comment: ?[]const u8,
+
+        pub fn parse(xml: XmlNode) @This() {
+            if (xml.children.len < 2) @panic("Failed to parse C variable");
+            var result: @This() = .{
+                .type = .{
+                    .amount = .single,
+                    .base = .{
+                        .name = undefined,
+                        .ptrs = .empty,
+                    },
+                },
+                .name = undefined,
+                .comment = null,
+            };
+            const ptrs = &result.type.base.ptrs;
+
+            var child_index: usize = 0;
+            switch (xml.children[0]) {
+                .text => |t| {
+                    if (std.mem.find(u8, t, "const ")) |_| {
+                        result.type.base.ptrs.appendAssumeCapacity(.@"const");
+                    }
+                    child_index += 1;
+                },
+                .node => {},
+            }
+            result.type.base.name = xml.children[child_index].getNode().getChildText() orelse @panic("Expected type name");
+            child_index += 1;
+            if (child_index >= xml.children.len) @panic("Failed parsing C variable");
+            switch (xml.children[child_index]) {
+                .text => |t| {
+                    var text = t;
+                    if (std.mem.findScalar(u8, text, '*')) |i| {
+                        if (ptrs.len == 0) {
+                            ptrs.appendAssumeCapacity(.mutable);
+                        }
+                        text = text[i + 1 ..];
+                    }
+                    if (std.mem.findAny(u8, text, "*c")) |i| {
+                        const c = text[i];
+                        ptrs.appendAssumeCapacity(if (c == '*') .mutable else .@"const");
+                    }
+                    child_index += 1;
+                },
+                .node => {},
+            }
+            if (child_index >= xml.children.len) @panic("Failed parsing C variable");
+            result.name = xml.children[child_index].getNode().getChildText() orelse @panic("Expected variable name");
+            child_index += 1;
+            if (child_index >= xml.children.len) return result;
+            if (xml.children[child_index] == .text) blk: {
+                var text = xml.children[child_index].text;
+                child_index += 1;
+                const i = std.mem.findAny(u8, text, ":[") orelse break :blk;
+                const c = text[i];
+                text = text[i + 1 ..];
+                switch (c) {
+                    ':' => {
+                        result.type.amount = .{ .bitfield = text };
+                    },
+                    '[' => {
+                        if (std.mem.findScalar(u8, text, ']')) |j| {
+                            result.type.amount = .{ .array = .{ .literal = text[0..j] } };
+                        } else {
+                            if (child_index >= xml.children.len) @panic("Unexpected end while parsing array amount");
+                            const n = xml.children[child_index].getNode().getChildText() orelse @panic("Expected constant name in array amount");
+                            result.type.amount = .{ .array = .{ .constant = n } };
+                            child_index += 2;
+                        }
+                    },
+                    else => unreachable,
+                }
+            }
+            if (child_index >= xml.children.len) return result;
+            const comment_node = xml.children[child_index];
+            if (comment_node == .text) return result;
+            result.comment = comment_node.text;
+            return result;
+        }
+    };
+
+    const Funcpointer = struct {
+        ret: CType,
+        params: []const CVar,
+    };
 
     const Type = union(enum) {
         @"struct": Struct,
@@ -491,8 +605,22 @@ pub const Registry = struct {
         new.* = .{ .type = .{ .handle = .{ .dispatchable = is_dispatchable } } };
     }
     fn parseFuncpointer(self: *@This(), xml: XmlNode) void {
-        _ = self;
-        _ = xml;
+        var it = xml.childrenIterator();
+        const proto = it.nextNode("proto") orelse @panic("Funcpointer missing prototype");
+        const ret_and_name: CVar = .parse(proto);
+        var params: std.ArrayList(CVar) = .empty;
+        while (it.nextNode("param")) |param| {
+            const new = params.addOne(self.allocator) catch @panic("oom");
+            new.* = .parse(param);
+        }
+        const fptr = self.addType(ret_and_name.name);
+        fptr.* = .{
+            .comment = getComment(xml),
+            .type = .{ .funcpointer = .{
+                .params = params.toOwnedSlice(self.allocator) catch @panic("oom"),
+                .ret = ret_and_name.type,
+            } },
+        };
     }
     fn parseBasetype(self: *@This(), xml: XmlNode) void {
         const name = blk: for (xml.children) |n| {
@@ -629,7 +757,10 @@ const render = struct {
         }
     };
     fn stripPrefix(name: []const u8, prefix: []const u8) []const u8 {
-        if (!std.mem.startsWith(u8, name, prefix)) panic("Expected {s} to start with prefix {s}", .{ name, prefix });
+        return tryStripPrefix(name, prefix) orelse panic("Expected {s} to start with prefix {s}", .{ name, prefix });
+    }
+    fn tryStripPrefix(name: []const u8, prefix: []const u8) ?[]const u8 {
+        if (!std.mem.startsWith(u8, name, prefix)) return null;
         return name[prefix.len..];
     }
     fn printComment(comment_: ?[]const u8, writer: *Writer) Writer.Error!void {
@@ -690,10 +821,49 @@ const render = struct {
         _ = e;
         _ = writer;
     }
+    fn printGenericTypeName(name: []const u8, writer: *Writer) Writer.Error!void {
+        if (tryStripPrefix(name, "PFN_vk")) |n| {
+            try writer.print("Pfn{s}", .{n});
+        } else if (tryStripPrefix(name, "Vk")) |n| {
+            try writer.writeAll(n);
+        } else {
+            try writer.writeAll(name);
+        }
+    }
+    fn printCType(c_type: Registry.CType, writer: *Writer) Writer.Error!void {
+        if (c_type.amount == .bitfield) {
+            try writer.print("u{s}", .{c_type.amount.bitfield});
+            return;
+        }
+        for (c_type.base.ptrs.constSlice()) |k| {
+            try writer.writeAll("[*c]");
+            switch (k) {
+                .@"const" => try writer.writeAll("const "),
+                .mutable => {},
+            }
+        }
+        if (c_type.base.ptrs.len != 0 and std.mem.eql(u8, c_type.base.name, "void")) {
+            try writer.writeAll("anyopaque");
+            return;
+        }
+
+        try printGenericTypeName(c_type.base.name, writer);
+    }
+
+    fn printCVar(c_var: Registry.CVar, writer: *Writer) Writer.Error!void {
+        try printComment(c_var.comment, writer);
+        try writer.print("{s}:", .{c_var.name});
+        try printCType(c_var.type, writer);
+    }
     fn printFuncpointer(name: []const u8, e: Registry.Funcpointer, writer: *Writer) Writer.Error!void {
-        _ = name;
-        _ = e;
-        _ = writer;
+        try writer.print("pub const Pfn{s}= *const fn(", .{stripPrefix(name, "PFN_vk")});
+        for (e.params) |p| {
+            try printCVar(p, writer);
+            try writer.writeByte(',');
+        }
+        try writer.writeAll(")callconv(vulkan_api)");
+        try printCType(e.ret, writer);
+        try writer.writeByte(';');
     }
     fn printAlias(name: []const u8, e: Registry.Alias, writer: *Writer) Writer.Error!void {
         const prefix = "Vk";
@@ -766,7 +936,8 @@ pub fn main(init: std.process.Init) !void {
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer = stdout.writer(init.io, &stdout_buffer);
     const writer = &stdout_writer.interface;
-    const ast = try std.zig.Ast.parse(allocator, source, .zig);
-    try ast.render(allocator, writer, .{});
+    //const ast = try std.zig.Ast.parse(allocator, source, .zig);
+    //try ast.render(allocator, writer, .{});
+    try writer.writeAll(source);
     try writer.flush();
 }
