@@ -338,7 +338,18 @@ pub const Registry = struct {
     const Handle = struct {
         dispatchable: bool,
     };
-    const Enum = struct {};
+    const Enum = struct {
+        const Alias = struct {
+            name: []const u8,
+            canonical: []const u8,
+        };
+        const Value = struct {
+            name: []const u8,
+            value: []const u8,
+        };
+        values: []const Value,
+        aliases: []const @This().Alias,
+    };
     const Flags = struct {
         const Bitwidth = enum { @"32", @"64" };
         bitwidth: Bitwidth = .@"32",
@@ -789,8 +800,36 @@ pub const Registry = struct {
         self.constants = constants.toOwnedSlice(self.allocator) catch @panic("oom");
     }
     fn parseEnumBits(self: *@This(), xml: XmlNode) void {
-        _ = self; // autofix
-        _ = xml; // autofix
+        const name = xml.attr.get("name") orelse @panic("Missing enum name");
+        const new = self.addType(name.*);
+        new.* = .{
+            .comment = getComment(xml),
+            .type = .{ .@"enum" = .{
+                .values = undefined,
+                .aliases = undefined,
+            } },
+        };
+        var values: std.ArrayList(Enum.Value) = .empty;
+        var aliases: std.ArrayList(Enum.Alias) = .empty;
+        var it = xml.childrenIterator();
+        while (it.nextNode("enum")) |node| {
+            const entry_name = node.attr.get("name") orelse @panic("Missing enum entry name");
+            if (node.attr.get("alias")) |alias| {
+                const new_alias = aliases.addOne(self.allocator) catch @panic("oom");
+                new_alias.* = .{
+                    .canonical = alias.*,
+                    .name = entry_name.*,
+                };
+            } else {
+                const new_value = values.addOne(self.allocator) catch @panic("oom");
+                new_value.* = .{
+                    .name = (node.attr.get("name") orelse panic("Missing name for enum {s}", .{name.*})).*,
+                    .value = (node.attr.get("value") orelse panic("Missing value for enum {s}", .{name.*})).*,
+                };
+            }
+        }
+        new.type.@"enum".values = values.toOwnedSlice(self.allocator) catch @panic("oom");
+        new.type.@"enum".aliases = aliases.toOwnedSlice(self.allocator) catch @panic("oom");
     }
     fn parseFlagBits(self: *@This(), xml: XmlNode) void {
         _ = self; // autofix
@@ -880,10 +919,31 @@ const render = struct {
         try writer.print("pub const {s}=enum(u{t}){{", .{ stripPrefix(name, "Vk"), flags.bitwidth });
         try writer.writeAll("};");
     }
+    fn stripEnumName(entry_name: []const u8, enum_name: []const u8) []const u8 {
+        var stripped = stripPrefix(entry_name, "VK_");
+        if (entry_name.len <= enum_name.len) return stripped;
+        var e_name = enum_name;
+        outer: while (true) {
+            const under = std.mem.findScalar(u8, stripped, '_') orelse break;
+            if (under > e_name.len) break;
+            for (stripped[0..under], e_name[0..under]) |entry, name| {
+                if (std.ascii.toUpper(name) != entry) break :outer;
+            }
+            stripped = stripped[under + 1 ..];
+            e_name = e_name[under..];
+        }
+        return stripped;
+    }
     fn printEnum(name: []const u8, e: Registry.Enum, writer: *Writer) Writer.Error!void {
-        _ = name;
-        _ = e;
-        _ = writer;
+        const stripped_name = stripPrefix(name, "Vk");
+        try writer.print("pub const {s}=enum(c_int){{", .{stripped_name});
+        for (e.values) |v| {
+            try writer.print("@\"{s}\"={s},", .{ stripEnumName(v.name, stripped_name), v.value });
+        }
+        for (e.aliases) |a| {
+            try writer.print("pub const @\"{s}\"=@This().@\"{s}\";", .{ stripEnumName(a.name, stripped_name), stripEnumName(a.canonical, stripped_name) });
+        }
+        try writer.writeAll("};");
     }
     fn printStruct(name: []const u8, e: Registry.Struct, writer: *Writer) Writer.Error!void {
         try writer.print("pub const {s}=extern struct{{", .{stripPrefix(name, "Vk")});
