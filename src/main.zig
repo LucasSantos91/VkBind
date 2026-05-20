@@ -419,6 +419,13 @@ pub const Registry = struct {
             .type = .{ .foreign = .{} },
         };
     }
+    pub fn resolveAlias(self: *const @This(), name: []const u8) TypeCommon {
+        var t = self.types.get(name) orelse panic("Failed to find name {s}", .{name});
+        while (t.type == .alias) {
+            t = self.types.get(t.type.alias.canonical) orelse panic("Failed to find name {s}", .{t.type.alias.canonical});
+        }
+        return t;
+    }
     fn matchApiText(self: *const @This(), api: []const u8) bool {
         return self.api.contains(api);
     }
@@ -637,7 +644,7 @@ const render = struct {
     fn printFlags(registry: Registry, name: []const u8, e: Registry.Flags, writer: *Writer) Writer.Error!void {
         try writer.print("pub const {s}=packed struct(u{t}){{", .{ stripPrefix(name, "Vk"), e.bitwidth });
         if (e.bit_flags) |flag_bits_name| {
-            const flag_bits_ = registry.types.get(flag_bits_name) orelse panic("Missing BitFlags ({s}) for Flags {s}", .{ flag_bits_name, name });
+            const flag_bits_ = registry.resolveAlias(flag_bits_name);
             if (flag_bits_.type != .flag_bits) panic("Expected {s} to be FlagBits", .{flag_bits_name});
             const flag_bits = flag_bits_.type.flag_bits;
             _ = flag_bits;
@@ -645,7 +652,7 @@ const render = struct {
         try writer.writeAll("};");
     }
     fn printFlagBits(registry: Registry, name: []const u8, e: Registry.FlagBits, writer: *Writer) Writer.Error!void {
-        const flags_ = registry.types.get(e.flags) orelse panic("Missing Flags ({s}) for FlagBits {s}", .{ e.flags, name });
+        const flags_ = registry.resolveAlias(e.flags);
         if (flags_.type != .flags) panic("Expected {s} to be Flags", .{name});
         const flags = flags_.type.flags;
 
