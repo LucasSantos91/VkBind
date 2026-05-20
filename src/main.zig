@@ -634,8 +634,23 @@ pub const Registry = struct {
         s.members = members.toOwnedSlice(self.allocator) catch @panic("oom");
     }
     fn parseUnion(self: *@This(), xml: XmlNode) void {
-        _ = self;
-        _ = xml;
+        const name = xml.attr.get("name") orelse @panic("Failed to find struct's name");
+        const new = self.addType(name.*);
+        new.* = .{
+            .comment = getComment(xml),
+            .type = .{ .@"union" = .{
+                .members = undefined,
+            } },
+        };
+        const s = &new.type.@"union";
+        var members: std.ArrayList(ZigVar) = .empty;
+        for (xml.children) |c| {
+            if (c == .text or !std.mem.eql(u8, c.node.tag, "member")) continue;
+            const n = c.getNode();
+            const new_member = members.addOne(self.allocator) catch @panic("oom");
+            new_member.* = .parse(n);
+        }
+        s.members = members.toOwnedSlice(self.allocator) catch @panic("oom");
     }
     fn parseHandle(self: *@This(), xml: XmlNode) void {
         const kind = getTextInChild(xml, "type");
@@ -920,12 +935,16 @@ const render = struct {
         }
     }
     fn writeConstant(name: []const u8, writer: *Writer) Writer.Error!void {
-        try writer.writeAll(name);
+        if (name.len <= 3) panic("Malformed constant name: {s}", .{name});
+        try writer.writeAll(name[3..]);
     }
     fn printUnion(name: []const u8, e: Registry.Union, writer: *Writer) Writer.Error!void {
-        _ = name;
-        _ = e;
-        _ = writer;
+        try writer.print("pub const {s}=extern union{{", .{stripPrefix(name, "Vk")});
+        for (e.members) |m| {
+            try printZigVar(m, e.members, writer);
+            try writer.writeByte(',');
+        }
+        try writer.writeAll("};");
     }
     fn printHandle(name: []const u8, e: Registry.Handle, writer: *Writer) Writer.Error!void {
         try writer.print("pub const {s}=enum({s}){{null_handle,_}};", .{
