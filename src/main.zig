@@ -954,11 +954,18 @@ const render = struct {
         }
         for (members) |m| {
             const l = m.extra[0].len;
-            if (m.c_var.type.amount == .array and l.len != 0) {
-                if (std.mem.eql(u8, "null-terminated", l))
-                    try writer.writeAll("\n/// Null-terminated\n")
-                else
+            if (l.len != 0) {
+                if (enumFromName(enum { @"null-terminated", @"1" }, l)) |kind| {
+                    switch (kind) {
+                        .@"null-terminated" => {
+                            if (m.c_var.type.amount == .array)
+                                try writer.writeAll("\n/// Null-terminated\n");
+                        },
+                        .@"1" => {},
+                    }
+                } else {
                     try writer.print("\n/// length given by {s}\n", .{m.extra[0].len});
+                }
             }
             try printZigVar(m, members, writer);
             for (m.extra) |extra| {
