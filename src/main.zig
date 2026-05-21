@@ -342,10 +342,12 @@ pub const Registry = struct {
         const Alias = struct {
             name: []const u8,
             canonical: []const u8,
+            comment: ?[]const u8,
         };
         const Value = struct {
             name: []const u8,
             value: []const u8,
+            comment: ?[]const u8,
         };
         values: []const Value,
         aliases: []const @This().Alias,
@@ -474,7 +476,7 @@ pub const Registry = struct {
                     else => unreachable,
                 }
             }
-            const comment_node = it.nextNode("comment") orelse return result;
+            const comment_node = xml.getChildNode("comment") orelse return result;
             result.comment = comment_node.getChildText();
             return result;
         }
@@ -819,12 +821,14 @@ pub const Registry = struct {
                 new_alias.* = .{
                     .canonical = alias.*,
                     .name = entry_name.*,
+                    .comment = getComment(node),
                 };
             } else {
                 const new_value = values.addOne(self.allocator) catch @panic("oom");
                 new_value.* = .{
                     .name = (node.attr.get("name") orelse panic("Missing name for enum {s}", .{name.*})).*,
                     .value = (node.attr.get("value") orelse panic("Missing value for enum {s}", .{name.*})).*,
+                    .comment = getComment(node),
                 };
             }
         }
@@ -938,9 +942,11 @@ const render = struct {
         const stripped_name = stripPrefix(name, "Vk");
         try writer.print("pub const {s}=enum(c_int){{", .{stripped_name});
         for (e.values) |v| {
+            try printComment(v.comment, writer);
             try writer.print("@\"{s}\"={s},", .{ stripEnumName(v.name, stripped_name), v.value });
         }
         for (e.aliases) |a| {
+            try printComment(a.comment, writer);
             try writer.print("pub const @\"{s}\"=@This().@\"{s}\";", .{ stripEnumName(a.name, stripped_name), stripEnumName(a.canonical, stripped_name) });
         }
         try writer.writeAll("};");
