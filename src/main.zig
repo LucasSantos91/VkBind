@@ -954,8 +954,16 @@ const render = struct {
         }
         for (members) |m| {
             const l = m.extra[0].len;
-            if (l.len != 0) {
-                if (enumFromName(enum { @"null-terminated", @"1" }, l)) |kind| {
+            var optional = blk: {
+                for (m.extra) |ex| {
+                    if (ex.optional) break :blk true;
+                }
+                break :blk false;
+            };
+            blk: {
+                var comma_it: CommaIterator = .{ .text = l };
+                const first = comma_it.next() orelse break :blk;
+                if (enumFromName(enum { @"null-terminated", @"1" }, first)) |kind| {
                     switch (kind) {
                         .@"null-terminated" => {
                             if (m.c_var.type.amount == .array)
@@ -964,17 +972,25 @@ const render = struct {
                         .@"1" => {},
                     }
                 } else {
-                    try writer.print("\n/// length given by {s}\n", .{m.extra[0].len});
+                    try writer.print("\n/// length given by {s}\n", .{l});
+                    if (!optional) {
+                        for (members) |mem| {
+                            if (!std.mem.eql(u8, mem.c_var.name, l)) continue;
+                            for (mem.extra) |ex| {
+                                if (ex.optional) {
+                                    optional = true;
+                                    break :blk;
+                                }
+                            }
+                        }
+                    }
                 }
             }
             try printZigVar(m, members, writer);
-            for (m.extra) |extra| {
-                if (extra.optional) {
-                    try writer.writeAll("=nullValue(");
-                    try printZigType(m, members, writer);
-                    try writer.writeByte(')');
-                    break;
-                }
+            if (optional) {
+                try writer.writeAll("=nullValue(");
+                try printZigType(m, members, writer);
+                try writer.writeByte(')');
             }
             try writer.writeByte(',');
         }
@@ -999,18 +1015,12 @@ const render = struct {
                 .@"null-terminated" => "[*:0]",
                 .@"1" => "*",
             } else blk: {
-                if (!optional) {
-                    outer: for (others) |o| {
-                        if (std.mem.eql(u8, o.c_var.name, zig_var.c_var.name)) {
-                            for (o.extra) |e| {
-                                if (e.optional) {
-                                    optional = true;
-                                    break :outer;
-                                }
-                            }
-                        }
-                        optional = true;
-                    }
+                if (!optional) outer: {
+                    for (others) |o| {
+                        if (!std.mem.eql(u8, o.c_var.name, extra.len)) continue;
+                        optional = o.extra[0].optional;
+                        break :outer;
+                    } else optional = true;
                 }
                 break :blk "[*]";
             };
