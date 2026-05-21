@@ -370,14 +370,14 @@ pub const Registry = struct {
             value: []const u8,
         };
         const BitAlias = struct {
+            canonical: []const u8,
             name: []const u8,
-            alias: []const u8,
             comment: ?[]const u8,
         };
+        bitwidth: Flags.Bitwidth = .@"32",
         bits: []const Bit = &.{},
         aggregates: []const Aggregate = &.{},
         bit_aliases: []const BitAlias = &.{},
-        flags: []const u8,
     };
     const Basetype = struct {};
     const Foreign = struct {};
@@ -611,7 +611,7 @@ pub const Registry = struct {
 
     fn parseBitmask(self: *@This(), xml: XmlNode) void {
         const kind = getTextInChild(xml, "type");
-        const bitwidth: Flags.Bitwidth = if (kind.len == "VK_FLAGS".len) .@"32" else .@"64";
+        const bitwidth: Flags.Bitwidth = if (kind.len == "VkFlags".len) .@"32" else .@"64";
         const name = getTextInChild(xml, "name");
         const new = self.addType(name);
         new.* = .{ .type = .{ .flags = .{
@@ -621,12 +621,6 @@ pub const Registry = struct {
                 .@"64" => if (xml.attr.get("bitvalues")) |r| r.* else null,
             },
         } } };
-        if (new.type.flags.bit_flags) |bit_flags| {
-            const new_bit_flags = self.addType(bit_flags);
-            new_bit_flags.* = .{ .type = .{ .flag_bits = .{
-                .flags = name,
-            } } };
-        }
     }
     fn parseEnum(self: *@This(), xml: XmlNode) void {
         _ = self;
@@ -834,7 +828,7 @@ pub const Registry = struct {
             } else {
                 const new_value = values.addOne(self.allocator) catch @panic("oom");
                 new_value.* = .{
-                    .name = (node.attr.get("name") orelse panic("Missing name for enum {s}", .{name.*})).*,
+                    .name = entry_name.*,
                     .value = (node.attr.get("value") orelse panic("Missing value for enum {s}", .{name.*})).*,
                     .comment = getComment(node),
                 };
@@ -844,8 +838,53 @@ pub const Registry = struct {
         new.type.@"enum".aliases = aliases.toOwnedSlice(self.allocator) catch @panic("oom");
     }
     fn parseFlagBits(self: *@This(), xml: XmlNode) void {
-        _ = self; // autofix
-        _ = xml; // autofix
+        const name = xml.attr.get("name") orelse @panic("Missing bitmask name");
+        const new = self.addType(name.*);
+        new.* = .{
+            .comment = getComment(xml),
+            .type = .{ .flag_bits = .{
+                .bits = undefined,
+                .bit_aliases = undefined,
+                .aggregates = undefined,
+            } },
+        };
+        const flag_bits = &new.type.flag_bits;
+        if (xml.attr.get("bitwidth")) |bitwidth| {
+            flag_bits.bitwidth = enumFromName(Flags.Bitwidth, bitwidth.*) orelse panic("Unknown bitwidth: {s}", .{bitwidth.*});
+        }
+        var aggregates: std.ArrayList(FlagBits.Aggregate) = .empty;
+        var aliases: std.ArrayList(FlagBits.BitAlias) = .empty;
+        var bits: std.ArrayList(FlagBits.Bit) = .empty;
+        var it = xml.childrenIterator();
+        while (it.nextNode("enum")) |node| {
+            if (!self.matchApi(node)) continue;
+            const entry_name = node.attr.get("name") orelse @panic("Missing enum entry name");
+            if (node.attr.get("alias")) |alias| {
+                const new_alias = aliases.addOne(self.allocator) catch @panic("oom");
+                new_alias.* = .{
+                    .canonical = alias.*,
+                    .name = entry_name.*,
+                    .comment = getComment(node),
+                };
+            } else if (node.attr.get("value")) |value| {
+                const new_value = aggregates.addOne(self.allocator) catch @panic("oom");
+                new_value.* = .{
+                    .name = entry_name.*,
+                    .value = value.*,
+                    .comment = getComment(node),
+                };
+            } else if (node.attr.get("bitpos")) |bitpos| {
+                const new_bit = bits.addOne(self.allocator) catch @panic("oom");
+                new_bit.* = .{
+                    .name = entry_name.*,
+                    .bitpos = std.fmt.parseInt(FlagBits.Bitpos, bitpos.*, 10) catch panic("Failed to parse bitpos: {s}", .{bitpos.*}),
+                    .comment = getComment(node),
+                };
+            }
+        }
+        flag_bits.aggregates = aggregates.toOwnedSlice(self.allocator) catch @panic("oom");
+        flag_bits.bits = bits.toOwnedSlice(self.allocator) catch @panic("oom");
+        flag_bits.bit_aliases = aliases.toOwnedSlice(self.allocator) catch @panic("oom");
     }
     fn parseCommands(self: *@This(), xml: XmlNode) void {
         _ = self; // autofix
@@ -923,12 +962,18 @@ const render = struct {
         }
         try writer.writeAll("};");
     }
-    fn printFlagBits(registry: Registry, name: []const u8, e: Registry.FlagBits, writer: *Writer) Writer.Error!void {
-        const flags_ = registry.resolveAlias(e.flags);
-        if (flags_.type != .flags) panic("Expected {s} to be Flags", .{name});
-        const flags = flags_.type.flags;
+    fn printFlagBits(name: []const u8, e: Registry.FlagBits, writer: *Writer) Writer.Error!void {
+        const stripped_name = stripPrefix(name, "Vk");
 
-        try writer.print("pub const {s}=enum(u{t}){{", .{ stripPrefix(name, "Vk"), flags.bitwidth });
+        try writer.print("pub const {s}=enum(u{t}){{", .{ stripPrefix(name, "Vk"), e.bitwidth });
+        for (e.bits) |b| {
+            try printComment(b.comment, writer);
+            try writer.print("@\"{s}\"=1<<{},", .{ stripEnumName(b.name, stripped_name), b.bitpos });
+        }
+        for (e.bit_aliases) |a| {
+            try printComment(a.comment, writer);
+            try writer.print("pub const @\"{s}\"=@This().@\"{s}\";", .{ stripEnumName(a.name, stripped_name), stripEnumName(a.canonical, stripped_name) });
+        }
         try writer.writeAll("};");
     }
     fn stripEnumName(entry_name: []const u8, enum_name: []const u8) []const u8 {
@@ -1165,7 +1210,7 @@ const render = struct {
             try printComment(v.comment, writer);
             switch (v.type) {
                 .flags => |e| try printFlags(registry, name, e, writer),
-                .flag_bits => |e| try printFlagBits(registry, name, e, writer),
+                .flag_bits => |e| try printFlagBits(name, e, writer),
                 .@"enum" => |e| try printEnum(name, e, writer),
                 .@"struct" => |e| try printStruct(name, e, writer),
                 .@"union" => |e| try printUnion(name, e, writer),
