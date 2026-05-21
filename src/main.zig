@@ -650,7 +650,8 @@ pub const Registry = struct {
         var members: std.ArrayList(ZigVar) = .empty;
         for (xml.children) |c| {
             if (c == .text or !std.mem.eql(u8, c.node.tag, "member")) continue;
-            const n = c.getNode();
+            const n = c.node;
+            if (!self.matchApi(n)) continue;
             const new_member = members.addOne(self.allocator) catch @panic("oom");
             new_member.* = .parse(n);
         }
@@ -669,7 +670,8 @@ pub const Registry = struct {
         var members: std.ArrayList(ZigVar) = .empty;
         for (xml.children) |c| {
             if (c == .text or !std.mem.eql(u8, c.node.tag, "member")) continue;
-            const n = c.getNode();
+            const n = c.node;
+            if (!self.matchApi(n)) continue;
             const new_member = members.addOne(self.allocator) catch @panic("oom");
             new_member.* = .parse(n);
         }
@@ -738,12 +740,13 @@ pub const Registry = struct {
         for (xml.children) |child| {
             const node = self.getNode(child) orelse continue;
             if (!std.mem.eql(u8, node.tag, "type")) continue;
+            if (!self.matchApi(node)) continue;
             if (node.attr.get("alias")) |alias| {
                 self.parseAlias(alias.*, node);
                 continue;
             }
             if (node.attr.get("category")) |category| {
-                const c = enumFromName(enum { tags, bitmask, @"enum", @"struct", @"union", handle, basetype, funcpointer }, category.*) orelse continue;
+                const c = enumFromName(enum { bitmask, @"enum", @"struct", @"union", handle, basetype, funcpointer }, category.*) orelse continue;
                 switch (c) {
                     .bitmask => self.parseBitmask(node),
                     .@"enum" => self.parseEnum(node),
@@ -751,7 +754,6 @@ pub const Registry = struct {
                     .@"union" => self.parseUnion(node),
                     .handle => self.parseHandle(node),
                     .basetype => self.parseBasetype(node),
-                    .tags => self.parseAuthorTags(node),
                     .funcpointer => self.parseFuncpointer(node),
                 }
             } else {
@@ -766,6 +768,7 @@ pub const Registry = struct {
 
         for (xml.children) |child| {
             const node = self.getNode(child) orelse continue;
+            if (!self.matchApi(node)) continue;
             const tag = enumFromName(enum { types, enums, commands, feature, extensions, tags }, node.tag) orelse continue;
             switch (tag) {
                 .types => self.parseTypes(node),
@@ -794,6 +797,7 @@ pub const Registry = struct {
         constants.ensureTotalCapacity(self.allocator, xml.children.len) catch @panic("oom");
         var it = xml.childrenIterator();
         while (it.nextNode("enum")) |node| {
+            if (!self.matchApi(node)) continue;
             const new = constants.addOneAssumeCapacity();
             new.* = .{
                 .name = (node.attr.get("name") orelse @panic("Nameless constant")).*,
@@ -818,6 +822,7 @@ pub const Registry = struct {
         var aliases: std.ArrayList(Enum.Alias) = .empty;
         var it = xml.childrenIterator();
         while (it.nextNode("enum")) |node| {
+            if (!self.matchApi(node)) continue;
             const entry_name = node.attr.get("name") orelse @panic("Missing enum entry name");
             if (node.attr.get("alias")) |alias| {
                 const new_alias = aliases.addOne(self.allocator) catch @panic("oom");
