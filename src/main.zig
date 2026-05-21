@@ -512,6 +512,9 @@ pub const Registry = struct {
                     } else break;
                 }
             }
+            if (xml.attr.get("deprecated")) |_| {
+                result.extra[0].optional = true;
+            }
             return result;
         }
     };
