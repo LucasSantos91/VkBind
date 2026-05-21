@@ -963,12 +963,7 @@ const render = struct {
         }
         for (members) |m| {
             const l = m.extra[0].len;
-            var optional = blk: {
-                for (m.extra) |ex| {
-                    if (ex.optional) break :blk true;
-                }
-                break :blk false;
-            };
+            var optional = m.extra[0].optional;
             blk: {
                 var comma_it: CommaIterator = .{ .text = l };
                 const first = comma_it.next() orelse break :blk;
