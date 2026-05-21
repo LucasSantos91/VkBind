@@ -774,7 +774,23 @@ pub const Registry = struct {
             }
         }
 
+        self.sortBits();
+
         return self;
+    }
+
+    fn sortBits(self: *@This()) void {
+        var it = self.types.iterator();
+        while (it.next()) |e| if (e.value_ptr.type == .flag_bits) {
+            const f = &e.value_ptr.type.flag_bits;
+            const B = FlagBits.Bit;
+            const lessThan = struct {
+                pub fn lessThan(_: void, lhs: B, rhs: B) bool {
+                    return lhs.bitpos < rhs.bitpos;
+                }
+            }.lessThan;
+            std.sort.pdq(B, @constCast(f.bits), {}, lessThan);
+        };
     }
 
     fn parseEnums(self: *@This(), xml: XmlNode) void {
@@ -953,12 +969,26 @@ const render = struct {
         try writer.print("\n/// {s}\n", .{text});
     }
     fn printFlags(registry: Registry, name: []const u8, e: Registry.Flags, writer: *Writer) Writer.Error!void {
-        try writer.print("pub const {s}=packed struct(u{t}){{", .{ stripPrefix(name, "Vk"), e.bitwidth });
+        const stripped = stripPrefix(name, "Vk");
+        try writer.print("pub const {s}=packed struct(u{t}){{", .{ stripped, e.bitwidth });
         if (e.bit_flags) |flag_bits_name| {
             const flag_bits_ = registry.resolveAlias(flag_bits_name);
             if (flag_bits_.type != .flag_bits) panic("Expected {s} to be FlagBits", .{flag_bits_name});
             const flag_bits = flag_bits_.type.flag_bits;
-            _ = flag_bits;
+            var last_bitpos = if (flag_bits.bits.len != 0) flag_bits.bits[0].bitpos else undefined;
+            for (flag_bits.bits) |b| {
+                try printComment(b.comment, writer);
+                const diff = b.bitpos - last_bitpos;
+                if (diff > 1) {
+                    try writer.print("_reserved_{}:u{} = 0,", .{ b.bitpos, diff - 1 });
+                }
+                try writer.print("@\"{s}\":bool=false,", .{stripEnumNameAndBitSuffix(b.name, stripped)});
+                last_bitpos = b.bitpos;
+            }
+            for (flag_bits.aggregates) |agg| {
+                try printComment(agg.comment, writer);
+                try writer.print("pub const @\"{s}\":@This() = @bitCast({s});", .{ agg.name, agg.value });
+            }
         }
         try writer.writeAll("};");
     }
@@ -968,11 +998,7 @@ const render = struct {
         try writer.print("pub const {s}=enum(u{t}){{", .{ stripPrefix(name, "Vk"), e.bitwidth });
         for (e.bits) |b| {
             try printComment(b.comment, writer);
-            try writer.print("@\"{s}\"=1<<{},", .{ stripEnumName(b.name, stripped_name), b.bitpos });
-        }
-        for (e.bit_aliases) |a| {
-            try printComment(a.comment, writer);
-            try writer.print("pub const @\"{s}\"=@This().@\"{s}\";", .{ stripEnumName(a.name, stripped_name), stripEnumName(a.canonical, stripped_name) });
+            try writer.print("@\"{s}\"=1<<{},", .{ stripEnumNameAndBitSuffix(b.name, stripped_name), b.bitpos });
         }
         try writer.writeAll("};");
     }
@@ -990,6 +1016,16 @@ const render = struct {
             e_name = e_name[under..];
         }
         return stripped;
+    }
+    fn stripBitSuffix(name: []const u8) []const u8 {
+        if (std.mem.findLast(u8, name, "_BIT")) |i| {
+            return name[0..i];
+        }
+        return name;
+    }
+    fn stripEnumNameAndBitSuffix(entry_name: []const u8, enum_name: []const u8) []const u8 {
+        const n = stripEnumName(entry_name, enum_name);
+        return stripBitSuffix(n);
     }
     fn printEnum(name: []const u8, e: Registry.Enum, writer: *Writer) Writer.Error!void {
         const stripped_name = stripPrefix(name, "Vk");
