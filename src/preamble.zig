@@ -59,6 +59,8 @@ pub const IOSurfaceRef = opaque {};
 pub const OHNativeWindow = opaque {};
 pub const OHBufferHandle = opaque {};
 pub const OH_NativeBuffer = opaque {};
+pub const ubm_device = opaque {};
+pub const ubm_surface = opaque {};
 
 pub fn FlagsMixin(comptime Flags: type, comptime FlagBits: type) type {
     return struct {
