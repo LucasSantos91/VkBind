@@ -928,7 +928,14 @@ pub const Registry = struct {
         }
     }
     fn parseCommand(self: *@This(), xml: XmlNode) void {
-        const proto = xml.getChildNode("proto") orelse @panic("Missing command prototype");
+        const proto = blk: {
+            var it = xml.childrenIterator();
+            while (it.nextNode("proto")) |node| {
+                if (self.matchApi(node)) break :blk node;
+            }
+            @panic("Missing command prototype");
+        };
+
         const ret_and_name: CVar = .parse(proto);
         const new = self.addCommand(ret_and_name.name);
         new.* = .{
@@ -940,6 +947,7 @@ pub const Registry = struct {
         var params: std.ArrayList(ZigVar) = .empty;
         var it = xml.childrenIterator();
         while (it.nextNode("param")) |node| {
+            if (!self.matchApi(node)) continue;
             params.append(self.allocator, .parse(node)) catch @panic("oom");
         }
         new.params = params.toOwnedSlice(self.allocator) catch @panic("oom");
