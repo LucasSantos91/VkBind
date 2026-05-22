@@ -1087,7 +1087,21 @@ const render = struct {
             try writer.print("sType: StructureType=.{s},", .{stripPrefix(s_type, "VK_STRUCTURE_TYPE_")});
             members = members[1..];
         }
+        var in_bitfield = false;
+        var bit_field_index: usize = 0;
         for (members) |m| {
+            if (m.c_var.type.amount == .bitfield) {
+                if (!in_bitfield) {
+                    try writer.print("p{}:packed struct{{", .{bit_field_index});
+                    bit_field_index += 1;
+                    in_bitfield = true;
+                }
+            } else {
+                if (in_bitfield) {
+                    try writer.writeAll("},");
+                    in_bitfield = false;
+                }
+            }
             const l = m.extra[0].len;
             var optional = m.extra[0].optional;
             blk: {
@@ -1123,6 +1137,9 @@ const render = struct {
                 try writer.writeByte(')');
             }
             try writer.writeByte(',');
+        }
+        if (in_bitfield) {
+            try writer.writeAll("},");
         }
         try writer.writeAll("};");
     }
