@@ -1027,10 +1027,10 @@ pub const Registry = struct {
                     return;
                 }
                 if (xml.attr.get("bitpos")) |bitpos_text| {
-                    for (b.bits) |a| {
-                        if (std.mem.eql(u8, a.name, bitpos_text)) return;
-                    }
                     const bitpos = std.fmt.parseInt(FlagBits.Bitpos, bitpos_text, 10) catch panic("Failed to parse bitpos for enum extension: {s}", .{name});
+                    for (b.bits) |a| {
+                        if (a.bitpos == bitpos) return;
+                    }
                     const new_bit: FlagBits.Bit = .{
                         .bitpos = bitpos,
                         .name = name,
