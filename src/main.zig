@@ -504,7 +504,7 @@ pub const Registry = struct {
                     } else break;
                 }
             }
-            if (xml.attr.get("len")) |len| {
+            if (xml.attr.get("altlen") orelse xml.attr.get("len")) |len| {
                 var it: CommaIterator = .{ .text = len.* };
                 for (&result.extra) |*e| {
                     if (it.next()) |text| {
@@ -963,6 +963,9 @@ pub const Registry = struct {
     }
     fn parseExtension(self: *@This(), xml: XmlNode) void {
         var require_it = xml.childrenIterator();
+        if (xml.attr.get("supported")) |api| {
+            if (!self.matchApiText(api.*)) return;
+        }
         const number = xml.attr.get("number") orelse @panic("Missing extension number");
         while (require_it.nextNode("require")) |node| {
             var enum_it = node.childrenIterator();
