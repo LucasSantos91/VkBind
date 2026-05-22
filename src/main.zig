@@ -87,7 +87,7 @@ const XmlNode = struct {
             for (self.children) |c| {
                 try writer.print("{f}", .{c});
             }
-            try writer.print("</{s}>\n", .{self.tag});
+            try writer.print("\n", .{self.tag});
         }
     }
     fn deinitAttr(attr: Attr, allocator: Allocator) void {
@@ -381,7 +381,7 @@ pub const Registry = struct {
     };
     const Basetype = struct {};
     const Foreign = struct {};
-    const BaseType = struct {
+    const CBaseType = struct {
         pub const max_ptr = 2;
         const PtrKind = enum {
             @"const",
@@ -403,7 +403,7 @@ pub const Registry = struct {
             bitfield: []const u8,
         };
 
-        base: BaseType,
+        base: CBaseType,
         amount: Amount,
     };
     const CVar = struct {
@@ -489,7 +489,7 @@ pub const Registry = struct {
         };
 
         c_var: CVar,
-        extra: [BaseType.max_ptr]Ptr,
+        extra: [CBaseType.max_ptr]Ptr,
 
         pub fn parse(xml: XmlNode) @This() {
             var result: @This() = .{
@@ -520,8 +520,14 @@ pub const Registry = struct {
     };
 
     const Funcpointer = struct {
-        ret: CType,
+        ret: CBaseType,
         params: []const CVar,
+    };
+    const Command = struct {
+        ret: CBaseType,
+        params: []const ZigVar,
+        success_codes: []const u8,
+        error_codes: []const u8,
     };
 
     const Type = union(enum) {
@@ -545,6 +551,7 @@ pub const Registry = struct {
     };
 
     const VkTypes = std.StringHashMapUnmanaged(TypeCommon);
+    const Commands = std.StringHashMapUnmanaged(Command);
     const Constant = struct {
         name: []const u8,
         value: []const u8,
@@ -557,6 +564,7 @@ pub const Registry = struct {
     authors: []const []const u8 = &.{},
     types: VkTypes = .{},
     constants: []const Constant = &.{},
+    commands: Commands = .{},
 
     fn parseAuthorTags(self: *@This(), xml: XmlNode) void {
         if (self.authors.len != 0) @panic("Duplicate tags section");
@@ -599,6 +607,11 @@ pub const Registry = struct {
     fn addType(self: *@This(), name: []const u8) *TypeCommon {
         const gp = self.types.getOrPut(self.allocator, name) catch @panic("oom");
         if (gp.found_existing) panic("Duplicate type name: {s}", .{name});
+        return gp.value_ptr;
+    }
+    fn addCommand(self: *@This(), name: []const u8) *Command {
+        const gp = self.commands.getOrPut(self.allocator, name) catch @panic("oom");
+        if (gp.found_existing) panic("Duplicate command: {s}", .{name});
         return gp.value_ptr;
     }
     fn forceGetChild(xml: XmlNode, comptime tag: []const u8) XmlNode {
@@ -692,7 +705,7 @@ pub const Registry = struct {
             .comment = getComment(xml),
             .type = .{ .funcpointer = .{
                 .params = params.toOwnedSlice(self.allocator) catch @panic("oom"),
-                .ret = ret_and_name.type,
+                .ret = ret_and_name.type.base,
             } },
         };
     }
@@ -903,8 +916,35 @@ pub const Registry = struct {
         flag_bits.bit_aliases = aliases.toOwnedSlice(self.allocator) catch @panic("oom");
     }
     fn parseCommands(self: *@This(), xml: XmlNode) void {
-        _ = self; // autofix
-        _ = xml; // autofix
+        var it = xml.childrenIterator();
+        while (it.nextNode("command")) |node| {
+            if (!self.matchApi(node)) continue;
+            if (node.attr.get("alias")) |alias| {
+                const canon = self.commands.getPtr(alias.*) orelse panic("Failed to find command for alias: {s}", .{alias.*});
+                const name = node.attr.get("name") orelse panic("Nameless alias: {s}", .{alias.*});
+                const new = self.addCommand(name.*);
+                new.* = canon.*;
+                continue;
+            }
+            self.parseCommand(node);
+        }
+    }
+    fn parseCommand(self: *@This(), xml: XmlNode) void {
+        const proto = xml.getChildNode("proto") orelse @panic("Missing command prototype");
+        const ret_and_name: CVar = .parse(proto);
+        const new = self.addCommand(ret_and_name.name);
+        new.* = .{
+            .error_codes = if (xml.attr.get("errorcodes")) |e| e.* else &.{},
+            .success_codes = if (xml.attr.get("successcodes")) |e| e.* else &.{},
+            .ret = ret_and_name.type.base,
+            .params = undefined,
+        };
+        var params: std.ArrayList(ZigVar) = .empty;
+        var it = xml.childrenIterator();
+        while (it.nextNode("param")) |node| {
+            params.append(self.allocator, .parse(node)) catch @panic("oom");
+        }
+        new.params = params.toOwnedSlice(self.allocator) catch @panic("oom");
     }
     fn parseFeature(self: *@This(), xml: XmlNode) void {
         _ = self; // autofix
@@ -1180,19 +1220,29 @@ const render = struct {
             try writer.print("u{s}", .{c_type.amount.bitfield});
             return;
         }
-        for (c_type.base.ptrs.constSlice()) |k| {
+        try printCBaseType(c_type.base, writer);
+        if (c_type.amount == .array) {
+            const ar = c_type.amount.array;
+            switch (ar) {
+                .literal => |l| try writer.writeAll(l),
+                .constant => |c| try writeConstant(c, writer),
+            }
+        }
+    }
+    fn printCBaseType(base_type: Registry.CBaseType, writer: *Writer) Writer.Error!void {
+        for (base_type.ptrs.constSlice()) |k| {
             try writer.writeAll("[*c]");
             switch (k) {
                 .@"const" => try writer.writeAll("const "),
                 .mutable => {},
             }
         }
-        if (c_type.base.ptrs.len != 0 and std.mem.eql(u8, c_type.base.name, "void")) {
+        if (base_type.ptrs.len != 0 and std.mem.eql(u8, base_type.name, "void")) {
             try writer.writeAll("anyopaque");
             return;
         }
 
-        try printGenericTypeName(c_type.base.name, writer);
+        try printGenericTypeName(base_type.name, writer);
     }
 
     fn printCVar(c_var: Registry.CVar, writer: *Writer) Writer.Error!void {
@@ -1207,7 +1257,7 @@ const render = struct {
             try writer.writeByte(',');
         }
         try writer.writeAll(")callconv(vulkan_api)");
-        try printCType(e.ret, writer);
+        try printCBaseType(e.ret, writer);
         try writer.writeByte(';');
     }
     fn printAlias(name: []const u8, e: Registry.Alias, writer: *Writer) Writer.Error!void {
@@ -1236,7 +1286,7 @@ const render = struct {
             }
         }
     }
-    pub fn render(registry: Registry, writer: *Writer) Writer.Error!void {
+    pub fn render(registry: Registry, writer: *Writer, allocator: Allocator) Writer.Error!void {
         try writer.print("{s}\n", .{@embedFile("preamble.zig")});
         try printConstants(registry.constants, writer);
         var it = registry.types.iterator();
@@ -1257,6 +1307,114 @@ const render = struct {
                 .alias => |e| try printAlias(name, e, writer),
             }
         }
+
+        try printCommands(registry, writer, allocator);
+    }
+
+    fn printResultEntry(name: []const u8, writer: *Writer) Writer.Error!void {
+        if (std.mem.eql(u8, name, "VK_ERROR_UNKNOWN")) return;
+        try writer.print("{[name]s}=@intFromEnum(Result.{[name]s}),", .{ .name = stripPrefix(name, "VK_") });
+    }
+    fn printCommandName(name: []const u8, writer: *Writer) Writer.Error!void {
+        const stripped = stripPrefix(name, "vk");
+        if (stripped.len == 0) @panic("Empty command name");
+        try writer.writeByte(std.ascii.toLower(stripped[0]));
+        try writer.writeAll(stripped[1..]);
+    }
+
+    pub fn printCommands(registry: Registry, writer: *Writer, allocator: Allocator) Writer.Error!void {
+        var clone = registry.commands.clone(allocator) catch @panic("oom");
+        const globalCommands: []const []const u8 = &.{
+            "vkEnumerateInstanceVersion",
+            "vkEnumerateInstanceExtensionProperties",
+            "vkEnumerateInstanceLayerProperties",
+            "vkCreateInstance",
+        };
+        const conv_funcs =
+            \\pub fn getType(comptime self: @This()) type{
+            \\const n = @tagName(self);
+            \\const N = std.ascii.toUpper(n[0]) ++ n[1..];
+            \\return @field(@This(), N);
+            \\}};
+        ;
+        {
+            try writer.writeAll("pub const GlobalFunctions=enum{");
+            for (globalCommands) |com_name| {
+                try printCommandName(com_name, writer);
+                try writer.writeByte(',');
+            }
+            for (globalCommands) |com_name| {
+                const c = clone.fetchRemove(com_name) orelse panic("Missing global command: {s}", .{com_name});
+                try printCommandType(com_name, c.value, writer);
+            }
+            try writer.writeAll(conv_funcs);
+        }
+        {
+            try writer.writeAll("pub const DeviceFunctions=enum{");
+            var command_it = clone.iterator();
+            while (command_it.next()) |entry| {
+                const c = entry.value_ptr.*;
+                if (c.params.len != 0 and std.mem.eql(u8, c.params[0].c_var.type.base.name, "VkInstance")) continue;
+                try printCommandName(entry.key_ptr.*, writer);
+                try writer.writeByte(',');
+            }
+        }
+        {
+            var command_it = clone.iterator();
+            while (command_it.next()) |entry| {
+                const c = entry.value_ptr.*;
+                if (c.params.len != 0 and std.mem.eql(u8, c.params[0].c_var.type.base.name, "VkInstance")) continue;
+                try printCommandType(entry.key_ptr.*, entry.value_ptr.*, writer);
+                clone.removeByPtr(entry.key_ptr);
+            }
+            try writer.writeAll(conv_funcs);
+        }
+        {
+            try writer.writeAll("pub const InstanceFunctions=enum{");
+            var command_it = clone.iterator();
+            while (command_it.next()) |entry| {
+                try printCommandName(entry.key_ptr.*, writer);
+                try writer.writeByte(',');
+            }
+        }
+        {
+            var command_it = registry.commands.iterator();
+            while (command_it.next()) |entry| {
+                try printCommandType(entry.key_ptr.*, entry.value_ptr.*, writer);
+            }
+            try writer.writeAll(conv_funcs);
+        }
+    }
+    pub fn printCommandType(name: []const u8, c: Registry.Command, writer: *Writer) Writer.Error!void {
+        const stripped = stripPrefix(name, "vk");
+        if (c.success_codes.len != 0) {
+            try writer.print("pub const {s}Result = enum(@typeInfo(Result).@\"enum\".tag_type){{", .{stripped});
+            {
+                var it: CommaIterator = .{ .text = c.success_codes };
+                while (it.next()) |t| {
+                    try printResultEntry(t, writer);
+                }
+            }
+            {
+                var it: CommaIterator = .{ .text = c.error_codes };
+                while (it.next()) |t| {
+                    try printResultEntry(t, writer);
+                }
+            }
+            try writer.writeAll("pub fn toResult(self: @This())Result{return @enumFromInt(@intFromEnum(self));}};");
+        }
+        try writer.print("pub const {s} = fn(", .{stripped});
+        for (c.params) |p| {
+            try printZigVar(p, c.params, writer);
+            try writer.writeByte(',');
+        }
+        try writer.writeAll(")callconv(vulkan_api)");
+        if (c.success_codes.len != 0) {
+            try writer.print("{s}Result", .{stripped});
+        } else {
+            try printCBaseType(c.ret, writer);
+        }
+        try writer.writeByte(';');
     }
 };
 
@@ -1294,7 +1452,7 @@ pub fn main(init: std.process.Init) !void {
     const source = blk: {
         var writer: Writer.Allocating = .init(allocator);
         const registry = Registry.parse(api, xml, allocator);
-        try render.render(registry, &writer.writer);
+        try render.render(registry, &writer.writer, allocator);
         break :blk try writer.toOwnedSliceSentinel(0);
     };
 
