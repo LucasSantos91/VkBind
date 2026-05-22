@@ -124,3 +124,28 @@ fn nullValue(comptime T: type) T {
         else => @bitCast(0),
     };
 }
+
+pub fn getFunctionVkName(func: anytype) []const u8 {
+    const t = @tagName(func);
+    return "vk" ++ std.ascii.toUpper(t[0]) ++ t[1..];
+}
+fn MakeLoader(comptime Functions: type, comptime funcs: []const Functions) type {
+    var types: [funcs.len]type = undefined;
+    var names: [funcs.len][]const u8 = undefined;
+    const attr: [funcs.len]std.builtin.Type.StructField.Attributes = @splat(.{});
+    for (funcs, &types, &names) |f, *t, *n| {
+        t.* = f.getPtrType();
+        n.* = @tagName(f);
+    }
+    return @Struct(.@"extern", null, &names, &types, attr);
+}
+fn getFunctionNames(comptime Functions: type, comptime funcs: []const Functions) []const []const u8 {
+    comptime {
+        var result: [funcs.len][]const u8 = undefined;
+        for (funcs, &result) |f, *r| {
+            r.* = getFunctionVkName(f);
+        }
+        const final = result;
+        return &final;
+    }
+}

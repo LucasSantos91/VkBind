@@ -1312,7 +1312,7 @@ const render = struct {
     }
 
     fn printResultEntry(name: []const u8, writer: *Writer) Writer.Error!void {
-        if (std.mem.eql(u8, name, "VK_ERROR_UNKNOWN")) return;
+        if (enumFromName(enum { VK_ERROR_UNKNOWN, VK_ERROR_VALIDATION_FAILED }, name)) |_| return;
         try writer.print("{[name]s}=@intFromEnum(Result.{[name]s}),", .{ .name = stripPrefix(name, "VK_") });
     }
     fn printCommandName(name: []const u8, writer: *Writer) Writer.Error!void {
@@ -1321,68 +1321,122 @@ const render = struct {
         try writer.writeByte(std.ascii.toLower(stripped[0]));
         try writer.writeAll(stripped[1..]);
     }
-
     pub fn printCommands(registry: Registry, writer: *Writer, allocator: Allocator) Writer.Error!void {
-        var clone = registry.commands.clone(allocator) catch @panic("oom");
-        const globalCommands: []const []const u8 = &.{
-            "vkEnumerateInstanceVersion",
-            "vkEnumerateInstanceExtensionProperties",
-            "vkEnumerateInstanceLayerProperties",
-            "vkCreateInstance",
+        const GlobalCommands = enum {
+            vkEnumerateInstanceVersion,
+            vkEnumerateInstanceExtensionProperties,
+            vkEnumerateInstanceLayerProperties,
+            vkCreateInstance,
         };
+        var base: std.ArrayList(CommandWithName) = .empty;
+        var instance: std.ArrayList(CommandWithName) = .empty;
+        var device: std.ArrayList(CommandWithName) = .empty;
+
+        var it = registry.commands.iterator();
+        while (it.next()) |c| {
+            const new: CommandWithName = .{
+                .name = c.key_ptr.*,
+                .command = c.value_ptr.*,
+            };
+            if (enumFromName(GlobalCommands, c.key_ptr.*)) |_| {
+                base.append(allocator, new) catch @panic("oom");
+                continue;
+            }
+            if (new.command.params.len != 0 and std.mem.eql(u8, new.command.params[0].c_var.name, "VkInstance")) {
+                instance.append(allocator, new) catch @panic("oom");
+                continue;
+            }
+            device.append(allocator, new) catch @panic("oom");
+        }
+        try printCommandGroup(base.items, writer, .{
+            .func_arg = "",
+            .group = "Global",
+            .load_param = ".null_handle",
+        });
+        try printCommandGroup(instance.items, writer, .{
+            .func_arg = ", instance: Instance",
+            .group = "Instance",
+            .load_param = "instance",
+        });
+        try printCommandGroup(device.items, writer, .{
+            .func_arg = ", device: Device",
+            .group = "Device",
+            .load_param = "device",
+        });
+    }
+    const PrintData = struct {
+        group: []const u8,
+        func_arg: []const u8,
+        load_param: []const u8,
+    };
+    const CommandWithName = struct {
+        command: Registry.Command,
+        name: []const u8,
+    };
+    pub fn printCommandGroup(commands: []const CommandWithName, writer: *Writer, print_data: PrintData) Writer.Error!void {
         const conv_funcs =
             \\pub fn getType(comptime self: @This()) type{
-            \\const n = @tagName(self);
-            \\const N = std.ascii.toUpper(n[0]) ++ n[1..];
-            \\return @field(@This(), N);
+            \\const t = @tagName(self);
+            \\return @field(@This(), std.ascii.toUpper(t[0]) ++ t[1..]);
+            \\}
+            \\pub fn getPtrType(comptime self: @This()) type{
+            \\return ?*const self.getType();
+            \\}
+            \\pub fn getReturnType(comptime self: @This()) type{
+            \\return @typeInfo(self.getType()).@"fn".return_type.?;
+            \\}
+            \\pub fn getVkName(comptime self: @This()) []const u8{
+            \\return getFunctionVkName(self);
             \\}};
         ;
         {
-            try writer.writeAll("pub const GlobalFunctions=enum{");
-            for (globalCommands) |com_name| {
-                try printCommandName(com_name, writer);
+            try writer.print("pub const {s}Functions=enum{{", .{print_data.group});
+            for (commands) |c| {
+                try printCommandName(c.name, writer);
                 try writer.writeByte(',');
             }
-            for (globalCommands) |com_name| {
-                const c = clone.fetchRemove(com_name) orelse panic("Missing global command: {s}", .{com_name});
-                try printCommandType(com_name, c.value, writer);
+            for (commands) |c| {
+                try printCommandType(c.name, c.command, writer);
             }
             try writer.writeAll(conv_funcs);
-        }
-        {
-            try writer.writeAll("pub const DeviceFunctions=enum{");
-            var command_it = clone.iterator();
-            while (command_it.next()) |entry| {
-                const c = entry.value_ptr.*;
-                if (c.params.len != 0 and std.mem.eql(u8, c.params[0].c_var.type.base.name, "VkInstance")) continue;
-                try printCommandName(entry.key_ptr.*, writer);
-                try writer.writeByte(',');
+            try writer.print(
+                \\pub fn {[group]s}Loader(comptime functions: []const {[group]s}Functions)type{{
+                \\return struct{{
+                \\    const Ptrs = MakeLoader({[group]s}Functions, functions);
+                \\    ptrs: Ptrs,
+                \\    pub fn init(load_func: anytype{[func_arg]s}) @This(){{
+                \\        var result: Ptrs = undefined;
+                \\        const slice: *[functions.len]?PfnVoidFunction = @ptrCast(&result);
+                \\        for(slice.*, getFunctionNames(functions)) |*ptr, name|{{
+                \\            ptr.* = load_func({[load_param]s},name);
+                \\        }}
+                \\        return .{{ .ptrs = result }};
+                \\    }}
+            , print_data);
+            for (commands) |c| {
+                try writer.writeAll("pub fn ");
+                try printCommandName(c.name, writer);
+                try writer.writeAll("(loader: *const @This(),");
+                for (c.command.params) |p| {
+                    try printZigVar(p, c.command.params, writer);
+                    try writer.writeByte(',');
+                }
+                try writer.writeByte(')');
+                if (c.command.success_codes.len != 0) {
+                    try writer.print("{s}Functions.{s}Result", .{ print_data.group, stripPrefix(c.name, "vk") });
+                } else {
+                    try printCBaseType(c.command.ret, writer);
+                }
+                try writer.writeAll("{return loader.ptrs.");
+                try printCommandName(c.name, writer);
+                try writer.writeAll(".?.*(");
+                for (c.command.params) |p| {
+                    try writer.writeAll(p.c_var.name);
+                    try writer.writeByte(',');
+                }
+                try writer.writeAll(");}");
             }
-        }
-        {
-            var command_it = clone.iterator();
-            while (command_it.next()) |entry| {
-                const c = entry.value_ptr.*;
-                if (c.params.len != 0 and std.mem.eql(u8, c.params[0].c_var.type.base.name, "VkInstance")) continue;
-                try printCommandType(entry.key_ptr.*, entry.value_ptr.*, writer);
-                clone.removeByPtr(entry.key_ptr);
-            }
-            try writer.writeAll(conv_funcs);
-        }
-        {
-            try writer.writeAll("pub const InstanceFunctions=enum{");
-            var command_it = clone.iterator();
-            while (command_it.next()) |entry| {
-                try printCommandName(entry.key_ptr.*, writer);
-                try writer.writeByte(',');
-            }
-        }
-        {
-            var command_it = registry.commands.iterator();
-            while (command_it.next()) |entry| {
-                try printCommandType(entry.key_ptr.*, entry.value_ptr.*, writer);
-            }
-            try writer.writeAll(conv_funcs);
+            try writer.writeAll("};}");
         }
     }
     pub fn printCommandType(name: []const u8, c: Registry.Command, writer: *Writer) Writer.Error!void {
