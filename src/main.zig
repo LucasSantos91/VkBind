@@ -947,12 +947,110 @@ pub const Registry = struct {
         new.params = params.toOwnedSlice(self.allocator) catch @panic("oom");
     }
     fn parseFeature(self: *@This(), xml: XmlNode) void {
-        _ = self; // autofix
-        _ = xml; // autofix
+        var require_it = xml.childrenIterator();
+        while (require_it.nextNode("require")) |node| {
+            var enum_it = node.childrenIterator();
+            while (enum_it.nextNode("enum")) |e| {
+                self.parseEnumExtension(e, null);
+            }
+        }
     }
     fn parseExtensions(self: *@This(), xml: XmlNode) void {
-        _ = self; // autofix
-        _ = xml; // autofix
+        var extension_it = xml.childrenIterator();
+        while (extension_it.nextNode("extension")) |node| {
+            self.parseExtension(node);
+        }
+    }
+    fn parseExtension(self: *@This(), xml: XmlNode) void {
+        var require_it = xml.childrenIterator();
+        const number = xml.attr.get("number") orelse @panic("Missing extension number");
+        while (require_it.nextNode("require")) |node| {
+            var enum_it = node.childrenIterator();
+            while (enum_it.nextNode("enum")) |e| {
+                self.parseEnumExtension(e, number.*);
+            }
+        }
+    }
+    fn parseEnumExtension(self: *@This(), xml: XmlNode, extension_number: ?[]const u8) void {
+        const extends = xml.attr.get("extends") orelse return;
+        const name = xml.attr.get("name") orelse @panic("Missing enum extension name");
+        const enum_type = self.types.getPtr(extends.*) orelse panic("Type not found: {s}", .{extends.*});
+        const comment = getComment(xml);
+        switch (enum_type.type) {
+            .@"enum" => |*en| {
+                if (xml.attr.get("alias")) |alias| {
+                    for (en.aliases) |a| {
+                        if (std.mem.eql(u8, a.name, name.*)) return;
+                    }
+                    const new_alias: Enum.Alias = .{
+                        .name = name.*,
+                        .canonical = alias.*,
+                        .comment = comment,
+                    };
+                    en.aliases = slice_tools.allocated.concat(Enum.Alias, @constCast(en.aliases), &.{new_alias}, self.allocator) catch @panic("oom");
+
+                    return;
+                }
+                for (en.values) |a| {
+                    if (std.mem.eql(u8, a.name, name.*)) return;
+                }
+                const value: []const u8 = if (xml.attr.get("offset")) |offset| blk: {
+                    const extnum = if (xml.attr.get("extnumber")) |x| x.* else extension_number orelse panic("Missing extnumber for enum: {s}", .{name.*});
+                    const is_neg = xml.attr.get("dir") != null;
+                    var temp: Writer.Allocating = .init(self.allocator);
+                    temp.writer.print("{s}(1000000000+({s}-1)*1000+{s})", .{ if (is_neg) "-" else "", extnum, offset.* }) catch @panic("oom");
+                    break :blk temp.toOwnedSlice() catch @panic("oom");
+                } else if (xml.attr.get("value")) |value|
+                    value.*
+                else
+                    @panic("Enum extension doesn't have offset or value");
+                const new: Enum.Value = .{
+                    .name = name.*,
+                    .value = value,
+                    .comment = comment,
+                };
+                en.values = slice_tools.allocated.concat(Enum.Value, @constCast(en.values), &.{new}, self.allocator) catch @panic("oom");
+            },
+            .flag_bits => |*b| {
+                if (xml.attr.get("alias")) |alias| {
+                    for (b.bit_aliases) |a| {
+                        if (std.mem.eql(u8, a.name, name.*)) return;
+                    }
+                    const new_alias: FlagBits.BitAlias = .{
+                        .name = name.*,
+                        .canonical = alias.*,
+                        .comment = comment,
+                    };
+                    b.bit_aliases = slice_tools.allocated.concat(FlagBits.BitAlias, @constCast(b.bit_aliases), &.{new_alias}, self.allocator) catch @panic("oom");
+
+                    return;
+                }
+                if (xml.attr.get("bitpos")) |bitpos_text| {
+                    for (b.bits) |a| {
+                        if (std.mem.eql(u8, a.name, bitpos_text.*)) return;
+                    }
+                    const bitpos = std.fmt.parseInt(FlagBits.Bitpos, bitpos_text.*, 10) catch panic("Failed to parse bitpos for enum extension: {s}", .{name.*});
+                    const new_bit: FlagBits.Bit = .{
+                        .bitpos = bitpos,
+                        .name = name.*,
+                        .comment = comment,
+                    };
+
+                    b.bits = slice_tools.allocated.concat(FlagBits.Bit, @constCast(b.bits), &.{new_bit}, self.allocator) catch @panic("oom");
+                } else if (xml.attr.get("value")) |value_text| {
+                    for (b.aggregates) |a| {
+                        if (std.mem.eql(u8, a.name, value_text.*)) return;
+                    }
+                    const agg: FlagBits.Aggregate = .{
+                        .name = name.*,
+                        .comment = comment,
+                        .value = value_text.*,
+                    };
+                    b.aggregates = slice_tools.allocated.concat(FlagBits.Aggregate, @constCast(b.aggregates), &.{agg}, self.allocator) catch @panic("oom");
+                } else panic("Missing value of bitpos for enum: {s}", .{name.*});
+            },
+            else => |t| panic("Unexpected type for enum extension: {t}", .{t}),
+        }
     }
 };
 
