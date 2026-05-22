@@ -20,10 +20,10 @@ fn ShortMap(comptime Key: type, comptime Value: type, comptime Eql: type) type {
         pub fn add(self: *@This(), kv: KeyValuePair, allocator: Allocator) Allocator.Error!void {
             self.kv = try slice_tools.allocated.concat(KeyValuePair, self.kv, &.{kv}, allocator);
         }
-        pub fn get(self: @This(), key: Key) ?*Value {
+        pub fn get(self: @This(), key: Key) ?Value {
             for (self.kv) |*this| {
                 if (self.eql.eql(key, this.key)) {
-                    return &this.value;
+                    return this.value;
                 }
             }
             return null;
@@ -497,7 +497,7 @@ pub const Registry = struct {
                 .extra = @splat(.{ .optional = false, .len = &.{} }),
             };
             if (xml.attr.get("optional")) |opt| {
-                var it: CommaIterator = .{ .text = opt.* };
+                var it: CommaIterator = .{ .text = opt };
                 for (&result.extra) |*e| {
                     if (it.next()) |text| {
                         e.optional = std.mem.eql(u8, text, "true");
@@ -505,7 +505,7 @@ pub const Registry = struct {
                 }
             }
             if (xml.attr.get("altlen") orelse xml.attr.get("len")) |len| {
-                var it: CommaIterator = .{ .text = len.* };
+                var it: CommaIterator = .{ .text = len };
                 for (&result.extra) |*e| {
                     if (it.next()) |text| {
                         e.len = text;
@@ -572,14 +572,14 @@ pub const Registry = struct {
         for (xml.children) |child| {
             const node = self.getNode(child) orelse continue;
             const name = node.attr.get("name") orelse @panic("Nameless author");
-            list.append(self.allocator, name.*) catch @panic("oom");
+            list.append(self.allocator, name) catch @panic("oom");
         }
         self.authors = list.toOwnedSlice(self.allocator) catch @panic("oom");
     }
     fn parseForeign(self: *@This(), xml: XmlNode) void {
         const name = xml.attr.get("name") orelse @panic("Nameless foreign type");
-        const gp = self.types.getOrPut(self.allocator, name.*) catch @panic("oom");
-        if (gp.found_existing) panic("Duplicate foreign type: {s}", .{name.*});
+        const gp = self.types.getOrPut(self.allocator, name) catch @panic("oom");
+        if (gp.found_existing) panic("Duplicate foreign type: {s}", .{name});
         gp.value_ptr.* = .{
             .type = .{ .foreign = .{} },
         };
@@ -596,7 +596,7 @@ pub const Registry = struct {
     }
     fn matchApi(self: *const @This(), xml: XmlNode) bool {
         const api = xml.attr.get("api") orelse return true;
-        return self.matchApiText(api.*);
+        return self.matchApiText(api);
     }
     fn getNode(self: *const @This(), node_or_text: XmlNode.NodeOrText) ?XmlNode {
         if (node_or_text == .text) return null;
@@ -630,8 +630,8 @@ pub const Registry = struct {
         new.* = .{ .type = .{ .flags = .{
             .bitwidth = bitwidth,
             .bit_flags = switch (bitwidth) {
-                .@"32" => if (xml.attr.get("requires")) |r| r.* else null,
-                .@"64" => if (xml.attr.get("bitvalues")) |r| r.* else null,
+                .@"32" => if (xml.attr.get("requires")) |r| r else null,
+                .@"64" => if (xml.attr.get("bitvalues")) |r| r else null,
             },
         } } };
     }
@@ -641,8 +641,8 @@ pub const Registry = struct {
     }
     fn parseStruct(self: *@This(), xml: XmlNode) void {
         const name = xml.attr.get("name") orelse @panic("Failed to find struct's name");
-        if (xml.children.len == 0) panic("Struct {s} is empty", .{name.*});
-        const new = self.addType(name.*);
+        if (xml.children.len == 0) panic("Struct {s} is empty", .{name});
+        const new = self.addType(name);
         new.* = .{
             .comment = getComment(xml),
             .type = .{ .@"struct" = .{
@@ -652,7 +652,7 @@ pub const Registry = struct {
         };
         const s = &new.type.@"struct";
         if (xml.children[0].getNode().attr.get("values")) |s_type| {
-            s.s_type = s_type.*;
+            s.s_type = s_type;
         }
         var members: std.ArrayList(ZigVar) = .empty;
         for (xml.children) |c| {
@@ -666,7 +666,7 @@ pub const Registry = struct {
     }
     fn parseUnion(self: *@This(), xml: XmlNode) void {
         const name = xml.attr.get("name") orelse @panic("Failed to find struct's name");
-        const new = self.addType(name.*);
+        const new = self.addType(name);
         new.* = .{
             .comment = getComment(xml),
             .type = .{ .@"union" = .{
@@ -725,12 +725,10 @@ pub const Registry = struct {
         };
     }
     fn getComment(xml: XmlNode) ?[]const u8 {
-        const comment_ptr = xml.attr.get("comment");
-        return if (comment_ptr) |c| c.* else null;
+        return xml.attr.get("comment");
     }
     fn parseAlias(self: *@This(), alias: []const u8, xml: XmlNode) void {
-        const name_ = xml.attr.get("name") orelse panic("Missing name for alias: {s}", .{alias});
-        const name = name_.*;
+        const name = xml.attr.get("name") orelse panic("Missing name for alias: {s}", .{alias});
         const gp = self.types.getOrPut(self.allocator, name) catch @panic("oom");
         if (gp.found_existing) panic("Duplicate name: {s}", .{name});
         const v = gp.value_ptr;
@@ -749,11 +747,11 @@ pub const Registry = struct {
             if (!std.mem.eql(u8, node.tag, "type")) continue;
             if (!self.matchApi(node)) continue;
             if (node.attr.get("alias")) |alias| {
-                self.parseAlias(alias.*, node);
+                self.parseAlias(alias, node);
                 continue;
             }
             if (node.attr.get("category")) |category| {
-                const c = enumFromName(enum { bitmask, @"enum", @"struct", @"union", handle, basetype, funcpointer }, category.*) orelse continue;
+                const c = enumFromName(enum { bitmask, @"enum", @"struct", @"union", handle, basetype, funcpointer }, category) orelse continue;
                 switch (c) {
                     .bitmask => self.parseBitmask(node),
                     .@"enum" => self.parseEnum(node),
@@ -808,7 +806,7 @@ pub const Registry = struct {
 
     fn parseEnums(self: *@This(), xml: XmlNode) void {
         const t = xml.attr.get("type") orelse @panic("Enum missing kind");
-        const kind = enumFromName(enum { constants, @"enum", bitmask }, t.*) orelse @panic("Unknown missing kind");
+        const kind = enumFromName(enum { constants, @"enum", bitmask }, t) orelse @panic("Unknown missing kind");
         switch (kind) {
             .constants => self.parseConstants(xml),
             .@"enum" => self.parseEnumBits(xml),
@@ -823,9 +821,9 @@ pub const Registry = struct {
             if (!self.matchApi(node)) continue;
             const new = constants.addOneAssumeCapacity();
             new.* = .{
-                .name = (node.attr.get("name") orelse @panic("Nameless constant")).*,
-                .value = (node.attr.get("value") orelse @panic("Valueless constant")).*,
-                .type = (node.attr.get("type") orelse @panic("Typeless constant")).*,
+                .name = node.attr.get("name") orelse @panic("Nameless constant"),
+                .value = node.attr.get("value") orelse @panic("Valueless constant"),
+                .type = node.attr.get("type") orelse @panic("Typeless constant"),
                 .comment = getComment(node),
             };
         }
@@ -833,7 +831,7 @@ pub const Registry = struct {
     }
     fn parseEnumBits(self: *@This(), xml: XmlNode) void {
         const name = xml.attr.get("name") orelse @panic("Missing enum name");
-        const new = self.addType(name.*);
+        const new = self.addType(name);
         new.* = .{
             .comment = getComment(xml),
             .type = .{ .@"enum" = .{
@@ -850,15 +848,15 @@ pub const Registry = struct {
             if (node.attr.get("alias")) |alias| {
                 const new_alias = aliases.addOne(self.allocator) catch @panic("oom");
                 new_alias.* = .{
-                    .canonical = alias.*,
-                    .name = entry_name.*,
+                    .canonical = alias,
+                    .name = entry_name,
                     .comment = getComment(node),
                 };
             } else {
                 const new_value = values.addOne(self.allocator) catch @panic("oom");
                 new_value.* = .{
-                    .name = entry_name.*,
-                    .value = (node.attr.get("value") orelse panic("Missing value for enum {s}", .{name.*})).*,
+                    .name = entry_name,
+                    .value = (node.attr.get("value") orelse panic("Missing value for enum {s}", .{name})),
                     .comment = getComment(node),
                 };
             }
@@ -868,7 +866,7 @@ pub const Registry = struct {
     }
     fn parseFlagBits(self: *@This(), xml: XmlNode) void {
         const name = xml.attr.get("name") orelse @panic("Missing bitmask name");
-        const new = self.addType(name.*);
+        const new = self.addType(name);
         new.* = .{
             .comment = getComment(xml),
             .type = .{ .flag_bits = .{
@@ -879,7 +877,7 @@ pub const Registry = struct {
         };
         const flag_bits = &new.type.flag_bits;
         if (xml.attr.get("bitwidth")) |bitwidth| {
-            flag_bits.bitwidth = enumFromName(Flags.Bitwidth, bitwidth.*) orelse panic("Unknown bitwidth: {s}", .{bitwidth.*});
+            flag_bits.bitwidth = enumFromName(Flags.Bitwidth, bitwidth) orelse panic("Unknown bitwidth: {s}", .{bitwidth});
         }
         var aggregates: std.ArrayList(FlagBits.Aggregate) = .empty;
         var aliases: std.ArrayList(FlagBits.BitAlias) = .empty;
@@ -891,22 +889,22 @@ pub const Registry = struct {
             if (node.attr.get("alias")) |alias| {
                 const new_alias = aliases.addOne(self.allocator) catch @panic("oom");
                 new_alias.* = .{
-                    .canonical = alias.*,
-                    .name = entry_name.*,
+                    .canonical = alias,
+                    .name = entry_name,
                     .comment = getComment(node),
                 };
             } else if (node.attr.get("value")) |value| {
                 const new_value = aggregates.addOne(self.allocator) catch @panic("oom");
                 new_value.* = .{
-                    .name = entry_name.*,
-                    .value = value.*,
+                    .name = entry_name,
+                    .value = value,
                     .comment = getComment(node),
                 };
             } else if (node.attr.get("bitpos")) |bitpos| {
                 const new_bit = bits.addOne(self.allocator) catch @panic("oom");
                 new_bit.* = .{
-                    .name = entry_name.*,
-                    .bitpos = std.fmt.parseInt(FlagBits.Bitpos, bitpos.*, 10) catch panic("Failed to parse bitpos: {s}", .{bitpos.*}),
+                    .name = entry_name,
+                    .bitpos = std.fmt.parseInt(FlagBits.Bitpos, bitpos, 10) catch panic("Failed to parse bitpos: {s}", .{bitpos}),
                     .comment = getComment(node),
                 };
             }
@@ -920,9 +918,9 @@ pub const Registry = struct {
         while (it.nextNode("command")) |node| {
             if (!self.matchApi(node)) continue;
             if (node.attr.get("alias")) |alias| {
-                const canon = self.commands.getPtr(alias.*) orelse panic("Failed to find command for alias: {s}", .{alias.*});
-                const name = node.attr.get("name") orelse panic("Nameless alias: {s}", .{alias.*});
-                const new = self.addCommand(name.*);
+                const canon = self.commands.getPtr(alias) orelse panic("Failed to find command for alias: {s}", .{alias});
+                const name = node.attr.get("name") orelse panic("Nameless alias: {s}", .{alias});
+                const new = self.addCommand(name);
                 new.* = canon.*;
                 continue;
             }
@@ -934,8 +932,8 @@ pub const Registry = struct {
         const ret_and_name: CVar = .parse(proto);
         const new = self.addCommand(ret_and_name.name);
         new.* = .{
-            .error_codes = if (xml.attr.get("errorcodes")) |e| e.* else &.{},
-            .success_codes = if (xml.attr.get("successcodes")) |e| e.* else &.{},
+            .error_codes = if (xml.attr.get("errorcodes")) |e| e else &.{},
+            .success_codes = if (xml.attr.get("successcodes")) |e| e else &.{},
             .ret = ret_and_name.type.base,
             .params = undefined,
         };
@@ -964,30 +962,30 @@ pub const Registry = struct {
     fn parseExtension(self: *@This(), xml: XmlNode) void {
         var require_it = xml.childrenIterator();
         if (xml.attr.get("supported")) |api| {
-            if (!self.matchApiText(api.*)) return;
+            if (!self.matchApiText(api)) return;
         }
         const number = xml.attr.get("number") orelse @panic("Missing extension number");
         while (require_it.nextNode("require")) |node| {
             var enum_it = node.childrenIterator();
             while (enum_it.nextNode("enum")) |e| {
-                self.parseEnumExtension(e, number.*);
+                self.parseEnumExtension(e, number);
             }
         }
     }
     fn parseEnumExtension(self: *@This(), xml: XmlNode, extension_number: ?[]const u8) void {
         const extends = xml.attr.get("extends") orelse return;
         const name = xml.attr.get("name") orelse @panic("Missing enum extension name");
-        const enum_type = self.types.getPtr(extends.*) orelse panic("Type not found: {s}", .{extends.*});
+        const enum_type = self.types.getPtr(extends) orelse panic("Type not found: {s}", .{extends});
         const comment = getComment(xml);
         switch (enum_type.type) {
             .@"enum" => |*en| {
                 if (xml.attr.get("alias")) |alias| {
                     for (en.aliases) |a| {
-                        if (std.mem.eql(u8, a.name, name.*)) return;
+                        if (std.mem.eql(u8, a.name, name)) return;
                     }
                     const new_alias: Enum.Alias = .{
-                        .name = name.*,
-                        .canonical = alias.*,
+                        .name = name,
+                        .canonical = alias,
                         .comment = comment,
                     };
                     en.aliases = slice_tools.allocated.concat(Enum.Alias, @constCast(en.aliases), &.{new_alias}, self.allocator) catch @panic("oom");
@@ -995,20 +993,20 @@ pub const Registry = struct {
                     return;
                 }
                 for (en.values) |a| {
-                    if (std.mem.eql(u8, a.name, name.*)) return;
+                    if (std.mem.eql(u8, a.name, name)) return;
                 }
                 const value: []const u8 = if (xml.attr.get("offset")) |offset| blk: {
-                    const extnum = if (xml.attr.get("extnumber")) |x| x.* else extension_number orelse panic("Missing extnumber for enum: {s}", .{name.*});
+                    const extnum = if (xml.attr.get("extnumber")) |x| x else extension_number orelse panic("Missing extnumber for enum: {s}", .{name});
                     const is_neg = xml.attr.get("dir") != null;
                     var temp: Writer.Allocating = .init(self.allocator);
-                    temp.writer.print("{s}(1000000000+({s}-1)*1000+{s})", .{ if (is_neg) "-" else "", extnum, offset.* }) catch @panic("oom");
+                    temp.writer.print("{s}(1000000000+({s}-1)*1000+{s})", .{ if (is_neg) "-" else "", extnum, offset }) catch @panic("oom");
                     break :blk temp.toOwnedSlice() catch @panic("oom");
                 } else if (xml.attr.get("value")) |value|
-                    value.*
+                    value
                 else
                     @panic("Enum extension doesn't have offset or value");
                 const new: Enum.Value = .{
-                    .name = name.*,
+                    .name = name,
                     .value = value,
                     .comment = comment,
                 };
@@ -1017,11 +1015,11 @@ pub const Registry = struct {
             .flag_bits => |*b| {
                 if (xml.attr.get("alias")) |alias| {
                     for (b.bit_aliases) |a| {
-                        if (std.mem.eql(u8, a.name, name.*)) return;
+                        if (std.mem.eql(u8, a.name, name)) return;
                     }
                     const new_alias: FlagBits.BitAlias = .{
-                        .name = name.*,
-                        .canonical = alias.*,
+                        .name = name,
+                        .canonical = alias,
                         .comment = comment,
                     };
                     b.bit_aliases = slice_tools.allocated.concat(FlagBits.BitAlias, @constCast(b.bit_aliases), &.{new_alias}, self.allocator) catch @panic("oom");
@@ -1030,27 +1028,27 @@ pub const Registry = struct {
                 }
                 if (xml.attr.get("bitpos")) |bitpos_text| {
                     for (b.bits) |a| {
-                        if (std.mem.eql(u8, a.name, bitpos_text.*)) return;
+                        if (std.mem.eql(u8, a.name, bitpos_text)) return;
                     }
-                    const bitpos = std.fmt.parseInt(FlagBits.Bitpos, bitpos_text.*, 10) catch panic("Failed to parse bitpos for enum extension: {s}", .{name.*});
+                    const bitpos = std.fmt.parseInt(FlagBits.Bitpos, bitpos_text, 10) catch panic("Failed to parse bitpos for enum extension: {s}", .{name});
                     const new_bit: FlagBits.Bit = .{
                         .bitpos = bitpos,
-                        .name = name.*,
+                        .name = name,
                         .comment = comment,
                     };
 
                     b.bits = slice_tools.allocated.concat(FlagBits.Bit, @constCast(b.bits), &.{new_bit}, self.allocator) catch @panic("oom");
                 } else if (xml.attr.get("value")) |value_text| {
                     for (b.aggregates) |a| {
-                        if (std.mem.eql(u8, a.name, value_text.*)) return;
+                        if (std.mem.eql(u8, a.name, value_text)) return;
                     }
                     const agg: FlagBits.Aggregate = .{
-                        .name = name.*,
+                        .name = name,
                         .comment = comment,
-                        .value = value_text.*,
+                        .value = value_text,
                     };
                     b.aggregates = slice_tools.allocated.concat(FlagBits.Aggregate, @constCast(b.aggregates), &.{agg}, self.allocator) catch @panic("oom");
-                } else panic("Missing value of bitpos for enum: {s}", .{name.*});
+                } else panic("Missing value of bitpos for enum: {s}", .{name});
             },
             else => |t| panic("Unexpected type for enum extension: {t}", .{t}),
         }
