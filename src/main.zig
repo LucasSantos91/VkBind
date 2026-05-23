@@ -1312,24 +1312,13 @@ const render = struct {
             blk: {
                 var comma_it: CommaIterator = .{ .text = l };
                 const first = comma_it.next() orelse break :blk;
-                if (enumFromName(enum { @"null-terminated", @"1" }, first)) |kind| {
-                    switch (kind) {
-                        .@"null-terminated" => {
-                            if (m.c_var.type.amount == .array)
-                                try writer.writeAll("\n/// Null-terminated\n");
-                        },
-                        .@"1" => {},
-                    }
-                } else {
-                    try writer.print("\n/// length given by {s}\n", .{l});
-                    if (!optional) {
-                        for (members) |mem| {
-                            if (!std.mem.eql(u8, mem.c_var.name, l)) continue;
-                            for (mem.extra) |ex| {
-                                if (ex.optional) {
-                                    optional = true;
-                                    break :blk;
-                                }
+                if (!optional and enumFromName(enum { @"null-terminated", @"1" }, first) == null) {
+                    for (members) |mem| {
+                        if (!std.mem.eql(u8, mem.c_var.name, l)) continue;
+                        for (mem.extra) |ex| {
+                            if (ex.optional) {
+                                optional = true;
+                                break :blk;
                             }
                         }
                     }
@@ -1349,6 +1338,22 @@ const render = struct {
         try writer.writeAll("};");
     }
     fn printZigVar(zig_var: Registry.ZigVar, others: []const Registry.ZigVar, writer: *Writer) Writer.Error!void {
+        blk: {
+            const l = zig_var.extra[0].len;
+            var comma_it: CommaIterator = .{ .text = l };
+            const first = comma_it.next() orelse break :blk;
+            if (enumFromName(enum { @"null-terminated", @"1" }, first)) |kind| {
+                switch (kind) {
+                    .@"null-terminated" => {
+                        if (zig_var.c_var.type.amount == .array)
+                            try writer.writeAll("\n/// Null-terminated\n");
+                    },
+                    .@"1" => {},
+                }
+            } else {
+                try writer.print("\n/// length given by {s}\n", .{l});
+            }
+        }
         try printComment(zig_var.c_var.comment, writer);
         try writer.print("@\"{s}\":", .{zig_var.c_var.name});
         try printZigType(zig_var, others, writer);
