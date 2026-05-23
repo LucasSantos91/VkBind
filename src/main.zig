@@ -528,6 +528,7 @@ pub const Registry = struct {
         params: []const ZigVar,
         success_codes: []const u8,
         error_codes: []const u8,
+        providers: Providers = .{},
     };
     const Providers = struct {
         feature: []const u8 = &.{},
@@ -985,7 +986,11 @@ pub const Registry = struct {
                 .@"enum" => {
                     self.parseEnumExtension(node, ext_number);
                 },
-                .command => {},
+                .command => {
+                    const com_name = node.attr.get("name") orelse continue;
+                    const c = self.commands.getPtr(com_name) orelse continue;
+                    c.providers.add(provider, self.allocator);
+                },
                 .type => {
                     const type_name = node.attr.get("name") orelse continue;
                     const t = self.types.getPtr(type_name) orelse continue;
@@ -1438,8 +1443,7 @@ const render = struct {
             }
         }
     }
-    fn printProvider(t: Registry.TypeCommon, writer: *Writer) Writer.Error!void {
-        const p = t.providers;
+    fn printProvider(p: Registry.Providers, writer: *Writer) Writer.Error!void {
         if (p.feature.len == 0 and p.extensions.len == 0) return;
         try writer.writeAll("\n/// Provided by ");
         if (p.feature.len != 0) {
@@ -1465,7 +1469,7 @@ const render = struct {
             const v = entry.value_ptr.*;
             if (v.type != .basetype and v.type != .foreign) {
                 try printComment(v.comment, writer);
-                try printProvider(entry.value_ptr.*, writer);
+                try printProvider(entry.value_ptr.providers, writer);
             }
             switch (v.type) {
                 .flags => |e| try printFlags(registry, name, e, writer),
@@ -1565,6 +1569,7 @@ const render = struct {
         {
             try writer.print("pub const {s}Functions=enum{{", .{print_data.group});
             for (commands) |c| {
+                try printProvider(c.command.providers, writer);
                 try printCommandName(c.name, writer);
                 try writer.writeByte(',');
             }
@@ -1587,6 +1592,7 @@ const render = struct {
                 \\    }}
             , print_data);
             for (commands) |c| {
+                try printProvider(c.command.providers, writer);
                 try writer.writeAll("pub fn ");
                 try printCommandName(c.name, writer);
                 try writer.writeAll("(loader: *const @This(),");
