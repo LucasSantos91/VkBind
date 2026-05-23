@@ -535,34 +535,52 @@ pub const Registry = struct {
         error_codes: []const u8,
         providers: Providers = .{},
     };
-    const Providers = struct {
-        feature: []const u8 = &.{},
-        extensions: []const []const u8 = &.{},
-
-        pub fn addFeature(self: *@This(), number: []const u8) void {
-            self.feature = number;
+    const VkVersion = struct {
+        number: []const u8 = &.{},
+        pub fn parse(number: []const u8) @This() {
+            return .{ .number = number };
         }
-        pub fn addExtension(self: *@This(), extension: []const u8, allocator: Allocator) void {
-            self.extensions = slice_tools.allocated.concat([]const u8, @constCast(self.extensions), &.{extension}, allocator) catch @panic("oom");
+    };
+    const Extension = struct {
+        name: []const u8 = &.{},
+        pub fn parse(name: []const u8) @This() {
+            return .{ .name = name };
+        }
+    };
+    const Providers = struct {
+        version: ?VkVersion = null,
+        extensions: []const Extension = &.{},
+
+        pub fn addFeature(self: *@This(), version: VkVersion) void {
+            self.version = version;
+        }
+        pub fn addExtension(self: *@This(), extension: Extension, allocator: Allocator) void {
+            self.extensions = slice_tools.allocated.concat(Extension, @constCast(self.extensions), &.{extension}, allocator) catch @panic("oom");
         }
         pub const Provider = union(enum) {
-            feature: []const u8,
-            extension: []const u8,
+            version: VkVersion,
+            extension: Extension,
 
             pub fn toProviders(self: @This(), allocator: Allocator) Providers {
                 return switch (self) {
-                    .feature => |f| .{ .feature = f, .extensions = &.{} },
+                    .version => |f| .{ .version = f },
                     .extension => |e| {
-                        const a = allocator.alloc([]const u8, 1) catch @panic("oom");
+                        const a = allocator.alloc(Extension, 1) catch @panic("oom");
                         a[0] = e;
-                        return .{ .feature = &.{}, .extensions = a };
+                        return .{ .extensions = a };
                     },
                 };
+            }
+            pub fn parseVersion(version: VkVersion) @This() {
+                return .{ .version = version };
+            }
+            pub fn parseExtension(ext: Extension) @This() {
+                return .{ .extension = ext };
             }
         };
         pub fn add(self: *@This(), provider: Provider, allocator: Allocator) void {
             switch (provider) {
-                .feature => |f| self.addFeature(f),
+                .version => |f| self.addFeature(f),
                 .extension => |e| self.addExtension(e, allocator),
             }
         }
@@ -605,6 +623,8 @@ pub const Registry = struct {
     types: VkTypes = .{},
     constants: []const Constant = &.{},
     commands: Commands = .{},
+    versions: VkVersion = .{},
+    extensions: Extension = .{},
 
     fn parseAuthorTags(self: *@This(), xml: XmlNode) void {
         if (self.authors.len != 0) @panic("Duplicate tags section");
@@ -992,7 +1012,8 @@ pub const Registry = struct {
     }
     fn parseFeature(self: *@This(), xml: XmlNode) void {
         const number = xml.attr.get("number") orelse @panic("Missing feature number");
-        self.parseRequires(xml, .{ .feature = number }, null);
+        const version: VkVersion = .parse(number);
+        self.parseRequires(xml, .parseVersion(version), null);
     }
     fn parseRequires(self: *@This(), xml: XmlNode, provider: Providers.Provider, ext_number: ?[]const u8) void {
         var require_it = xml.childrenIterator();
@@ -1033,7 +1054,8 @@ pub const Registry = struct {
         }
         const number = xml.attr.get("number") orelse @panic("Missing extension number");
         const ext_name = xml.attr.get("name") orelse @panic("Missing extension name");
-        self.parseRequires(xml, .{ .extension = ext_name }, number);
+        const ext: Extension = .parse(ext_name);
+        self.parseRequires(xml, .parseExtension(ext), number);
     }
     fn parseEnumExtension(self: *@This(), xml: XmlNode, extension_number: ?[]const u8, provider: Providers.Provider) void {
         const name = xml.attr.get("name") orelse @panic("Missing enum extension name");
@@ -1585,19 +1607,19 @@ const render = struct {
         }
     }
     fn printProvider(p: Registry.Providers, writer: *Writer) Writer.Error!void {
-        if (p.feature.len == 0 and p.extensions.len == 0) return;
+        if (p.version == null and p.extensions.len == 0) return;
         try writer.writeAll("\n/// Provided by ");
-        if (p.feature.len != 0) {
-            try writer.print("Vulkan {s}", .{p.feature});
+        if (p.version) |version| {
+            try writer.print("Vulkan {s}", .{version.number});
             if (p.extensions.len != 0) {
                 try writer.writeAll(", ");
             }
         }
         for (p.extensions[0..p.extensions.len -| 1]) |e| {
-            try writer.print("{s}, ", .{e});
+            try writer.print("{s}, ", .{e.name});
         }
         if (p.extensions.len != 0) {
-            try writer.writeAll(p.extensions[p.extensions.len - 1]);
+            try writer.writeAll(p.extensions[p.extensions.len - 1].name);
         }
         try writer.writeByte('\n');
     }
