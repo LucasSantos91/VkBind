@@ -182,3 +182,4 @@ fn getFunctionVkNames(comptime Functions: type, comptime funcs: []const Function
         return &final;
     }
 }
+fn maybeUnused(_: anytype) void {}

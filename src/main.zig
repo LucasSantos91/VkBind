@@ -1703,7 +1703,11 @@ const render = struct {
         }
         try writer.writeAll("};}");
 
-        try writer.writeAll("fn isSatisfied(self: @This(), apiVersion: ApiVersion, bitmask: Bitmask) bool{return switch(self){");
+        try writer.writeAll(
+            \\fn isSatisfied(self: @This(), apiVersion: ApiVersion, bitmask: Bitmask) bool{
+            \\maybeUnused(.{apiVersion, bitmask});
+            \\return switch(self){
+        );
         for (registry.extensions) |e| {
             try writer.print(".{s}=>", .{stripPrefix(e.name.name, "VK_")});
             if (e.depends) |d| {
@@ -1743,9 +1747,14 @@ const render = struct {
             \\for(ext) |e| if(!e.isSatisfied(apiVersion, bitmask)) return e;
             \\return true;
             \\}
+            \\/// Whether `self` is contained in `extensions`
             \\pub fn containedIn(self:@This(),extensions:[]const @This())bool{
             \\for(extensions)|e| if(e == self) return true;
             \\return false;
+            \\}
+            \\pub const Names = struct{ device: []const []const u8, instance: []const [] const u8};
+            \\pub fn getFilteredVkNames(comptime ext: []const @This()) Names{
+            \\return .{ .device = getVkNames(filter(ext, .device)), .instance = getVkNames(filter(ext,.instance)),};
             \\}
             \\};
         );
@@ -1901,7 +1910,6 @@ const render = struct {
             \\pub fn getVkNames(comptime funcs: []const @This()) []const []const u8{
             \\return getFunctionVkNames(@This(), funcs);
             \\}
-            \\};
         ;
         {
             try writer.print("pub const {s}Functions=enum{{", .{print_data.group});
@@ -1914,6 +1922,36 @@ const render = struct {
                 try printCommandType(c.name, c.command, writer);
             }
             try writer.writeAll(conv_funcs);
+            try writer.writeAll(
+                \\pub fn isSatified(command: @This(), apiVersion: ApiVersion, extensions: []const Extension)bool{
+                \\maybeUnused(.{apiVersion, extensions});
+                \\return switch(command){
+            );
+            for (commands) |c| {
+                try writer.writeByte('.');
+                try printCommandName(c.name, writer);
+                try writer.writeAll("=>");
+                const p = c.command.providers;
+                if (p.version == null and p.extensions.len == 0) {
+                    try writer.writeAll("true,");
+                    continue;
+                }
+                if (p.version) |version| {
+                    const minor_index = std.mem.findScalarLast(u8, version.number, '.') orelse panic("Failed to find minor version of: {s}", .{version.number});
+                    const minor = version.number[minor_index + 1 ..];
+                    try writer.print("apiVersion.ge(.{{.minor={s}}})", .{minor});
+                    if (p.extensions.len != 0) try writer.writeAll(" or ");
+                }
+                if (p.extensions.len != 0) {
+                    for (p.extensions[p.extensions.len -| 1..]) |e| {
+                        try writer.print("Extension.{s}.containedIn(extensions) or ", .{stripPrefix(e.name, "VK_")});
+                    }
+                    const last = p.extensions[p.extensions.len - 1];
+                    try writer.print("Extension.{s}.containedIn(extensions)", .{stripPrefix(last.name, "VK_")});
+                }
+                try writer.writeByte(',');
+            }
+            try writer.writeAll("};}};");
             try writer.print(
                 \\pub fn {[group]s}Loader(comptime functions: []const {[group]s}Functions)type{{
                 \\return struct{{
