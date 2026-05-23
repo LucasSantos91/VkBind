@@ -1199,7 +1199,23 @@ const render = struct {
         }
         try writer.print("\n/// {s}\n", .{text});
     }
-    fn printFlags(registry: Registry, name: []const u8, e: Registry.Flags, writer: *Writer) Writer.Error!void {
+    fn printMixins(mixins: []const []const u8, flags: []const u8, flag_bits: []const u8, mixin_kind: []const u8, writer: *Writer) Writer.Error!void {
+        for (mixins) |m| {
+            try writer.print("pub const {[mixin]s}={[mixin_kind]s}Mixin({[flags]s},{[flag_bits]s}).{[mixin]s};", .{
+                .mixin = m,
+                .mixin_kind = mixin_kind,
+                .flags = flags,
+                .flag_bits = flag_bits,
+            });
+        }
+    }
+    fn printFlags(registry: Registry, name: []const u8, e_c: Registry.TypeCommon, writer: *Writer) Writer.Error!void {
+        const mixins: []const []const u8 = &.{ "toInt", "fromInt", "merge", "intersection", "negation", "difference", "toBit", "fromBit", "set", "unset" };
+
+        try printComment(e_c.comment, writer);
+        try printProvider(e_c.providers, writer);
+        const e = e_c.type.flags;
+
         const stripped = stripPrefix(name, "Vk");
         try writer.print("pub const {s}=packed struct(u{t}){{", .{ stripped, e.bitwidth });
         if (e.bit_flags) |flag_bits_name| {
@@ -1222,19 +1238,37 @@ const render = struct {
                 try printProvider(agg.providers, writer);
                 try writer.print("pub const @\"{s}\":@This() = @bitCast({s});", .{ stripEnumNameAndBitSuffix(agg.name, stripped), agg.value });
             }
+
+            try printMixins(mixins, stripped, stripPrefix(flag_bits_name, "Vk"), "Flags", writer);
+
+            try writer.writeAll("};");
+            try printFlagBitsFromFlags(flag_bits_name, flag_bits_, writer, stripped);
+        } else {
+            try writer.writeAll("};");
         }
-        try writer.writeAll("};");
     }
-    fn printFlagBits(name: []const u8, e: Registry.FlagBits, writer: *Writer) Writer.Error!void {
+    fn printFlagBitsFromFlags(name: []const u8, e_c: Registry.TypeCommon, writer: *Writer, flags_name: []const u8) Writer.Error!void {
+        const mixins: []const []const u8 = &.{ "toFlags", "fromFlags", "toInt", "fromInt" };
+
+        try printComment(e_c.comment, writer);
+        try printProvider(e_c.providers, writer);
+        const e = e_c.type.flag_bits;
+
         const stripped_name = stripPrefix(name, "Vk");
 
-        try writer.print("pub const {s}=enum(u{t}){{", .{ stripPrefix(name, "Vk"), e.bitwidth });
+        try writer.print("pub const {s}=enum(u{t}){{", .{ stripped_name, e.bitwidth });
         for (e.bits) |b| {
             try printComment(b.comment, writer);
             try printProvider(b.providers, writer);
             try writer.print("@\"{s}\"=1<<{},", .{ stripEnumNameAndBitSuffix(b.name, stripped_name), b.bitpos });
         }
+
+        try printMixins(mixins, flags_name, stripped_name, "FlagBits", writer);
         try writer.writeAll("};");
+    }
+    fn printFlagBits(name: []const u8, e_c: Registry.TypeCommon, writer: *Writer) Writer.Error!void {
+        if (e_c.type.flag_bits.bits.len != 0) return;
+        try printFlagBitsFromFlags(name, e_c, writer, "undefined");
     }
     fn extractVersion(name: []const u8) []const u8 {
         var i = name.len;
@@ -1280,7 +1314,10 @@ const render = struct {
         const n = stripEnumName(entry_name, enum_name);
         return stripBitSuffix(n);
     }
-    fn printEnum(name: []const u8, e: Registry.Enum, writer: *Writer) Writer.Error!void {
+    fn printEnum(name: []const u8, e_c: Registry.TypeCommon, writer: *Writer) Writer.Error!void {
+        try printComment(e_c.comment, writer);
+        try printProvider(e_c.providers, writer);
+        const e = e_c.type.@"enum";
         const stripped_name = stripPrefix(name, "Vk");
         try writer.print("pub const {s}=enum(c_int){{", .{stripped_name});
         for (e.values) |v| {
@@ -1295,7 +1332,10 @@ const render = struct {
         }
         try writer.writeAll("};");
     }
-    fn printStruct(name: []const u8, e: Registry.Struct, writer: *Writer) Writer.Error!void {
+    fn printStruct(name: []const u8, e_c: Registry.TypeCommon, writer: *Writer) Writer.Error!void {
+        try printComment(e_c.comment, writer);
+        try printProvider(e_c.providers, writer);
+        const e = e_c.type.@"struct";
         try writer.print("pub const {s}=extern struct{{", .{stripPrefix(name, "Vk")});
         var members = e.members;
         if (e.s_type) |s_type| {
@@ -1417,7 +1457,10 @@ const render = struct {
         if (name.len <= 3) panic("Malformed constant name: {s}", .{name});
         try writer.writeAll(name[3..]);
     }
-    fn printUnion(name: []const u8, e: Registry.Union, writer: *Writer) Writer.Error!void {
+    fn printUnion(name: []const u8, e_c: Registry.TypeCommon, writer: *Writer) Writer.Error!void {
+        try printComment(e_c.comment, writer);
+        try printProvider(e_c.providers, writer);
+        const e = e_c.type.@"union";
         try writer.print("pub const {s}=extern union{{", .{stripPrefix(name, "Vk")});
         for (e.members) |m| {
             try printZigVar(m, e.members, writer);
@@ -1425,18 +1468,21 @@ const render = struct {
         }
         try writer.writeAll("};");
     }
-    fn printHandle(name: []const u8, e: Registry.Handle, writer: *Writer) Writer.Error!void {
+    fn printHandle(name: []const u8, e_c: Registry.TypeCommon, writer: *Writer) Writer.Error!void {
+        try printComment(e_c.comment, writer);
+        try printProvider(e_c.providers, writer);
+        const e = e_c.type.handle;
         try writer.print("pub const {s}=enum({s}){{null_handle,_}};", .{
             stripPrefix(name, "Vk"),
             if (e.dispatchable) "usize" else "u64",
         });
     }
-    fn printBasetype(name: []const u8, e: Registry.Basetype, writer: *Writer) Writer.Error!void {
+    fn printBasetype(name: []const u8, e: Registry.TypeCommon, writer: *Writer) Writer.Error!void {
         _ = name;
         _ = e;
         _ = writer;
     }
-    fn printForeign(name: []const u8, e: Registry.Foreign, writer: *Writer) Writer.Error!void {
+    fn printForeign(name: []const u8, e: Registry.TypeCommon, writer: *Writer) Writer.Error!void {
         _ = name;
         _ = e;
         _ = writer;
@@ -1487,7 +1533,10 @@ const render = struct {
         try writer.print("{s}:", .{c_var.name});
         try printCType(c_var.type, writer);
     }
-    fn printFuncpointer(name: []const u8, e: Registry.Funcpointer, writer: *Writer) Writer.Error!void {
+    fn printFuncpointer(name: []const u8, e_c: Registry.TypeCommon, writer: *Writer) Writer.Error!void {
+        try printComment(e_c.comment, writer);
+        try printProvider(e_c.providers, writer);
+        const e = e_c.type.funcpointer;
         try writer.print("pub const Pfn{s}= *const fn(", .{stripPrefix(name, "PFN_vk")});
         for (e.params) |p| {
             try printCVar(p, writer);
@@ -1497,7 +1546,10 @@ const render = struct {
         try printCBaseType(e.ret, writer);
         try writer.writeByte(';');
     }
-    fn printAlias(name: []const u8, e: Registry.Alias, writer: *Writer) Writer.Error!void {
+    fn printAlias(name: []const u8, e_c: Registry.TypeCommon, writer: *Writer) Writer.Error!void {
+        try printComment(e_c.comment, writer);
+        try printProvider(e_c.providers, writer);
+        const e = e_c.type.alias;
         const prefix = "Vk";
         const n = stripPrefix(name, prefix);
         const c = stripPrefix(e.canonical, prefix);
@@ -1548,21 +1600,17 @@ const render = struct {
         while (it.next()) |entry| {
             const name = entry.key_ptr.*;
             const v = entry.value_ptr.*;
-            if (v.type != .basetype and v.type != .foreign) {
-                try printComment(v.comment, writer);
-                try printProvider(entry.value_ptr.providers, writer);
-            }
             switch (v.type) {
-                .flags => |e| try printFlags(registry, name, e, writer),
-                .flag_bits => |e| try printFlagBits(name, e, writer),
-                .@"enum" => |e| try printEnum(name, e, writer),
-                .@"struct" => |e| try printStruct(name, e, writer),
-                .@"union" => |e| try printUnion(name, e, writer),
-                .handle => |e| try printHandle(name, e, writer),
-                .basetype => |e| try printBasetype(name, e, writer),
-                .funcpointer => |e| try printFuncpointer(name, e, writer),
-                .foreign => |e| try printForeign(name, e, writer),
-                .alias => |e| try printAlias(name, e, writer),
+                .flags => try printFlags(registry, name, v, writer),
+                .flag_bits => try printFlagBits(name, v, writer),
+                .@"enum" => try printEnum(name, v, writer),
+                .@"struct" => try printStruct(name, v, writer),
+                .@"union" => try printUnion(name, v, writer),
+                .handle => try printHandle(name, v, writer),
+                .basetype => try printBasetype(name, v, writer),
+                .funcpointer => try printFuncpointer(name, v, writer),
+                .foreign => try printForeign(name, v, writer),
+                .alias => try printAlias(name, v, writer),
             }
         }
 
