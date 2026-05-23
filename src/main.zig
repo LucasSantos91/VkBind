@@ -1350,7 +1350,7 @@ const render = struct {
     }
     fn printZigVar(zig_var: Registry.ZigVar, others: []const Registry.ZigVar, writer: *Writer) Writer.Error!void {
         try printComment(zig_var.c_var.comment, writer);
-        try writer.print("{s}:", .{zig_var.c_var.name});
+        try writer.print("@\"{s}\":", .{zig_var.c_var.name});
         try printZigType(zig_var, others, writer);
     }
     fn printZigType(zig_var: Registry.ZigVar, others: []const Registry.ZigVar, writer: *Writer) Writer.Error!void {
@@ -1675,8 +1675,7 @@ const render = struct {
                 try printCommandName(c.name, writer);
                 try writer.writeAll(".?.*(");
                 for (c.command.params) |p| {
-                    try writer.writeAll(p.c_var.name);
-                    try writer.writeByte(',');
+                    try writer.print("@\"{s}\",", .{p.c_var.name});
                 }
                 try writer.writeAll(");}");
             }
