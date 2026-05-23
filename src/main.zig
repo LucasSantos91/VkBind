@@ -1767,6 +1767,8 @@ const render = struct {
             }
             device.append(allocator, new) catch @panic("oom");
         }
+
+        try printExternGlobalFunctions(base.items, writer);
         try printCommandGroup(base.items, writer, .{
             .func_arg = "",
             .group = "Global",
@@ -1792,6 +1794,31 @@ const render = struct {
         command: Registry.Command,
         name: []const u8,
     };
+    fn printExternGlobalFunctions(commands: []const CommandWithName, writer: *Writer) Writer.Error!void {
+        try writer.writeAll(
+            \\
+            \\/// Provides global functions as load-time loaded functions.
+            \\pub const global_functions = struct{
+        );
+        for (commands) |c| {
+            try printProvider(c.command.providers, writer);
+            try writer.print("extern \"vulkan-1\" fn {s}(", .{c.name});
+            for (c.command.params) |p| {
+                try printZigVar(p, c.command.params, writer);
+                try writer.writeByte(',');
+            }
+            try writer.writeAll(") callconv(vulkan_api)");
+            if (c.command.success_codes.len != 0) {
+                try writer.print("GlobalFunctions.{s}Result", .{stripPrefix(c.name, "vk")});
+            } else {
+                try printCBaseType(c.command.ret, writer);
+            }
+            try writer.writeAll(";pub const ");
+            try printCommandName(c.name, writer);
+            try writer.print("={s};", .{c.name});
+        }
+        try writer.writeAll("};");
+    }
     pub fn printCommandGroup(commands: []const CommandWithName, writer: *Writer, print_data: PrintData) Writer.Error!void {
         const conv_funcs =
             \\pub fn getType(comptime self: @This()) type{
