@@ -535,46 +535,64 @@ pub const Registry = struct {
         error_codes: []const u8,
         providers: Providers = .{},
     };
-    const VkVersion = struct {
+    const VkVersionName = struct {
         number: []const u8 = &.{},
         pub fn parse(number: []const u8) @This() {
             return .{ .number = number };
         }
     };
-    const Extension = struct {
+    const ExtensionName = struct {
         name: []const u8 = &.{},
         pub fn parse(name: []const u8) @This() {
             return .{ .name = name };
         }
     };
-    const Providers = struct {
-        version: ?VkVersion = null,
-        extensions: []const Extension = &.{},
+    const Extension = struct {
+        name: ExtensionName,
+        kind: Kind,
+        promoted: ?[]const u8,
+        depends: ?[]const u8,
 
-        pub fn addFeature(self: *@This(), version: VkVersion) void {
+        pub const Kind = enum {
+            device,
+            instance,
+
+            pub fn parse(text: []const u8) @This() {
+                return enumFromName(@This(), text) orelse panic("Unknown extension type: {s}", .{text});
+            }
+        };
+    };
+    const VkVersion = struct {
+        name: VkVersionName,
+    };
+    const Providers = struct {
+        version: ?VkVersionName = null,
+        extensions: []const ExtensionName = &.{},
+
+        pub fn addFeature(self: *@This(), version: VkVersionName) void {
             self.version = version;
         }
-        pub fn addExtension(self: *@This(), extension: Extension, allocator: Allocator) void {
-            self.extensions = slice_tools.allocated.concat(Extension, @constCast(self.extensions), &.{extension}, allocator) catch @panic("oom");
+        pub fn addExtension(self: *@This(), extension: ExtensionName, allocator: Allocator) void {
+            self.extensions = slice_tools.allocated.concat(ExtensionName, @constCast(self.extensions), &.{extension}, allocator) catch @panic("oom");
         }
         pub const Provider = union(enum) {
-            version: VkVersion,
-            extension: Extension,
+            version: VkVersionName,
+            extension: ExtensionName,
 
             pub fn toProviders(self: @This(), allocator: Allocator) Providers {
                 return switch (self) {
                     .version => |f| .{ .version = f },
                     .extension => |e| {
-                        const a = allocator.alloc(Extension, 1) catch @panic("oom");
+                        const a = allocator.alloc(ExtensionName, 1) catch @panic("oom");
                         a[0] = e;
                         return .{ .extensions = a };
                     },
                 };
             }
-            pub fn parseVersion(version: VkVersion) @This() {
+            pub fn parseVersion(version: VkVersionName) @This() {
                 return .{ .version = version };
             }
-            pub fn parseExtension(ext: Extension) @This() {
+            pub fn parseExtension(ext: ExtensionName) @This() {
                 return .{ .extension = ext };
             }
         };
@@ -623,8 +641,8 @@ pub const Registry = struct {
     types: VkTypes = .{},
     constants: []const Constant = &.{},
     commands: Commands = .{},
-    versions: VkVersion = .{},
-    extensions: Extension = .{},
+    versions: []const VkVersion = &.{},
+    extensions: []const Extension = &.{},
 
     fn parseAuthorTags(self: *@This(), xml: XmlNode) void {
         if (self.authors.len != 0) @panic("Duplicate tags section");
@@ -1012,7 +1030,14 @@ pub const Registry = struct {
     }
     fn parseFeature(self: *@This(), xml: XmlNode) void {
         const number = xml.attr.get("number") orelse @panic("Missing feature number");
-        const version: VkVersion = .parse(number);
+        const version: VkVersionName = .parse(number);
+        if (xml.attr.get("apitype")) |apitype| blk: {
+            if (std.mem.eql(u8, apitype, "internal")) break :blk;
+            const new: VkVersion = .{
+                .name = version,
+            };
+            self.versions = slice_tools.allocated.concat(VkVersion, @constCast(self.versions), &.{new}, self.allocator) catch @panic("oom");
+        }
         self.parseRequires(xml, .parseVersion(version), null);
     }
     fn parseRequires(self: *@This(), xml: XmlNode, provider: Providers.Provider, ext_number: ?[]const u8) void {
@@ -1044,19 +1069,25 @@ pub const Registry = struct {
     }
     fn parseExtensions(self: *@This(), xml: XmlNode) void {
         var extension_it = xml.childrenIterator();
+        var extensions: std.ArrayList(Extension) = .empty;
         while (extension_it.nextNode("extension")) |node| {
-            self.parseExtension(node);
+            if (node.attr.get("supported")) |supported| {
+                if (std.mem.eql(u8, supported, "disabled")) continue;
+            }
+            const number = node.attr.get("number") orelse @panic("Missing extension number");
+            const ext_name = node.attr.get("name") orelse @panic("Missing extension name");
+            const new = extensions.addOne(self.allocator) catch @panic("oom");
+            new.* = .{
+                .name = .parse(ext_name),
+                .kind = .parse(node.attr.get("type") orelse panic("Missing type for extension: {s}", .{ext_name})),
+                .promoted = node.attr.get("promotedto"),
+                .depends = node.attr.get("depends"),
+            };
+            self.parseRequires(node, .parseExtension(new.name), number);
         }
+        self.extensions = extensions.toOwnedSlice(self.allocator) catch @panic("oom");
     }
-    fn parseExtension(self: *@This(), xml: XmlNode) void {
-        if (xml.attr.get("supported")) |supported| {
-            if (std.mem.eql(u8, supported, "disabled")) return;
-        }
-        const number = xml.attr.get("number") orelse @panic("Missing extension number");
-        const ext_name = xml.attr.get("name") orelse @panic("Missing extension name");
-        const ext: Extension = .parse(ext_name);
-        self.parseRequires(xml, .parseExtension(ext), number);
-    }
+
     fn parseEnumExtension(self: *@This(), xml: XmlNode, extension_number: ?[]const u8, provider: Providers.Provider) void {
         const name = xml.attr.get("name") orelse @panic("Missing enum extension name");
         const extends = xml.attr.get("extends") orelse {
@@ -1645,6 +1676,45 @@ const render = struct {
         }
 
         try printCommands(registry, writer, allocator);
+        try printExtensions(registry, writer);
+    }
+
+    fn printExtensions(registry: Registry, writer: *Writer) Writer.Error!void {
+        try printExtensionKind(registry, writer, .instance);
+        try printExtensionKind(registry, writer, .device);
+    }
+
+    fn printExtensionKind(registry: Registry, writer: *Writer, kind: Registry.Extension.Kind) Writer.Error!void {
+        {
+            const t = @tagName(kind);
+            try writer.print("pub const {c}{s}Extension = enum{{", .{ std.ascii.toUpper(t[0]), t[1..] });
+        }
+        for (registry.extensions) |e| {
+            if (e.kind != kind) continue;
+            try printExtension(e, writer);
+        }
+        try writer.writeAll(
+            \\pub fn getVkName(comptime self: @This()) []const u8{
+            \\return "VK_" ++ @tagName(self);
+            \\}
+            \\pub fn getVkNames(comptime extensions: []const @This()) []const []const u8{   
+            \\var result: [extensions.len][]const u8 = undefined;
+            \\for(&result, extensions) |*r, e| r.* = e.getVkName();
+            \\const final = result;
+            \\return &final;
+            \\}
+            \\};
+        );
+    }
+
+    fn printExtension(e: Registry.Extension, writer: *Writer) Writer.Error!void {
+        if (e.promoted) |p| {
+            try writer.print("\n/// Promoted to {s}\n", .{p});
+        }
+        if (e.depends) |d| {
+            try writer.print("\n/// depends on {s}\n", .{d});
+        }
+        try writer.print("{s},", .{stripPrefix(e.name.name, "VK_")});
     }
 
     fn printResultEntry(name: []const u8, writer: *Writer) Writer.Error!void {
