@@ -11,6 +11,19 @@ pub const Bool32 = enum(u32) {
     false,
     true,
 };
+pub const ApiVersion = packed struct(u32) {
+    patch: u11,
+    minor: u10,
+    major: u7,
+    variant: u3,
+
+    pub fn toInt(self: @This()) u32 {
+        return @bitCast(self);
+    }
+    pub fn fromInt(i: u32) @This() {
+        return @bitCast(i);
+    }
+};
 pub const DeviceSize = u64;
 pub const DeviceAddress = u64;
 pub const SampleMask = u32;

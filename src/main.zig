@@ -1031,8 +1031,8 @@ pub const Registry = struct {
     fn parseFeature(self: *@This(), xml: XmlNode) void {
         const number = xml.attr.get("number") orelse @panic("Missing feature number");
         const version: VkVersionName = .parse(number);
-        if (xml.attr.get("apitype")) |apitype| blk: {
-            if (std.mem.eql(u8, apitype, "internal")) break :blk;
+        const apitype = xml.attr.get("apitype");
+        if (apitype == null or !std.mem.eql(u8, apitype.?, "internal")) {
             const new: VkVersion = .{
                 .name = version,
             };
@@ -1466,8 +1466,18 @@ const render = struct {
             }
         }
         try printComment(zig_var.c_var.comment, writer);
-        try writer.print("@\"{s}\":", .{zig_var.c_var.name});
-        try printZigType(zig_var, others, writer);
+
+        //OVERRIDE: Overriding API versions from u32 to our own ApiVersion
+        if (enumFromName(enum { apiVersion, pApiVersion }, zig_var.c_var.name)) |n| {
+            const text = switch (n) {
+                .apiVersion => "apiVersion:ApiVersion",
+                .pApiVersion => "pApiVersion:*ApiVersion",
+            };
+            try writer.writeAll(text);
+        } else {
+            try writer.print("@\"{s}\":", .{zig_var.c_var.name});
+            try printZigType(zig_var, others, writer);
+        }
     }
     fn printZigType(zig_var: Registry.ZigVar, others: []const Registry.ZigVar, writer: *Writer) Writer.Error!void {
         if (zig_var.c_var.type.amount == .bitfield) {
