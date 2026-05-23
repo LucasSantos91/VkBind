@@ -1210,7 +1210,7 @@ const render = struct {
             for (flag_bits.aggregates) |agg| {
                 try printComment(agg.comment, writer);
                 try printProvider(agg.providers, writer);
-                try writer.print("pub const @\"{s}\":@This() = @bitCast({s});", .{ agg.name, agg.value });
+                try writer.print("pub const @\"{s}\":@This() = @bitCast({s});", .{ stripEnumNameAndBitSuffix(agg.name, stripped), agg.value });
             }
         }
         try writer.writeAll("};");
@@ -1226,6 +1226,18 @@ const render = struct {
         }
         try writer.writeAll("};");
     }
+    fn extractVersion(name: []const u8) []const u8 {
+        var i = name.len;
+        while (i != 0) {
+            i -= 1;
+            const n = name[i];
+            if (n < '0' or n > '9') {
+                i += 1;
+                break;
+            }
+        }
+        return name[i..];
+    }
     fn stripEnumName(entry_name: []const u8, enum_name: []const u8) []const u8 {
         var stripped = stripPrefix(entry_name, "VK_");
         if (entry_name.len <= enum_name.len) return stripped;
@@ -1233,12 +1245,19 @@ const render = struct {
         outer: while (true) {
             const under = std.mem.findScalar(u8, stripped, '_') orelse break;
             if (under > e_name.len) break;
-            for (stripped[0..under], e_name[0..under]) |entry, name| {
-                if (std.ascii.toUpper(name) != entry) break :outer;
+            const entry_segment = stripped[0..under];
+            for (entry_segment, e_name[0..under]) |entry, name| {
+                if (std.ascii.toUpper(name) != entry) {
+                    if (std.mem.eql(u8, entry_segment, extractVersion(e_name))) {
+                        stripped = stripped[under + 1 ..];
+                    }
+                    break :outer;
+                }
             }
             stripped = stripped[under + 1 ..];
             e_name = e_name[under..];
         }
+
         return stripped;
     }
     fn stripBitSuffix(name: []const u8) []const u8 {
