@@ -1052,20 +1052,20 @@ pub const Registry = struct {
         switch (enum_type.type) {
             .@"enum" => |*en| {
                 if (xml.attr.get("alias")) |alias| {
-                    for (en.aliases) |*a| {
+                    blk: for (en.aliases) |*a| {
                         if (std.mem.eql(u8, a.name, name)) {
                             @constCast(a).providers.add(provider, self.allocator);
-                            return;
+                            break :blk;
                         }
+                    } else {
+                        const new_alias: Enum.Alias = .{
+                            .name = name,
+                            .canonical = alias,
+                            .comment = comment,
+                            .providers = provider.toProviders(self.allocator),
+                        };
+                        en.aliases = slice_tools.allocated.concat(Enum.Alias, @constCast(en.aliases), &.{new_alias}, self.allocator) catch @panic("oom");
                     }
-                    const new_alias: Enum.Alias = .{
-                        .name = name,
-                        .canonical = alias,
-                        .comment = comment,
-                        .providers = provider.toProviders(self.allocator),
-                    };
-                    en.aliases = slice_tools.allocated.concat(Enum.Alias, @constCast(en.aliases), &.{new_alias}, self.allocator) catch @panic("oom");
-
                     return;
                 }
                 for (en.values) |*a| {
@@ -1094,20 +1094,26 @@ pub const Registry = struct {
             },
             .flag_bits => |*b| {
                 if (xml.attr.get("alias")) |alias| {
-                    for (b.bit_aliases) |*a| {
+                    blk: for (b.bit_aliases) |*a| {
                         if (std.mem.eql(u8, a.name, name)) {
                             @constCast(a).providers.add(provider, self.allocator);
-                            return;
+                            break :blk;
+                        }
+                    } else {
+                        const new_alias: FlagBits.BitAlias = .{
+                            .name = name,
+                            .canonical = alias,
+                            .comment = comment,
+                            .providers = provider.toProviders(self.allocator),
+                        };
+                        b.bit_aliases = slice_tools.allocated.concat(FlagBits.BitAlias, @constCast(b.bit_aliases), &.{new_alias}, self.allocator) catch @panic("oom");
+                    }
+                    inner: for (b.bits) |*a| {
+                        if (std.mem.eql(u8, a.name, alias)) {
+                            @constCast(a).providers.add(provider, self.allocator);
+                            break :inner;
                         }
                     }
-                    const new_alias: FlagBits.BitAlias = .{
-                        .name = name,
-                        .canonical = alias,
-                        .comment = comment,
-                        .providers = provider.toProviders(self.allocator),
-                    };
-                    b.bit_aliases = slice_tools.allocated.concat(FlagBits.BitAlias, @constCast(b.bit_aliases), &.{new_alias}, self.allocator) catch @panic("oom");
-
                     return;
                 }
                 if (xml.attr.get("bitpos")) |bitpos_text| {
@@ -1242,7 +1248,9 @@ const render = struct {
             try printMixins(mixins, stripped, stripPrefix(flag_bits_name, "Vk"), "Flags", writer);
 
             try writer.writeAll("};");
-            try printFlagBitsFromFlags(flag_bits_name, flag_bits_, writer, stripped);
+            if (flag_bits.bits.len != 0) {
+                try printFlagBitsFromFlags(flag_bits_name, flag_bits_, writer, stripped);
+            }
         } else {
             try writer.writeAll("};");
         }
