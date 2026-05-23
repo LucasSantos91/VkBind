@@ -1693,19 +1693,28 @@ const render = struct {
     }
 
     fn printExtensions(registry: Registry, writer: *Writer) Writer.Error!void {
-        try printExtensionKind(registry, writer, .instance);
-        try printExtensionKind(registry, writer, .device);
-    }
-
-    fn printExtensionKind(registry: Registry, writer: *Writer, kind: Registry.Extension.Kind) Writer.Error!void {
-        {
-            const t = @tagName(kind);
-            try writer.print("pub const {c}{s}Extension = enum{{", .{ std.ascii.toUpper(t[0]), t[1..] });
-        }
+        try writer.writeAll("pub const Extension = enum{pub const Type = enum{device, instance};");
         for (registry.extensions) |e| {
-            if (e.kind != kind) continue;
             try printExtension(e, writer);
         }
+        try writer.writeAll("pub fn getType(self: @This()) Type{return switch(self){");
+        for (registry.extensions) |e| {
+            try writer.print(".{s}=>.{t},", .{ stripPrefix(e.name.name, "VK_"), e.kind });
+        }
+        try writer.writeAll("};}");
+
+        try writer.writeAll("fn isSatisfied(self: @This(), apiVersion: ApiVersion, bitmask: Bitmask) bool{return switch(self){");
+        for (registry.extensions) |e| {
+            try writer.print(".{s}=>", .{stripPrefix(e.name.name, "VK_")});
+            if (e.depends) |d| {
+                try printDependencies(d, writer);
+            } else {
+                try writer.writeAll("true");
+            }
+            try writer.writeByte(',');
+        }
+        try writer.writeAll("};}");
+
         try writer.writeAll(
             \\pub fn getVkName(comptime self: @This()) []const u8{
             \\return "VK_" ++ @tagName(self);
@@ -1716,11 +1725,66 @@ const render = struct {
             \\const final = result;
             \\return &final;
             \\}
+            \\pub fn filter(comptime extensions: []const @This(), comptime @"type": Type) []const @This(){
+            \\var result: [extensions.len]@This() = undefined;
+            \\var count = 0;
+            \\for(extensions) |e| if(e.getType() == @"type") {
+            \\result[count] = e;
+            \\count += 1;
+            \\};
+            \\const final = result[0..count].*;
+            \\return &final;
+            \\}
+            \\const Bitmask = std.enums.EnumSet(@This());
+            \\/// Returns the first extension found for which there are missing dependencies.
+            \\/// If all dependencies are satified, returns `null`
+            \\pub fn missingDependenciesFor(ext: []const @This(), apiVersion: ApiVersion) ?@This(){
+            \\const bitmask = .initMany(ext);
+            \\for(ext) |e| if(!e.isSatisfied(apiVersion, bitmask)) return e;
+            \\return true;
+            \\}
+            \\pub fn containedIn(self:@This(),extensions:[]const @This())bool{
+            \\for(extensions)|e| if(e == self) return true;
+            \\return false;
+            \\}
             \\};
         );
     }
-
+    fn printDependencies(dependencies: []const u8, writer: *Writer) Writer.Error!void {
+        var d = dependencies;
+        while (d.len != 0) {
+            sw: switch (d[0]) {
+                '(', ')' => |l| {
+                    try writer.writeByte(l);
+                    continue :sw ' ';
+                },
+                '+' => {
+                    try writer.writeAll(" and ");
+                    continue :sw ' ';
+                },
+                ',' => {
+                    try writer.writeAll(" or ");
+                    continue :sw ' ';
+                },
+                ' ' => {
+                    d = d[1..];
+                },
+                else => {
+                    const end = std.mem.findAny(u8, d, "()+, ") orelse d.len;
+                    const word = d[0..end];
+                    if (std.mem.startsWith(u8, word, "VK_VERSION_")) {
+                        const last = std.mem.findScalarLast(u8, word, '_') orelse panic("Missing last `_` for: {s}", .{word});
+                        try writer.print("apiVersion.ge(.{{.minor={s}}})", .{word[last + 1 ..]});
+                    } else {
+                        try writer.print("bitmask.isSet(.{s})", .{stripPrefix(word, "VK_")});
+                    }
+                    d = d[end..];
+                },
+            }
+        }
+    }
     fn printExtension(e: Registry.Extension, writer: *Writer) Writer.Error!void {
+        try writer.print("\n/// {t} extension\n", .{e.kind});
         if (e.promoted) |p| {
             try writer.print("\n/// Promoted to {s}\n", .{p});
         }
