@@ -1466,7 +1466,7 @@ const render = struct {
                 base.append(allocator, new) catch @panic("oom");
                 continue;
             }
-            if (new.command.params.len != 0 and std.mem.eql(u8, new.command.params[0].c_var.name, "VkInstance")) {
+            if (new.command.params.len != 0 and std.mem.eql(u8, new.command.params[0].c_var.type.base.name, "VkInstance")) {
                 instance.append(allocator, new) catch @panic("oom");
                 continue;
             }
