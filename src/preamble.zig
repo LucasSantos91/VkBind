@@ -141,7 +141,7 @@ fn MakeLoader(comptime Functions: type, comptime funcs: []const Functions) type 
     }
     return @Struct(.@"extern", null, &names, &types, attr);
 }
-fn getFunctionNames(comptime Functions: type, comptime funcs: []const Functions) []const []const u8 {
+fn getFunctionVkNames(comptime Functions: type, comptime funcs: []const Functions) []const []const u8 {
     comptime {
         var result: [funcs.len][]const u8 = undefined;
         for (funcs, &result) |f, *r| {

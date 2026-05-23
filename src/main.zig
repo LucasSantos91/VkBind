@@ -1701,7 +1701,11 @@ const render = struct {
             \\}
             \\pub fn getVkName(comptime self: @This()) []const u8{
             \\return getFunctionVkName(self);
-            \\}};
+            \\}
+            \\pub fn getVkNames(comptime funcs: []const @This()) []const []const u8{
+            \\return getFunctionVkNames(@This(), funcs);
+            \\}
+            \\};
         ;
         {
             try writer.print("pub const {s}Functions=enum{{", .{print_data.group});
@@ -1722,7 +1726,7 @@ const render = struct {
                 \\    pub fn init(load_func: anytype{[func_arg]s}) @This(){{
                 \\        var result: Ptrs = undefined;
                 \\        const slice: *[functions.len]?PfnVoidFunction = @ptrCast(&result);
-                \\        for(slice.*, getFunctionNames(functions)) |*ptr, name|{{
+                \\        for(slice.*, getFunctionVkNames(functions)) |*ptr, name|{{
                 \\            ptr.* = load_func({[load_param]s},name);
                 \\        }}
                 \\        return .{{ .ptrs = result }};
