@@ -596,6 +596,7 @@ pub const Registry = struct {
         value: []const u8,
         type: []const u8,
         comment: ?[]const u8,
+        providers: Providers = .{},
     };
 
     api: Api,
@@ -1035,8 +1036,17 @@ pub const Registry = struct {
         self.parseRequires(xml, .{ .extension = ext_name }, number);
     }
     fn parseEnumExtension(self: *@This(), xml: XmlNode, extension_number: ?[]const u8, provider: Providers.Provider) void {
-        const extends = xml.attr.get("extends") orelse return;
         const name = xml.attr.get("name") orelse @panic("Missing enum extension name");
+        const extends = xml.attr.get("extends") orelse {
+            // Must be a constant
+            for (self.constants) |*c| {
+                if (std.mem.eql(u8, c.name, name)) {
+                    @constCast(c).providers.add(provider, self.allocator);
+                    return;
+                }
+            }
+            return;
+        };
         const enum_type = self.types.getPtr(extends) orelse panic("Type not found: {s}", .{extends});
         const comment = getComment(xml);
         switch (enum_type.type) {
@@ -1496,6 +1506,7 @@ const render = struct {
     fn printConstants(constants: []const Registry.Constant, writer: *Writer) Writer.Error!void {
         for (constants) |c| {
             try printComment(c.comment, writer);
+            try printProvider(c.providers, writer);
             try writer.writeAll("pub const ");
             try writeConstant(c.name, writer);
             const zig_type: Primitives = enumFromName(Primitives, c.type) orelse panic("Unknown primitive type: {s}", .{c.type});
