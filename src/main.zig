@@ -1628,6 +1628,9 @@ const render = struct {
     }
     fn printConstants(constants: []const Registry.Constant, writer: *Writer) Writer.Error!void {
         for (constants) |c| {
+            // OVERRIDE: true and false have been subsumed into Bool32
+            if (enumFromName(enum { VK_TRUE, VK_FALSE }, c.name)) |_| continue;
+
             try printComment(c.comment, writer);
             try printProvider(c.providers, writer);
             try writer.writeAll("pub const ");
