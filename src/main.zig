@@ -540,7 +540,7 @@ pub const Registry = struct {
             self.extensions = slice_tools.allocated.concat([]const u8, @constCast(self.extensions), &.{extension}, allocator) catch @panic("oom");
         }
         pub const Provider = union(enum) {
-            feature: u8,
+            feature: []const u8,
             extension: []const u8,
         };
         pub fn add(self: *@This(), provider: Provider, allocator: Allocator) void {
@@ -969,22 +969,28 @@ pub const Registry = struct {
     }
     fn parseFeature(self: *@This(), xml: XmlNode) void {
         const number = xml.attr.get("number") orelse @panic("Missing feature number");
+        self.parseRequires(xml, .{ .feature = number }, null);
+    }
+    fn parseRequires(self: *@This(), xml: XmlNode, provider: Providers.Provider, ext_number: ?[]const u8) void {
         var require_it = xml.childrenIterator();
         while (require_it.nextNode("require")) |require_node| {
-            for (require_node.children) |child| {
-                if (child == .text) continue;
-                const node = child.node;
-                switch (enumFromName(enum { type, command, @"enum" }, node.tag) orelse continue) {
-                    .@"enum" => {
-                        self.parseEnumExtension(node, null);
-                    },
-                    .command => {},
-                    .type => {
-                        const type_name = node.attr.get("name") orelse continue;
-                        const t = self.types.getPtr(type_name) orelse continue;
-                        t.providers.addFeature(number);
-                    },
-                }
+            self.parseRequire(require_node, provider, ext_number);
+        }
+    }
+    fn parseRequire(self: *@This(), xml: XmlNode, provider: Providers.Provider, ext_number: ?[]const u8) void {
+        for (xml.children) |child| {
+            if (child == .text) continue;
+            const node = child.node;
+            switch (enumFromName(enum { type, command, @"enum" }, node.tag) orelse continue) {
+                .@"enum" => {
+                    self.parseEnumExtension(node, ext_number);
+                },
+                .command => {},
+                .type => {
+                    const type_name = node.attr.get("name") orelse continue;
+                    const t = self.types.getPtr(type_name) orelse continue;
+                    t.providers.add(provider, self.allocator);
+                },
             }
         }
     }
@@ -995,29 +1001,12 @@ pub const Registry = struct {
         }
     }
     fn parseExtension(self: *@This(), xml: XmlNode) void {
-        var require_it = xml.childrenIterator();
         if (xml.attr.get("supported")) |supported| {
             if (std.mem.eql(u8, supported, "disabled")) return;
         }
         const number = xml.attr.get("number") orelse @panic("Missing extension number");
         const ext_name = xml.attr.get("name") orelse @panic("Missing extension name");
-        while (require_it.nextNode("require")) |require_node| {
-            for (require_node.children) |child| {
-                if (child == .text) continue;
-                const node = child.node;
-                switch (enumFromName(enum { type, command, @"enum" }, node.tag) orelse continue) {
-                    .@"enum" => {
-                        self.parseEnumExtension(node, number);
-                    },
-                    .command => {},
-                    .type => {
-                        const type_name = node.attr.get("name") orelse continue;
-                        const t = self.types.getPtr(type_name) orelse continue;
-                        t.providers.addExtension(ext_name, self.allocator);
-                    },
-                }
-            }
-        }
+        self.parseRequires(xml, .{ .extension = ext_name }, number);
     }
     fn parseEnumExtension(self: *@This(), xml: XmlNode, extension_number: ?[]const u8) void {
         const extends = xml.attr.get("extends") orelse return;
