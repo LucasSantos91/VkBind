@@ -12,16 +12,34 @@ pub const Bool32 = enum(u32) {
     true,
 };
 pub const ApiVersion = packed struct(u32) {
-    patch: u11,
+    patch: u11 = 0,
     minor: u10,
-    major: u7,
-    variant: u3,
+    major: u7 = 1,
+    variant: u3 = 0,
 
     pub fn toInt(self: @This()) u32 {
         return @bitCast(self);
     }
     pub fn fromInt(i: u32) @This() {
         return @bitCast(i);
+    }
+    pub fn gt(lhs: @This(), rhs: @This()) bool {
+        return lhs.toInt() > rhs.toInt();
+    }
+    pub fn ge(lhs: @This(), rhs: @This()) bool {
+        return lhs.toInt() >= rhs.toInt();
+    }
+    pub fn eq(lhs: @This(), rhs: @This()) bool {
+        return lhs.toInt() == rhs.toInt();
+    }
+    pub fn lt(lhs: @This(), rhs: @This()) bool {
+        return lhs.toInt() < rhs.toInt();
+    }
+    pub fn le(lhs: @This(), rhs: @This()) bool {
+        return lhs.toInt() <= rhs.toInt();
+    }
+    pub fn order(lhs: @This(), rhs: @This()) std.math.Order {
+        return std.math.order(lhs.toInt(), rhs.toInt());
     }
 };
 pub const DeviceSize = u64;
