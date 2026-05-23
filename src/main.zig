@@ -1128,7 +1128,7 @@ pub const Registry = struct {
                     b.bits = slice_tools.allocated.concat(FlagBits.Bit, @constCast(b.bits), &.{new_bit}, self.allocator) catch @panic("oom");
                 } else if (xml.attr.get("value")) |value_text| {
                     for (b.aggregates) |*a| {
-                        if (std.mem.eql(u8, a.name, value_text)) {
+                        if (std.mem.eql(u8, a.name, name)) {
                             @constCast(a).providers.add(provider, self.allocator);
                             return;
                         }
