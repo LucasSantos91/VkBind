@@ -529,6 +529,27 @@ pub const Registry = struct {
         success_codes: []const u8,
         error_codes: []const u8,
     };
+    const Providers = struct {
+        feature: []const u8 = &.{},
+        extensions: []const []const u8 = &.{},
+
+        pub fn addFeature(self: *@This(), number: []const u8) void {
+            self.feature = number;
+        }
+        pub fn addExtension(self: *@This(), extension: []const u8, allocator: Allocator) void {
+            self.extensions = slice_tools.allocated.concat([]const u8, @constCast(self.extensions), &.{extension}, allocator) catch @panic("oom");
+        }
+        pub const Provider = union(enum) {
+            feature: u8,
+            extension: []const u8,
+        };
+        pub fn add(self: *@This(), provider: Provider, allocator: Allocator) void {
+            switch (provider) {
+                .feature => |f| self.addFeature(f),
+                .extension => |e| self.addExtension(e, allocator),
+            }
+        }
+    };
 
     const Type = union(enum) {
         @"struct": Struct,
@@ -548,6 +569,7 @@ pub const Registry = struct {
     const TypeCommon = struct {
         type: Type,
         comment: ?[]const u8 = null,
+        providers: Providers = .{},
     };
 
     const VkTypes = std.StringHashMapUnmanaged(TypeCommon);
@@ -570,7 +592,7 @@ pub const Registry = struct {
         if (self.authors.len != 0) @panic("Duplicate tags section");
         var list: std.ArrayList([]const u8) = .empty;
         for (xml.children) |child| {
-            const node = self.getNode(child) orelse continue;
+            const node = if (child == .node) child.node else continue;
             const name = node.attr.get("name") orelse @panic("Nameless author");
             list.append(self.allocator, name) catch @panic("oom");
         }
@@ -597,12 +619,6 @@ pub const Registry = struct {
     fn matchApi(self: *const @This(), xml: XmlNode) bool {
         const api = xml.attr.get("api") orelse return true;
         return self.matchApiText(api);
-    }
-    fn getNode(self: *const @This(), node_or_text: XmlNode.NodeOrText) ?XmlNode {
-        if (node_or_text == .text) return null;
-        const node = node_or_text.node;
-        if (!self.matchApi(node)) return null;
-        return node;
     }
     fn addType(self: *@This(), name: []const u8) *TypeCommon {
         const gp = self.types.getOrPut(self.allocator, name) catch @panic("oom");
@@ -711,7 +727,7 @@ pub const Registry = struct {
     }
     fn parseBasetype(self: *@This(), xml: XmlNode) void {
         const name = blk: for (xml.children) |n| {
-            const node = self.getNode(n) orelse continue;
+            const node = if (n == .node) n.node else continue;
             if (std.mem.eql(u8, node.tag, "name")) {
                 if (node.children.len != 1 and node.children[0] != .text) @panic("Failed to parse basetype name");
                 break :blk node.children[0].text;
@@ -743,7 +759,7 @@ pub const Registry = struct {
     }
     fn parseTypes(self: *@This(), xml: XmlNode) void {
         for (xml.children) |child| {
-            const node = self.getNode(child) orelse continue;
+            const node = if (child == .node) child.node else continue;
             if (!std.mem.eql(u8, node.tag, "type")) continue;
             if (!self.matchApi(node)) continue;
             if (node.attr.get("alias")) |alias| {
@@ -772,8 +788,7 @@ pub const Registry = struct {
         if (!std.mem.eql(u8, xml.tag, "registry")) @panic("Missing registry");
 
         for (xml.children) |child| {
-            const node = self.getNode(child) orelse continue;
-            if (!self.matchApi(node)) continue;
+            const node = if (child == .node) child.node else continue;
             const tag = enumFromName(enum { types, enums, commands, feature, extensions, tags }, node.tag) orelse continue;
             switch (tag) {
                 .types => self.parseTypes(node),
@@ -953,11 +968,23 @@ pub const Registry = struct {
         new.params = params.toOwnedSlice(self.allocator) catch @panic("oom");
     }
     fn parseFeature(self: *@This(), xml: XmlNode) void {
+        const number = xml.attr.get("number") orelse @panic("Missing feature number");
         var require_it = xml.childrenIterator();
-        while (require_it.nextNode("require")) |node| {
-            var enum_it = node.childrenIterator();
-            while (enum_it.nextNode("enum")) |e| {
-                self.parseEnumExtension(e, null);
+        while (require_it.nextNode("require")) |require_node| {
+            for (require_node.children) |child| {
+                if (child == .text) continue;
+                const node = child.node;
+                switch (enumFromName(enum { type, command, @"enum" }, node.tag) orelse continue) {
+                    .@"enum" => {
+                        self.parseEnumExtension(node, null);
+                    },
+                    .command => {},
+                    .type => {
+                        const type_name = node.attr.get("name") orelse continue;
+                        const t = self.types.getPtr(type_name) orelse continue;
+                        t.providers.addFeature(number);
+                    },
+                }
             }
         }
     }
@@ -969,14 +996,26 @@ pub const Registry = struct {
     }
     fn parseExtension(self: *@This(), xml: XmlNode) void {
         var require_it = xml.childrenIterator();
-        if (xml.attr.get("supported")) |api| {
-            if (!self.matchApiText(api)) return;
+        if (xml.attr.get("supported")) |supported| {
+            if (std.mem.eql(u8, supported, "disabled")) return;
         }
         const number = xml.attr.get("number") orelse @panic("Missing extension number");
-        while (require_it.nextNode("require")) |node| {
-            var enum_it = node.childrenIterator();
-            while (enum_it.nextNode("enum")) |e| {
-                self.parseEnumExtension(e, number);
+        const ext_name = xml.attr.get("name") orelse @panic("Missing extension name");
+        while (require_it.nextNode("require")) |require_node| {
+            for (require_node.children) |child| {
+                if (child == .text) continue;
+                const node = child.node;
+                switch (enumFromName(enum { type, command, @"enum" }, node.tag) orelse continue) {
+                    .@"enum" => {
+                        self.parseEnumExtension(node, number);
+                    },
+                    .command => {},
+                    .type => {
+                        const type_name = node.attr.get("name") orelse continue;
+                        const t = self.types.getPtr(type_name) orelse continue;
+                        t.providers.addExtension(ext_name, self.allocator);
+                    },
+                }
             }
         }
     }
@@ -1410,6 +1449,24 @@ const render = struct {
             }
         }
     }
+    fn printProvider(t: Registry.TypeCommon, writer: *Writer) Writer.Error!void {
+        const p = t.providers;
+        if (p.feature.len == 0 and p.extensions.len == 0) return;
+        try writer.writeAll("\n/// Provided by ");
+        if (p.feature.len != 0) {
+            try writer.print("Vulkan {s}", .{p.feature});
+            if (p.extensions.len != 0) {
+                try writer.writeAll(", ");
+            }
+        }
+        for (p.extensions[0..p.extensions.len -| 1]) |e| {
+            try writer.print("{s}, ", .{e});
+        }
+        if (p.extensions.len != 0) {
+            try writer.writeAll(p.extensions[p.extensions.len - 1]);
+        }
+        try writer.writeByte('\n');
+    }
     pub fn render(registry: Registry, writer: *Writer, allocator: Allocator) Writer.Error!void {
         try writer.print("{s}\n", .{@embedFile("preamble.zig")});
         try printConstants(registry.constants, writer);
@@ -1417,7 +1474,10 @@ const render = struct {
         while (it.next()) |entry| {
             const name = entry.key_ptr.*;
             const v = entry.value_ptr.*;
-            try printComment(v.comment, writer);
+            if (v.type != .basetype and v.type != .foreign) {
+                try printComment(v.comment, writer);
+                try printProvider(entry.value_ptr.*, writer);
+            }
             switch (v.type) {
                 .flags => |e| try printFlags(registry, name, e, writer),
                 .flag_bits => |e| try printFlagBits(name, e, writer),
