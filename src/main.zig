@@ -343,11 +343,13 @@ pub const Registry = struct {
             name: []const u8,
             canonical: []const u8,
             comment: ?[]const u8,
+            providers: Providers,
         };
         const Value = struct {
             name: []const u8,
             value: []const u8,
             comment: ?[]const u8,
+            providers: Providers,
         };
         values: []const Value,
         aliases: []const @This().Alias,
@@ -363,16 +365,19 @@ pub const Registry = struct {
             bitpos: Bitpos,
             name: []const u8,
             comment: ?[]const u8,
+            providers: Providers,
         };
         const Aggregate = struct {
             name: []const u8,
             comment: ?[]const u8,
             value: []const u8,
+            providers: Providers,
         };
         const BitAlias = struct {
             canonical: []const u8,
             name: []const u8,
             comment: ?[]const u8,
+            providers: Providers,
         };
         bitwidth: Flags.Bitwidth = .@"32",
         bits: []const Bit = &.{},
@@ -543,6 +548,17 @@ pub const Registry = struct {
         pub const Provider = union(enum) {
             feature: []const u8,
             extension: []const u8,
+
+            pub fn toProviders(self: @This(), allocator: Allocator) Providers {
+                return switch (self) {
+                    .feature => |f| .{ .feature = f, .extensions = &.{} },
+                    .extension => |e| {
+                        const a = allocator.alloc([]const u8, 1) catch @panic("oom");
+                        a[0] = e;
+                        return .{ .feature = &.{}, .extensions = a };
+                    },
+                };
+            }
         };
         pub fn add(self: *@This(), provider: Provider, allocator: Allocator) void {
             switch (provider) {
@@ -867,6 +883,7 @@ pub const Registry = struct {
                     .canonical = alias,
                     .name = entry_name,
                     .comment = getComment(node),
+                    .providers = .{},
                 };
             } else {
                 const new_value = values.addOne(self.allocator) catch @panic("oom");
@@ -874,6 +891,7 @@ pub const Registry = struct {
                     .name = entry_name,
                     .value = (node.attr.get("value") orelse panic("Missing value for enum {s}", .{name})),
                     .comment = getComment(node),
+                    .providers = .{},
                 };
             }
         }
@@ -908,6 +926,7 @@ pub const Registry = struct {
                     .canonical = alias,
                     .name = entry_name,
                     .comment = getComment(node),
+                    .providers = .{},
                 };
             } else if (node.attr.get("value")) |value| {
                 const new_value = aggregates.addOne(self.allocator) catch @panic("oom");
@@ -915,6 +934,7 @@ pub const Registry = struct {
                     .name = entry_name,
                     .value = value,
                     .comment = getComment(node),
+                    .providers = .{},
                 };
             } else if (node.attr.get("bitpos")) |bitpos| {
                 const new_bit = bits.addOne(self.allocator) catch @panic("oom");
@@ -922,6 +942,7 @@ pub const Registry = struct {
                     .name = entry_name,
                     .bitpos = std.fmt.parseInt(FlagBits.Bitpos, bitpos, 10) catch panic("Failed to parse bitpos: {s}", .{bitpos}),
                     .comment = getComment(node),
+                    .providers = .{},
                 };
             }
         }
@@ -984,7 +1005,7 @@ pub const Registry = struct {
             const node = child.node;
             switch (enumFromName(enum { type, command, @"enum" }, node.tag) orelse continue) {
                 .@"enum" => {
-                    self.parseEnumExtension(node, ext_number);
+                    self.parseEnumExtension(node, ext_number, provider);
                 },
                 .command => {
                     const com_name = node.attr.get("name") orelse continue;
@@ -1013,7 +1034,7 @@ pub const Registry = struct {
         const ext_name = xml.attr.get("name") orelse @panic("Missing extension name");
         self.parseRequires(xml, .{ .extension = ext_name }, number);
     }
-    fn parseEnumExtension(self: *@This(), xml: XmlNode, extension_number: ?[]const u8) void {
+    fn parseEnumExtension(self: *@This(), xml: XmlNode, extension_number: ?[]const u8, provider: Providers.Provider) void {
         const extends = xml.attr.get("extends") orelse return;
         const name = xml.attr.get("name") orelse @panic("Missing enum extension name");
         const enum_type = self.types.getPtr(extends) orelse panic("Type not found: {s}", .{extends});
@@ -1021,20 +1042,27 @@ pub const Registry = struct {
         switch (enum_type.type) {
             .@"enum" => |*en| {
                 if (xml.attr.get("alias")) |alias| {
-                    for (en.aliases) |a| {
-                        if (std.mem.eql(u8, a.name, name)) return;
+                    for (en.aliases) |*a| {
+                        if (std.mem.eql(u8, a.name, name)) {
+                            @constCast(a).providers.add(provider, self.allocator);
+                            return;
+                        }
                     }
                     const new_alias: Enum.Alias = .{
                         .name = name,
                         .canonical = alias,
                         .comment = comment,
+                        .providers = provider.toProviders(self.allocator),
                     };
                     en.aliases = slice_tools.allocated.concat(Enum.Alias, @constCast(en.aliases), &.{new_alias}, self.allocator) catch @panic("oom");
 
                     return;
                 }
-                for (en.values) |a| {
-                    if (std.mem.eql(u8, a.name, name)) return;
+                for (en.values) |*a| {
+                    if (std.mem.eql(u8, a.name, name)) {
+                        @constCast(a).providers.add(provider, self.allocator);
+                        return;
+                    }
                 }
                 const value: []const u8 = if (xml.attr.get("offset")) |offset| blk: {
                     const extnum = if (xml.attr.get("extnumber")) |x| x else extension_number orelse panic("Missing extnumber for enum: {s}", .{name});
@@ -1050,18 +1078,23 @@ pub const Registry = struct {
                     .name = name,
                     .value = value,
                     .comment = comment,
+                    .providers = provider.toProviders(self.allocator),
                 };
                 en.values = slice_tools.allocated.concat(Enum.Value, @constCast(en.values), &.{new}, self.allocator) catch @panic("oom");
             },
             .flag_bits => |*b| {
                 if (xml.attr.get("alias")) |alias| {
-                    for (b.bit_aliases) |a| {
-                        if (std.mem.eql(u8, a.name, name)) return;
+                    for (b.bit_aliases) |*a| {
+                        if (std.mem.eql(u8, a.name, name)) {
+                            @constCast(a).providers.add(provider, self.allocator);
+                            return;
+                        }
                     }
                     const new_alias: FlagBits.BitAlias = .{
                         .name = name,
                         .canonical = alias,
                         .comment = comment,
+                        .providers = provider.toProviders(self.allocator),
                     };
                     b.bit_aliases = slice_tools.allocated.concat(FlagBits.BitAlias, @constCast(b.bit_aliases), &.{new_alias}, self.allocator) catch @panic("oom");
 
@@ -1069,24 +1102,32 @@ pub const Registry = struct {
                 }
                 if (xml.attr.get("bitpos")) |bitpos_text| {
                     const bitpos = std.fmt.parseInt(FlagBits.Bitpos, bitpos_text, 10) catch panic("Failed to parse bitpos for enum extension: {s}", .{name});
-                    for (b.bits) |a| {
-                        if (a.bitpos == bitpos) return;
+                    for (b.bits) |*a| {
+                        if (a.bitpos == bitpos) {
+                            @constCast(a).providers.add(provider, self.allocator);
+                            return;
+                        }
                     }
                     const new_bit: FlagBits.Bit = .{
                         .bitpos = bitpos,
                         .name = name,
                         .comment = comment,
+                        .providers = provider.toProviders(self.allocator),
                     };
 
                     b.bits = slice_tools.allocated.concat(FlagBits.Bit, @constCast(b.bits), &.{new_bit}, self.allocator) catch @panic("oom");
                 } else if (xml.attr.get("value")) |value_text| {
-                    for (b.aggregates) |a| {
-                        if (std.mem.eql(u8, a.name, value_text)) return;
+                    for (b.aggregates) |*a| {
+                        if (std.mem.eql(u8, a.name, value_text)) {
+                            @constCast(a).providers.add(provider, self.allocator);
+                            return;
+                        }
                     }
                     const agg: FlagBits.Aggregate = .{
                         .name = name,
                         .comment = comment,
                         .value = value_text,
+                        .providers = provider.toProviders(self.allocator),
                     };
                     b.aggregates = slice_tools.allocated.concat(FlagBits.Aggregate, @constCast(b.aggregates), &.{agg}, self.allocator) catch @panic("oom");
                 } else panic("Missing value of bitpos for enum: {s}", .{name});
@@ -1158,6 +1199,7 @@ const render = struct {
             var last_bitpos = if (flag_bits.bits.len != 0) flag_bits.bits[0].bitpos else undefined;
             for (flag_bits.bits) |b| {
                 try printComment(b.comment, writer);
+                try printProvider(b.providers, writer);
                 const diff = b.bitpos - last_bitpos;
                 if (diff > 1) {
                     try writer.print("_reserved_{}:u{} = 0,", .{ b.bitpos, diff - 1 });
@@ -1167,6 +1209,7 @@ const render = struct {
             }
             for (flag_bits.aggregates) |agg| {
                 try printComment(agg.comment, writer);
+                try printProvider(agg.providers, writer);
                 try writer.print("pub const @\"{s}\":@This() = @bitCast({s});", .{ agg.name, agg.value });
             }
         }
@@ -1178,6 +1221,7 @@ const render = struct {
         try writer.print("pub const {s}=enum(u{t}){{", .{ stripPrefix(name, "Vk"), e.bitwidth });
         for (e.bits) |b| {
             try printComment(b.comment, writer);
+            try printProvider(b.providers, writer);
             try writer.print("@\"{s}\"=1<<{},", .{ stripEnumNameAndBitSuffix(b.name, stripped_name), b.bitpos });
         }
         try writer.writeAll("};");
@@ -1212,10 +1256,12 @@ const render = struct {
         try writer.print("pub const {s}=enum(c_int){{", .{stripped_name});
         for (e.values) |v| {
             try printComment(v.comment, writer);
+            try printProvider(v.providers, writer);
             try writer.print("@\"{s}\"={s},", .{ stripEnumName(v.name, stripped_name), v.value });
         }
         for (e.aliases) |a| {
             try printComment(a.comment, writer);
+            try printProvider(a.providers, writer);
             try writer.print("pub const @\"{s}\"=@This().@\"{s}\";", .{ stripEnumName(a.name, stripped_name), stripEnumName(a.canonical, stripped_name) });
         }
         try writer.writeAll("};");
