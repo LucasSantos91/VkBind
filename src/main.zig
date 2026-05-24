@@ -1690,7 +1690,7 @@ const render = struct {
 
         try printCommands(registry, writer, allocator);
         try printExtensions(registry, writer);
-        try printVulkanContext(registry, writer);
+        try printVulkanContext(registry, writer, allocator);
     }
     fn isGlobalCommand(command: Registry.Command, registry: Registry) bool {
         if (command.params.len == 0) return true;
@@ -1700,23 +1700,42 @@ const render = struct {
         if (!first_type.type.handle.dispatchable) return true;
         return false;
     }
-    fn printVulkanContext(registry: Registry, writer: *Writer) Writer.Error!void {
+    fn printVulkanContext(registry: Registry, writer: *Writer, allocator: Allocator) Writer.Error!void {
+        _ = allocator; // autofix
         try writer.writeAll(
             \\pub const VulkanContextConfig = struct{
             \\pub const Globals = union(enum){
             \\load_time,
             \\run_time: []const GlobalFunctions,
             \\};
+            \\pub const AllocatorConfig = union(enum){
+            \\compile_time: ?*const AllocationCallbacks,
+            \\run_time,
+            \\};
             \\ globals: Globals = .load_time,
             \\ instance: []const InstanceFunctions,
             \\ device: []const DeviceFunctions,
             \\ apiVersion: ApiVersion = .{ .minor = 0 },
             \\ extensions: []const Extension = &.{},
+            \\ allocator: AllocatorConfig,
             \\};
             \\pub fn VulkanContext(comptime config: VulkanContextConfig) type{
             \\return struct{
             \\comptime{ if(Extension.missingDependenciesFor(config.extensions, config.apiVersion)) |e|
             \\@panic("Missing dependencies for extension " ++ e.name.name);
+            \\}
+            \\var runtime_allocator: switch(config.allocator){
+            \\.compile_time => void,
+            \\.run_time =>?*const AllocationCallbacks,
+            \\} = undefined;
+            \\pub fn initAllocator(pAllocator: ?*const AllocationCallbacks) void{
+            \\runtime_allocator = pAllocator;
+            \\}
+            \\pub fn getAllocator()?*const AllocationCallbacks{
+            \\ return switch(comptime config.allocator){
+            \\.comptime_time => |a| a,
+            \\.run_time => runtime_allocator,
+            \\};
             \\}
             \\var globals: switch(config.globals){
             \\.load_time => void,
@@ -1735,14 +1754,29 @@ const render = struct {
             \\pub fn initDeviceLoader(load_function: anytype, device: Device) void{
             \\device_loader.init(load_function, device);
             \\}
+            \\const provided_extensions: CommandDependencyRequirements = .{
+            \\        .version = config.apiVersion,
+            \\        .extensions = config.extensions,
+            \\};
+            \\fn assertDependencies(comptime cmd: anytype) void{
+            \\   comptime{
+            \\  if(!provided_extensions.satisfy(cmd.requirements())){
+            \\   @compileError("Requirements not met for command: " ++ @tagName(cmd));
+            \\}
+            \\}
+            \\}
         );
-        const printCommand = struct {
-            pub fn call(command: Registry.Command, command_name: []const u8, group: []const u8, w: *Writer) Writer.Error!void {
+        const helper = struct {
+            fn isAllocator(zig_var: Registry.ZigVar) bool {
+                return std.mem.eql(u8, zig_var.c_var.name, "pAllocator");
+            }
+            pub fn printCommand(command: Registry.Command, command_name: []const u8, group: []const u8, w: *Writer) Writer.Error!void {
                 try printProvider(command.providers, w);
                 try w.writeAll("pub fn ");
                 try printCommandName(command_name, w);
                 try w.writeByte('(');
                 for (command.params) |p| {
+                    if (isAllocator(p)) continue;
                     try printZigVar(p, command.params, w);
                     try w.writeByte(',');
                 }
@@ -1752,16 +1786,23 @@ const render = struct {
                 } else {
                     try printCBaseType(command.ret, w);
                 }
-                try w.writeByte('{');
+                try w.print("{{assertDependencies({s}Functions.", .{group});
+                try printCommandName(command_name, w);
+                try w.writeAll(");");
             }
-        }.call;
+            pub fn isDispatchable(zig_var: Registry.ZigVar, r: Registry) bool {
+                const t: Registry.TypeCommon = r.get(zig_var.c_var.type.base.name) orelse return false;
+                if (t.type != .handle) return zig_var;
+                return t.type.handle.dispatchable;
+            }
+        };
 
         var command_it = registry.commands.iterator();
         while (command_it.next()) |command_entry| {
             const command_name = command_entry.key_ptr.*;
-            const command = command_entry.value_ptr;
-            if (isGlobalCommand(command.*, registry)) {
-                try printCommand(command.*, command_name, "Global", writer);
+            const command = command_entry.value_ptr.*;
+            if (isGlobalCommand(command, registry)) {
+                try helper.printCommand(command, command_name, "Global", writer);
                 try writer.writeAll(
                     \\return switch(comptime config.globals){
                     \\.load_time=>extern_global_functions.
@@ -1774,7 +1815,11 @@ const render = struct {
                 try printCommandName(command_name, writer);
                 try writer.writeAll("}.?(");
                 for (command.params) |p| {
-                    try writer.print("@\"{s}\",", .{p.c_var.name});
+                    if (helper.isAllocator(p)) {
+                        try writer.writeAll("getAllocator(),");
+                    } else {
+                        try writer.print("@\"{s}\",", .{p.c_var.name});
+                    }
                 }
                 try writer.writeAll(");}");
             }
