@@ -2730,7 +2730,65 @@ const render = struct {
         try writer.writeAll("};");
     }
     pub fn printCommandGroup(commands: []const CommandWithName, writer: *Writer, print_data: PrintData) Writer.Error!void {
-        const conv_funcs =
+        const CommandList = struct {
+            commands: []const CommandWithName,
+
+            pub fn format(self: @This(), w: *Writer) Writer.Error!void {
+                for (self.commands) |c| {
+                    const provider: Provider = .{ .p = c.command.providers };
+                    try w.print(
+                        \\{[provider]f}
+                        \\{[name]s},
+                    , .{ .name = c.name, .provider = provider });
+                }
+            }
+        };
+        const CommandSignatureType = struct {
+            command_name: CommandTypeName,
+            ret_declaration: CommandReturnTypeDeclaration,
+            ret: CommandReturnType,
+            params: Params,
+            provider: Provider,
+
+            pub fn parse(name: []const u8, command: Registry.Command) @This() {
+                const command_name: CommandTypeName = .parse(name);
+                const ret_declaration: CommandReturnTypeDeclaration = .parse(command_name, command);
+                const ret: CommandReturnType = .parse(command_name, command);
+                const params: Params = .{ .params = command.params };
+                return .{
+                    .command_name = command_name,
+                    .ret_declaration = ret_declaration,
+                    .ret = ret,
+                    .params = params,
+                    .provider = .{ .p = command.providers },
+                };
+            }
+
+            pub fn format(self: @This(), w: *Writer) Writer.Error!void {
+                try w.print(
+                    \\{[ret_declaration]f}
+                    \\{[provider]f}
+                    \\pub const {[command_name]f} = fn(
+                    \\{[params]f}
+                    \\) callconv(vulkan_api) {[ret]f};
+                , self);
+            }
+        };
+
+        const CommandSignatureTypeGroup = struct {
+            commands: []const CommandWithName,
+
+            pub fn format(self: @This(), w: *Writer) Writer.Error!void {
+                for (self.commands) |c| {
+                    const s: CommandSignatureType = .parse(c.name, c.command);
+                    try w.print("{f}", .{s});
+                }
+            }
+        };
+
+        const signature_group: CommandSignatureTypeGroup = .{ .commands = commands };
+        const command_list: CommandList = .{ .commands = commands };
+        const conv_functions =
             \\pub fn getType(comptime self: @This()) type{
             \\const t = @tagName(self);
             \\return @field(@This(), std.ascii.toUpper(t[0]) ++ t[1..]);
@@ -2750,105 +2808,84 @@ const render = struct {
             \\pub fn isSatisfied(command: @This(), provided: CommandDependencyRequirements) bool{
             \\    return provided.satifies(command.requirements());
             \\}
-            \\};
         ;
-        _ = conv_funcs;
-        {
-            try writer.print("pub const {s}Functions=enum{{", .{print_data.group});
-            for (commands) |c| {
-                const provider: Provider = .{ .p = c.command.providers };
-                const command_name: CommandFunctionName = .parseFromText(c.name);
-                try writer.print(
-                    \\{[provider]f}
-                    \\{[name]f},
-                , .{ .provider = provider, .name = command_name });
-            }
-            try writer.writeAll("pub const all_commands = std.enums.values(@This());");
-            for (commands) |c| {
-                try printCommandType(c.name, c.command, writer);
-            }
-            //try writer.writeAll(
-            //    \\pub fn requirements(command: @This())CommandDependencyRequirements{
-            //    \\return switch(command){
-            //);
-            //for (commands) |c| {
-            //    try writer.writeByte('.');
-            //    try printCommandName(c.name, writer);
-            //    try writer.writeAll("=>.{ .version=.{.minor=");
-            //    const p = c.command.providers;
-            //    if (p.version) |version| {
-            //        const minor_index = std.mem.findScalarLast(u8, version.number, '.') orelse panic("Failed to find minor version of: {s}", .{version.number});
-            //        const minor = version.number[minor_index + 1 ..];
-            //        try writer.writeAll(minor);
-            //    } else {
-            //        try writer.writeAll("99");
-            //    }
-            //    try writer.writeAll("},.extensions=&.{");
-            //    for (p.extensions) |e| {
-            //        try writer.print(".{s},", .{stripPrefix(e.name, "VK_")});
-            //    }
-            //    try writer.writeAll("}},");
-            //}
-            //try writer.writeAll("};}");
-            //try writer.writeAll(conv_funcs);
-            //try writer.print(
-            //    \\pub fn {[group]s}Loader(comptime functions: []const {[group]s}Functions)type{{
-            //    \\return struct{{
-            //    \\    const Ptrs = MakeLoader({[group]s}Functions, functions);
-            //    \\    ptrs: Ptrs,
-            //    \\    pub fn init(load_func: anytype{[func_arg]s}) @This(){{
-            //    \\        var result: Ptrs = undefined;
-            //    \\        const slice: *[functions.len]?PfnVoidFunction = @ptrCast(&result);
-            //    \\        for(slice.*, getFunctionVkNames(functions)) |*ptr, name|{{
-            //    \\            ptr.* = load_func({[load_param]s},name);
-            //    \\        }}
-            //    \\        return .{{ .ptrs = result }};
-            //    \\    }}
-            //, print_data);
-            //for (commands) |c| {
-            //    try printProvider(c.command.providers, writer);
-            //    try writer.writeAll("pub fn ");
-            //    try printCommandName(c.name, writer);
-            //    try writer.writeAll("(loader: *const @This(),");
-            //    for (c.command.params) |p| {
-            //        const zig_var: ZigVar = .parse(p, c.command.params);
-            //        try writer.print("{f}", .{zig_var});
-            //        try writer.writeByte(',');
-            //    }
-            //    try writer.writeByte(')');
-            //    if (c.command.success_codes.len != 0) {
-            //        try writer.print("{s}Functions.{s}Result", .{ print_data.group, stripPrefix(c.name, "vk") });
-            //    } else {
-            //        const ret: CBaseType = .{ .v = c.command.ret };
-            //        try writer.print("{f}", .{ret});
-            //    }
-            //    try writer.writeAll("{return loader.ptrs.");
-            //    try printCommandName(c.name, writer);
-            //    try writer.writeAll(".?.*(");
-            //    for (c.command.params) |p| {
-            //        try writer.print("@\"{s}\",", .{p.c_var.name});
-            //    }
-            //    try writer.writeAll(");}");
-            //}
-            try writer.writeAll("};");
-        }
-    }
-    pub fn printCommandType(name: []const u8, c: Registry.Command, writer: *Writer) Writer.Error!void {
-        const command_name: CommandTypeName = .parse(name);
-        const ret_declaration: CommandReturnTypeDeclaration = .parse(command_name, c);
-        const ret: CommandReturnType = .parse(command_name, c);
-        const params: Params = .{ .params = c.params };
+
         try writer.print(
-            \\{[ret_declaration]f}
-            \\pub const {[name]f} = fn(
-            \\{[params]f}
-            \\) callconv(vulkan_api) {[ret]f};
+            \\pub const {[group]s}Functions=enum{{
+            \\{[command_list]f}
+            \\pub const all_commands = std.enums.values(@This());
+            \\{[command_signatures]f}
+            \\{[conv_functions]s}
+            \\}};
         , .{
-            .ret_declaration = ret_declaration,
-            .name = command_name,
-            .params = params,
-            .ret = ret,
+            .group = print_data.group,
+            .command_list = command_list,
+            .command_signatures = signature_group,
+            .conv_functions = conv_functions,
         });
+        //try writer.writeAll(
+        //    \\pub fn requirements(command: @This())CommandDependencyRequirements{
+        //    \\return switch(command){
+        //);
+        //for (commands) |c| {
+        //    try writer.writeByte('.');
+        //    try printCommandName(c.name, writer);
+        //    try writer.writeAll("=>.{ .version=.{.minor=");
+        //    const p = c.command.providers;
+        //    if (p.version) |version| {
+        //        const minor_index = std.mem.findScalarLast(u8, version.number, '.') orelse panic("Failed to find minor version of: {s}", .{version.number});
+        //        const minor = version.number[minor_index + 1 ..];
+        //        try writer.writeAll(minor);
+        //    } else {
+        //        try writer.writeAll("99");
+        //    }
+        //    try writer.writeAll("},.extensions=&.{");
+        //    for (p.extensions) |e| {
+        //        try writer.print(".{s},", .{stripPrefix(e.name, "VK_")});
+        //    }
+        //    try writer.writeAll("}},");
+        //}
+        //try writer.writeAll("};}");
+        //try writer.writeAll(conv_funcs);
+        //try writer.print(
+        //    \\pub fn {[group]s}Loader(comptime functions: []const {[group]s}Functions)type{{
+        //    \\return struct{{
+        //    \\    const Ptrs = MakeLoader({[group]s}Functions, functions);
+        //    \\    ptrs: Ptrs,
+        //    \\    pub fn init(load_func: anytype{[func_arg]s}) @This(){{
+        //    \\        var result: Ptrs = undefined;
+        //    \\        const slice: *[functions.len]?PfnVoidFunction = @ptrCast(&result);
+        //    \\        for(slice.*, getFunctionVkNames(functions)) |*ptr, name|{{
+        //    \\            ptr.* = load_func({[load_param]s},name);
+        //    \\        }}
+        //    \\        return .{{ .ptrs = result }};
+        //    \\    }}
+        //, print_data);
+        //for (commands) |c| {
+        //    try printProvider(c.command.providers, writer);
+        //    try writer.writeAll("pub fn ");
+        //    try printCommandName(c.name, writer);
+        //    try writer.writeAll("(loader: *const @This(),");
+        //    for (c.command.params) |p| {
+        //        const zig_var: ZigVar = .parse(p, c.command.params);
+        //        try writer.print("{f}", .{zig_var});
+        //        try writer.writeByte(',');
+        //    }
+        //    try writer.writeByte(')');
+        //    if (c.command.success_codes.len != 0) {
+        //        try writer.print("{s}Functions.{s}Result", .{ print_data.group, stripPrefix(c.name, "vk") });
+        //    } else {
+        //        const ret: CBaseType = .{ .v = c.command.ret };
+        //        try writer.print("{f}", .{ret});
+        //    }
+        //    try writer.writeAll("{return loader.ptrs.");
+        //    try printCommandName(c.name, writer);
+        //    try writer.writeAll(".?.*(");
+        //    for (c.command.params) |p| {
+        //        try writer.print("@\"{s}\",", .{p.c_var.name});
+        //    }
+        //    try writer.writeAll(");}");
+        //}
     }
 };
 
