@@ -1898,54 +1898,116 @@ const render = struct {
             try writer.writeAll(self.name);
         }
     };
-    fn printCType(c_type: Registry.CType, writer: *Writer) Writer.Error!void {
-        if (c_type.amount == .bitfield) {
-            try writer.print("u{s}", .{c_type.amount.bitfield});
-            return;
+
+    const CBaseType = struct {
+        v: Registry.CBaseType,
+
+        pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+            const base_type = self.v;
+            for (base_type.ptrs.constSlice()) |k| {
+                try writer.writeAll("[*c]");
+                switch (k) {
+                    .@"const" => try writer.writeAll("const "),
+                    .mutable => {},
+                }
+            }
+            if (base_type.ptrs.len != 0 and std.mem.eql(u8, base_type.name, "void")) {
+                try writer.writeAll("anyopaque");
+                return;
+            }
+
+            const name: GenericTypeName = .parse(base_type.name);
+            try writer.print("{f}", .{name});
         }
-        try printCBaseType(c_type.base, writer);
-        if (c_type.amount == .array) {
-            const ar = c_type.amount.array;
-            switch (ar) {
-                .literal => |l| try writer.writeAll(l),
-                .constant => |c| try writeConstant(c, writer),
+    };
+    const CType = struct {
+        v: Registry.CType,
+
+        pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+            const c_type = self.v;
+            if (c_type.amount == .bitfield) {
+                try writer.print("u{s}", .{c_type.amount.bitfield});
+                return;
+            }
+            const base: CBaseType = .{ .v = c_type.base };
+            try writer.print("{f}", .{base});
+            if (c_type.amount == .array) {
+                const ar = c_type.amount.array;
+                switch (ar) {
+                    .literal => |l| try writer.writeAll(l),
+                    .constant => |c| try writeConstant(c, writer),
+                }
             }
         }
-    }
-    fn printCBaseType(base_type: Registry.CBaseType, writer: *Writer) Writer.Error!void {
-        for (base_type.ptrs.constSlice()) |k| {
-            try writer.writeAll("[*c]");
-            switch (k) {
-                .@"const" => try writer.writeAll("const "),
-                .mutable => {},
+    };
+    const CVar = struct {
+        v: Registry.CVar,
+
+        pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+            const c_var = self.v;
+            const comment: Comment = .parse(c_var.comment);
+            const c_type: CType = .{ .v = c_var.type };
+            try writer.print(
+                \\{[comment]f}
+                \\{[name]s}: {[c_type]f}
+            , .{
+                .comment = comment,
+                .name = c_var.name,
+                .c_type = c_type,
+            });
+        }
+    };
+
+    const FuncpointerName = struct {
+        name: []const u8,
+
+        pub fn parse(name: []const u8) @This() {
+            return .{ .name = stripPrefix(name, "PFN_vk") };
+        }
+        pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+            try writer.print("Pfn{s}", .{self.name});
+        }
+    };
+    const CParams = struct {
+        params: []const Registry.CVar,
+
+        pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+            for (self.params) |p| {
+                const v: CVar = .{ .v = p };
+                try writer.print("{f},", .{v});
             }
         }
-        if (base_type.ptrs.len != 0 and std.mem.eql(u8, base_type.name, "void")) {
-            try writer.writeAll("anyopaque");
-            return;
+    };
+    const Params = struct {
+        params: []const Registry.ZigVar,
+
+        pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+            for (self.params) |p| {
+                const v: ZigVar = .parse(p, self.params);
+                try writer.print("{f},", .{v});
+            }
         }
-
-        const name: GenericTypeName = .parse(base_type.name);
-        try writer.print("{f}", .{name});
-    }
-
-    fn printCVar(c_var: Registry.CVar, writer: *Writer) Writer.Error!void {
-        try printComment(c_var.comment, writer);
-        try writer.print("{s}:", .{c_var.name});
-        try printCType(c_var.type, writer);
-    }
+    };
     fn printFuncpointer(name: []const u8, e_c: Registry.TypeCommon, writer: *Writer) Writer.Error!void {
-        try printComment(e_c.comment, writer);
-        try printProvider(e_c.providers, writer);
+        const comment: Comment = .parse(name);
+        const provider: Provider = .{ .p = e_c.providers };
         const e = e_c.type.funcpointer;
-        try writer.print("pub const Pfn{s}= *const fn(", .{stripPrefix(name, "PFN_vk")});
-        for (e.params) |p| {
-            try printCVar(p, writer);
-            try writer.writeByte(',');
-        }
-        try writer.writeAll(")callconv(vulkan_api)");
-        try printCBaseType(e.ret, writer);
-        try writer.writeByte(';');
+        const n: FuncpointerName = .parse(name);
+        const params: CParams = .{ .params = e.params };
+        const ret: CBaseType = .{ .v = e.ret };
+        try writer.print(
+            \\{[comment]f}
+            \\{[provider]f}
+            \\pub const {[name]f} = *const fn(
+            \\{[params]f}
+            \\) callconv(vulkan_api) {[ret]f};
+        , .{
+            .comment = comment,
+            .provider = provider,
+            .name = n,
+            .params = params,
+            .ret = ret,
+        });
     }
     fn printAlias(name: []const u8, e_c: Registry.TypeCommon, writer: *Writer) Writer.Error!void {
         const comment: Comment = .parse(e_c.comment);
@@ -2006,6 +2068,7 @@ const render = struct {
         try writer.writeByte('\n');
     }
     pub fn render(registry: Registry, writer: *Writer, allocator: Allocator) Writer.Error!void {
+        _ = allocator;
         try writer.print("{s}\n", .{@embedFile("preamble.zig")});
         try printConstants(registry.constants, writer);
         var it = registry.types.iterator();
@@ -2026,7 +2089,7 @@ const render = struct {
             }
         }
 
-        try printCommands(registry, writer, allocator);
+        //try printCommands(registry, writer, allocator);
         try printExtensions(registry, writer);
         //try printVulkanContext(registry, writer);
     }
@@ -2208,7 +2271,8 @@ const render = struct {
                         try w.print("{s}Result", .{type_name});
                     }
                 } else {
-                    try printCBaseType(command.ret, w);
+                    const ret: CBaseType = .{ .v = command.ret };
+                    try w.print("{f}", .{ret});
                 }
                 if (code_status.has_error_codes and !code_status.has_only_ignored_error_codes) {
                     try w.print("!{s}Error", .{type_name});
@@ -2541,6 +2605,101 @@ const render = struct {
         command: Registry.Command,
         name: []const u8,
     };
+    const CommandTypeName = struct {
+        name: []const u8,
+        pub fn parse(name: []const u8) @This() {
+            return .{ .name = stripPrefix(name, "vk") };
+        }
+        pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+            try writer.writeAll(self.name);
+        }
+    };
+    const CommandFunctionName = struct {
+        name: CommandTypeName,
+
+        pub fn parse(name: CommandTypeName) @This() {
+            if (name.name.len == 0) @panic("Empty command name");
+            return .{ .name = name };
+        }
+        pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+            try writer.print("{c}{s}", .{ std.ascii.toLower(self.name.name[0]), self.name.name[1..] });
+        }
+        pub fn parseFromText(name: []const u8) @This() {
+            return .parse(.parse(name));
+        }
+    };
+    const ConstantName = struct {
+        name: []const u8,
+
+        pub fn parse(name: []const u8) @This() {
+            return .{ .name = stripPrefix(name, "VK_") };
+        }
+
+        pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+            try writer.writeAll(self.name);
+        }
+    };
+    const CommandReturnType = union {
+        codes: CommandTypeName,
+        base: CBaseType,
+
+        pub fn parse(command_name: CommandFunctionName, command: Registry.Command) @This() {
+            return if (command.success_codes.len != 0)
+                .{ .codes = .{ .command = command, .command_name = command_name } }
+            else
+                .{ .base = .{ .v = command.ret } };
+        }
+
+        pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+            switch (self) {
+                .base => |b| try writer.print("{f}", .{b}),
+                .codes => |codes| try writer.print("{f}Result", .{codes}),
+            }
+        }
+    };
+
+    pub const CommandReturnTypeDeclaration = union(enum) {
+        empty,
+        codes: Codes,
+
+        const Codes = struct {
+            error_codes: []const []const u8,
+            succes_codes: []const []const u8,
+            command_name: CommandTypeName,
+        };
+
+        pub fn parse(command_name: CommandFunctionName, command: Registry.Command) @This() {
+            return if (command.success_codes.len != 0)
+                .{ .codes = .{
+                    .command_name = command_name,
+                    .error_codes = command.error_codes,
+                    .success_codes = command.success_codes,
+                } }
+            else
+                .empty;
+        }
+        fn printCode(name: []const u8, writer: *Writer) Writer.Error!void {
+            const n: ConstantName = .parse(name);
+            try writer.print(
+                \\{[name]f} = @intFromEnum(Result.{[name]f});
+            , .{ .name = n });
+        }
+        pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+            switch (self) {
+                .empty => {},
+                .codes => |codes| {
+                    try writer.print("{f}Result = enum{", codes.command_name);
+                    for (codes.succes_codes) |c| {
+                        try printCode(c, writer);
+                    }
+                    for (codes.error_codes) |c| {
+                        try printCode(c, writer);
+                    }
+                    try writer.writeAll("};");
+                }
+            }
+        }
+    };
     fn printExternGlobalFunctions(commands: []const CommandWithName, writer: *Writer) Writer.Error!void {
         try writer.writeAll(
             \\
@@ -2548,33 +2707,22 @@ const render = struct {
             \\pub const extern_global_functions = struct{
         );
         for (commands) |c| {
-            try printProvider(c.command.providers, writer);
-            try writer.print("extern \"vulkan-1\" fn {s}(", .{c.name});
-            for (c.command.params) |p| {
-                const zig_var: ZigVar = .parse(p, c.command.params);
-                try writer.print("{f}", .{zig_var});
-                try writer.writeByte(',');
-            }
-            try writer.writeAll(") callconv(vulkan_api)");
-            if (c.command.success_codes.len != 0) {
-                try writer.print("GlobalFunctions.{s}Result", .{stripPrefix(c.name, "vk")});
-            } else {
-                try printCBaseType(c.command.ret, writer);
-            }
-            try writer.writeAll(";pub const ");
-            try printCommandName(c.name, writer);
-            try writer.print("={s};", .{c.name});
+            const provider: Provider = .{ .p = c.command.providers };
+            const command_name: CommandFunctionName = .parseFromText(c.name);
+            const params: Params = .{ .params = c.command.params };
+            try writer.print(
+                \\{[provider]f}
+                \\extern "vulkan-1" fn {[raw_name]s}(
+                \\{[params]f}
+                \\) callconv(vulkan_api) GlobalFunctions.retType(.{[name]f});
+                \\pub const {[name]f} = {[raw_name]s};
+            , .{
+                .provider = provider,
+                .name = command_name,
+                .raw_name = c.name,
+                .params = params,
+            });
         }
-        try writer.writeAll("};");
-        try writer.writeAll("pub const extern_global_loader: GlobalLoader(.all_commands) = .{.ptrs=.{");
-        for (commands) |c| {
-            try writer.writeByte('.');
-            try printCommandName(c.name, writer);
-            try writer.writeAll("=extern_global_functions.");
-            try printCommandName(c.name, writer);
-            try writer.writeByte(',');
-        }
-        try writer.writeAll("}};");
     }
     pub fn printCommandGroup(commands: []const CommandWithName, writer: *Writer, print_data: PrintData) Writer.Error!void {
         const conv_funcs =
@@ -2662,7 +2810,8 @@ const render = struct {
                 if (c.command.success_codes.len != 0) {
                     try writer.print("{s}Functions.{s}Result", .{ print_data.group, stripPrefix(c.name, "vk") });
                 } else {
-                    try printCBaseType(c.command.ret, writer);
+                    const ret: CBaseType = .{ .v = c.command.ret };
+                    try writer.print("{f}", .{ret});
                 }
                 try writer.writeAll("{return loader.ptrs.");
                 try printCommandName(c.name, writer);
@@ -2703,7 +2852,8 @@ const render = struct {
         if (c.success_codes.len != 0) {
             try writer.print("{s}Result", .{stripped});
         } else {
-            try printCBaseType(c.ret, writer);
+            const ret: CBaseType = .{ .v = c.ret };
+            try writer.print("{f}", .{ret});
         }
         try writer.writeByte(';');
     }
