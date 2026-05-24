@@ -2068,7 +2068,6 @@ const render = struct {
         try writer.writeByte('\n');
     }
     pub fn render(registry: Registry, writer: *Writer, allocator: Allocator) Writer.Error!void {
-        _ = allocator;
         try writer.print("{s}\n", .{@embedFile("preamble.zig")});
         try printConstants(registry.constants, writer);
         var it = registry.types.iterator();
@@ -2089,7 +2088,7 @@ const render = struct {
             }
         }
 
-        //try printCommands(registry, writer, allocator);
+        try printCommands(registry, writer, allocator);
         try printExtensions(registry, writer);
         //try printVulkanContext(registry, writer);
     }
@@ -2714,7 +2713,7 @@ const render = struct {
                 \\{[provider]f}
                 \\extern "vulkan-1" fn {[raw_name]s}(
                 \\{[params]f}
-                \\) callconv(vulkan_api) GlobalFunctions.retType(.{[name]f});
+                \\) callconv(vulkan_api) GlobalFunctions.{[name]f}.getReturnType();
                 \\pub const {[name]f} = {[raw_name]s};
             , .{
                 .provider = provider,
@@ -2723,6 +2722,7 @@ const render = struct {
                 .params = params,
             });
         }
+        try writer.writeAll("};");
     }
     pub fn printCommandGroup(commands: []const CommandWithName, writer: *Writer, print_data: PrintData) Writer.Error!void {
         const conv_funcs =
