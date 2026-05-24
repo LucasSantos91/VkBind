@@ -1770,7 +1770,61 @@ const render = struct {
             fn isAllocator(zig_var: Registry.ZigVar) bool {
                 return std.mem.eql(u8, zig_var.c_var.name, "pAllocator");
             }
-            pub fn printCommand(command: Registry.Command, r: Registry, command_name: []const u8, group: []const u8, w: *Writer) Writer.Error!void {
+            const CodeStatus = struct {
+                has_success_codes: bool,
+                success_only: bool,
+                has_error_codes: bool,
+                has_only_ignored_error_codes: bool,
+
+                pub fn parse(command: Registry.Command) @This() {
+                    var result: @This() = undefined;
+                    if (command.success_codes.len == 0) {
+                        result.has_success_codes = false;
+                        result.success_only = true;
+                    } else {
+                        result.has_success_codes = true;
+                        result.success_only = std.mem.eql(u8, command.success_codes, "VK_SUCCESS");
+                    }
+                    if (command.error_codes.len == 0) {
+                        result.has_error_codes = false;
+                        result.has_only_ignored_error_codes = true;
+                    } else {
+                        result.has_error_codes = true;
+                        var count_error_codes: usize = 0;
+                        var skip: usize = 0;
+                        var it: CommaIterator = .{ .text = command.error_codes };
+                        while (it.next()) |e| {
+                            count_error_codes += 1;
+                            if (shouldErrorBeSkipped(e)) skip += 1;
+                        }
+                        result.has_only_ignored_error_codes = count_error_codes == skip;
+                    }
+                    return result;
+                }
+            };
+            pub fn printCommand(command: Registry.Command, r: Registry, command_name: []const u8, group: []const u8, w: *Writer, code_status: CodeStatus) Writer.Error!void {
+                const type_name = stripPrefix(command_name, "vk");
+                if (code_status.has_success_codes and !code_status.success_only) {
+                    try w.print(
+                        \\pub const {s}Result = enum(@typeInfo(Result).@"enum".tag_type){{
+                        \\pub fn toResult(self: @This()) Result{{return @enumFromInt(@intFromEnum(self));}}
+                    , .{type_name});
+                    var it: CommaIterator = .{ .text = command.success_codes };
+                    while (it.next()) |code| {
+                        try w.print("{[name]s}=@intFromEnum(Result.{[name]s}),", .{ .name = stripPrefix(code, "VK_") });
+                    }
+                    try w.writeAll("};");
+                }
+                if (code_status.has_error_codes and !code_status.has_only_ignored_error_codes) {
+                    try w.print("pub const {s}Error = error{{", .{type_name});
+                    var it: CommaIterator = .{ .text = command.error_codes };
+                    while (it.next()) |code| {
+                        if (shouldErrorBeSkipped(code)) continue;
+                        try w.print("{s},", .{tryStripPrefix(code, "VK_ERROR_") orelse stripPrefix(code, "VK_")});
+                    }
+                    try w.writeAll("};");
+                }
+
                 try printProvider(command.providers, w);
                 try w.writeAll("pub fn ");
                 try printCommandName(command_name, w);
@@ -1784,10 +1838,17 @@ const render = struct {
                     try w.writeByte(',');
                 }
                 try w.writeByte(')');
-                if (command.success_codes.len != 0) {
-                    try w.print("{s}Functions.{s}Result", .{ group, stripPrefix(command_name, "vk") });
+                if (code_status.has_success_codes) {
+                    if (code_status.success_only) {
+                        try w.writeAll("void");
+                    } else {
+                        try w.print("{s}Result", .{type_name});
+                    }
                 } else {
                     try printCBaseType(command.ret, w);
+                }
+                if (code_status.has_error_codes and !code_status.has_only_ignored_error_codes) {
+                    try w.print("!{s}Error", .{type_name});
                 }
                 try w.print("{{assertDependencies({s}Functions.", .{group});
                 try printCommandName(command_name, w);
@@ -1827,7 +1888,8 @@ const render = struct {
             const command_name = command_entry.key_ptr.*;
             const command = command_entry.value_ptr.*;
             if (isGlobalCommand(command, registry)) {
-                try helper.printCommand(command, registry, command_name, "Global", writer);
+                const code_status: helper.CodeStatus = .parse(command);
+                try helper.printCommand(command, registry, command_name, "Global", writer, code_status);
                 try writer.writeAll(
                     \\return switch(comptime config.globals){
                     \\.load_time=>extern_global_functions.
@@ -1859,12 +1921,37 @@ const render = struct {
                 const handle = registry.types.getPtr(first) orelse continue;
                 if (handle != registry_type.value_ptr) continue;
                 const is_instance = handle == instance_handle;
-                try helper.printCommand(command, registry, command_name, if (is_instance) "Instance" else "Device", writer);
-                try writer.print("return {s}_loader.", .{if (is_instance) "instance" else "device"});
+                const code_status: helper.CodeStatus = .parse(command);
+                try helper.printCommand(command, registry, command_name, if (is_instance) "Instance" else "Device", writer, code_status);
+                try writer.print("return {s}{s}_loader.", .{
+                    if (code_status.has_success_codes) "switch(" else "",
+                    if (is_instance) "instance" else "device",
+                });
                 try printCommandName(command_name, writer);
                 try writer.writeAll(".?(");
                 try helper.printParams(command, registry, writer);
-                try writer.writeAll(");}");
+                try writer.writeByte(')');
+                if (code_status.has_success_codes) {
+                    try writer.writeAll("){");
+                    var it: CommaIterator = .{ .text = command.success_codes };
+                    while (it.next()) |code| {
+                        const stripped = stripPrefix(code, "VK_");
+                        try writer.print(".{s}=>", .{stripped});
+                        if (code_status.success_only) {
+                            try writer.writeAll("{},");
+                        } else {
+                            try writer.print(".{s},", .{stripped});
+                        }
+                    }
+                    it = .{ .text = command.error_codes };
+                    while (it.next()) |code| {
+                        if (shouldErrorBeSkipped(code)) continue;
+                        const stripped = stripPrefix(code, "VK_");
+                        try writer.print(".{[name]s} => return error.{[name]s},", .{ .name = stripped });
+                    }
+                    try writer.writeByte('}');
+                }
+                try writer.writeAll(";}");
             }
 
             try writer.writeAll("};");
@@ -1982,9 +2069,14 @@ const render = struct {
         }
         try writer.print("{s},", .{stripPrefix(e.name.name, "VK_")});
     }
+    fn shouldErrorBeSkipped(name: []const u8) bool {
+        // OVERRIDE: Skipping undefined behavior errors
+        if (enumFromName(enum { VK_ERROR_UNKNOWN, VK_ERROR_VALIDATION_FAILED }, name)) |_| return true;
+        return false;
+    }
 
     fn printResultEntry(name: []const u8, writer: *Writer) Writer.Error!void {
-        if (enumFromName(enum { VK_ERROR_UNKNOWN, VK_ERROR_VALIDATION_FAILED }, name)) |_| return;
+        if (shouldErrorBeSkipped(name)) return;
         try writer.print("{[name]s}=@intFromEnum(Result.{[name]s}),", .{ .name = stripPrefix(name, "VK_") });
     }
     fn printCommandName(name: []const u8, writer: *Writer) Writer.Error!void {
