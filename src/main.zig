@@ -1467,17 +1467,8 @@ const render = struct {
         }
         try printComment(zig_var.c_var.comment, writer);
 
-        //OVERRIDE: Overriding API versions from u32 to our own ApiVersion
-        if (enumFromName(enum { apiVersion, pApiVersion }, zig_var.c_var.name)) |n| {
-            const text = switch (n) {
-                .apiVersion => "apiVersion:ApiVersion",
-                .pApiVersion => "pApiVersion:*ApiVersion",
-            };
-            try writer.writeAll(text);
-        } else {
-            try writer.print("@\"{s}\":", .{zig_var.c_var.name});
-            try printZigType(zig_var, others, writer);
-        }
+        try writer.print("@\"{s}\":", .{zig_var.c_var.name});
+        try printZigType(zig_var, others, writer);
     }
     fn printZigType(zig_var: Registry.ZigVar, others: []const Registry.ZigVar, writer: *Writer) Writer.Error!void {
         if (zig_var.c_var.type.amount == .bitfield) {
@@ -1518,7 +1509,11 @@ const render = struct {
             }
             try writer.writeByte(']');
         }
-        if (zig_var.c_var.type.base.ptrs.len != 0 and std.mem.eql(u8, zig_var.c_var.type.base.name, "void")) {
+
+        //OVERRIDE: Overriding API versions from u32 to our own ApiVersion
+        if (enumFromName(enum { apiVersion, pApiVersion }, zig_var.c_var.name)) |_| {
+            try writer.writeAll("ApiVersion");
+        } else if (zig_var.c_var.type.base.ptrs.len != 0 and std.mem.eql(u8, zig_var.c_var.type.base.name, "void")) {
             try writer.writeAll("anyopaque");
         } else {
             try printGenericTypeName(zig_var.c_var.type.base.name, writer);
@@ -1690,7 +1685,7 @@ const render = struct {
 
         try printCommands(registry, writer, allocator);
         try printExtensions(registry, writer);
-        try printVulkanContext(registry, writer, allocator);
+        try printVulkanContext(registry, writer);
     }
     fn isGlobalCommand(command: Registry.Command, registry: Registry) bool {
         if (command.params.len == 0) return true;
@@ -1700,8 +1695,7 @@ const render = struct {
         if (!first_type.type.handle.dispatchable) return true;
         return false;
     }
-    fn printVulkanContext(registry: Registry, writer: *Writer, allocator: Allocator) Writer.Error!void {
-        _ = allocator; // autofix
+    fn printVulkanContext(registry: Registry, writer: *Writer) Writer.Error!void {
         try writer.writeAll(
             \\pub const VulkanContextConfig = struct{
             \\pub const Globals = union(enum){
@@ -1775,8 +1769,9 @@ const render = struct {
                 success_only: bool,
                 has_error_codes: bool,
                 has_only_ignored_error_codes: bool,
+                is_create: bool,
 
-                pub fn parse(command: Registry.Command) @This() {
+                pub fn parse(command: Registry.Command, command_name: []const u8) @This() {
                     var result: @This() = undefined;
                     if (command.success_codes.len == 0) {
                         result.has_success_codes = false;
@@ -1798,6 +1793,19 @@ const render = struct {
                             if (shouldErrorBeSkipped(e)) skip += 1;
                         }
                         result.has_only_ignored_error_codes = count_error_codes == skip;
+                    }
+                    if (command.params.len == 0 or !result.success_only) {
+                        result.is_create = false;
+                    } else blk: {
+                        const last = command.params[command.params.len - 1];
+                        const ptrs = last.c_var.type.base.ptrs;
+                        if (ptrs.len == 0 or ptrs.buffer[0] == .@"const" or (last.extra[0].len.len != 0 and !std.mem.eql(u8, last.extra[0].len, "1"))) {
+                            result.is_create = false;
+                            break :blk;
+                        }
+                        const stripped = stripPrefix(command_name, "vk");
+                        result.is_create = (std.mem.startsWith(u8, stripped, "Create") or
+                            std.mem.startsWith(u8, stripped, "Enumerate"));
                     }
                     return result;
                 }
@@ -1829,7 +1837,7 @@ const render = struct {
                 try w.writeAll("pub fn ");
                 try printCommandName(command_name, w);
                 try w.writeByte('(');
-                for (command.params) |p| {
+                for (command.params[0 .. command.params.len - if (code_status.is_create) @as(u1, 1) else @as(u1, 0)]) |p| {
                     if (isAllocator(p)) continue;
                     try printZigVar(p, command.params, w);
                     if (isDispatchable(p, r)) {
@@ -1840,7 +1848,17 @@ const render = struct {
                 try w.writeByte(')');
                 if (code_status.has_success_codes) {
                     if (code_status.success_only) {
-                        try w.writeAll("void");
+                        if (code_status.is_create) {
+                            var last = command.params[command.params.len - 1];
+                            last.c_var.type.base.ptrs.len = 0;
+                            last.c_var.comment = null;
+                            try printZigType(last, command.params, w);
+                            if (isDispatchable(last, r)) {
+                                try w.writeAll("Wrapper");
+                            }
+                        } else {
+                            try w.writeAll("void");
+                        }
                     } else {
                         try w.print("{s}Result", .{type_name});
                     }
@@ -1850,7 +1868,7 @@ const render = struct {
                 if (code_status.has_error_codes and !code_status.has_only_ignored_error_codes) {
                     try w.print("!{s}Error", .{type_name});
                 }
-                try w.print("{{assertDependencies({s}Functions.", .{group});
+                try w.print("{{comptime assertDependencies({s}Functions.", .{group});
                 try printCommandName(command_name, w);
                 try w.writeAll(");");
             }
@@ -1881,6 +1899,55 @@ const render = struct {
                     }
                 }
             }
+            fn printFunctionBody(
+                command: Registry.Command,
+                command_name: []const u8,
+                loader_name: []const u8,
+                w: *Writer,
+                code_status: CodeStatus,
+                r: Registry,
+            ) Writer.Error!void {
+                if (code_status.is_create) {
+                    const src = command.params[command.params.len - 1];
+                    var last = src;
+                    last.c_var.type.base.ptrs.len -= 1;
+                    last.c_var.comment = null;
+                    try w.writeAll("var temp:");
+                    try printZigType(last, command.params, w);
+                    try w.writeAll("=undefined;");
+                    try w.print("const {s}=&temp;", .{src.c_var.name});
+                }
+                try w.print("return {s} {s}.", .{ if (code_status.has_success_codes) "switch(" else "", loader_name });
+                try printCommandName(command_name, w);
+                try w.writeAll(".?(");
+                try printParams(command, r, w);
+                try w.writeByte(')');
+                if (code_status.has_success_codes) {
+                    try w.writeAll("){");
+                    var it: CommaIterator = .{ .text = command.success_codes };
+                    while (it.next()) |code| {
+                        const stripped = stripPrefix(code, "VK_");
+                        try w.print(".{s}=>", .{stripped});
+                        if (code_status.success_only) {
+                            if (code_status.is_create) {
+                                try w.writeAll("temp,");
+                            } else {
+                                try w.writeAll("{},");
+                            }
+                        } else {
+                            try w.print(".{s},", .{stripped});
+                        }
+                    }
+                    it = .{ .text = command.error_codes };
+                    while (it.next()) |code| {
+                        if (shouldErrorBeSkipped(code)) continue;
+                        const stripped = stripPrefix(code, "VK_");
+                        try w.print(".{[name]s} => error.{[name]s},", .{ .name = stripped });
+                    }
+                    try w.writeByte('}');
+                }
+                try w.writeAll(";}");
+            }
         };
 
         var command_it = registry.commands.iterator();
@@ -1888,21 +1955,23 @@ const render = struct {
             const command_name = command_entry.key_ptr.*;
             const command = command_entry.value_ptr.*;
             if (isGlobalCommand(command, registry)) {
-                const code_status: helper.CodeStatus = .parse(command);
+                const code_status: helper.CodeStatus = .parse(command, command_name);
                 try helper.printCommand(command, registry, command_name, "Global", writer, code_status);
                 try writer.writeAll(
-                    \\return switch(comptime config.globals){
-                    \\.load_time=>extern_global_functions.
+                    \\const f = switch(comptime config.globals){
+                    \\.load_time=>extern_global_functions,
+                    \\.run_time => globals,
+                    \\};
                 );
-                try printCommandName(command_name, writer);
-                try writer.writeAll(
-                    \\,
-                    \\.run_time => globals.
+
+                try helper.printFunctionBody(
+                    command,
+                    command_name,
+                    "f",
+                    writer,
+                    code_status,
+                    registry,
                 );
-                try printCommandName(command_name, writer);
-                try writer.writeAll("}.?(");
-                try helper.printParams(command, registry, writer);
-                try writer.writeAll(");}");
             }
         }
 
@@ -1921,37 +1990,17 @@ const render = struct {
                 const handle = registry.types.getPtr(first) orelse continue;
                 if (handle != registry_type.value_ptr) continue;
                 const is_instance = handle == instance_handle;
-                const code_status: helper.CodeStatus = .parse(command);
-                try helper.printCommand(command, registry, command_name, if (is_instance) "Instance" else "Device", writer, code_status);
-                try writer.print("return {s}{s}_loader.", .{
-                    if (code_status.has_success_codes) "switch(" else "",
-                    if (is_instance) "instance" else "device",
-                });
-                try printCommandName(command_name, writer);
-                try writer.writeAll(".?(");
-                try helper.printParams(command, registry, writer);
-                try writer.writeByte(')');
-                if (code_status.has_success_codes) {
-                    try writer.writeAll("){");
-                    var it: CommaIterator = .{ .text = command.success_codes };
-                    while (it.next()) |code| {
-                        const stripped = stripPrefix(code, "VK_");
-                        try writer.print(".{s}=>", .{stripped});
-                        if (code_status.success_only) {
-                            try writer.writeAll("{},");
-                        } else {
-                            try writer.print(".{s},", .{stripped});
-                        }
-                    }
-                    it = .{ .text = command.error_codes };
-                    while (it.next()) |code| {
-                        if (shouldErrorBeSkipped(code)) continue;
-                        const stripped = stripPrefix(code, "VK_");
-                        try writer.print(".{[name]s} => return error.{[name]s},", .{ .name = stripped });
-                    }
-                    try writer.writeByte('}');
-                }
-                try writer.writeAll(";}");
+                const group = if (is_instance) "Instance" else "Device";
+                const code_status: helper.CodeStatus = .parse(command, command_name);
+                try helper.printCommand(command, registry, command_name, group, writer, code_status);
+                try helper.printFunctionBody(
+                    command,
+                    command_name,
+                    if (is_instance) "instance_loader" else "device_loader",
+                    writer,
+                    code_status,
+                    registry,
+                );
             }
 
             try writer.writeAll("};");
