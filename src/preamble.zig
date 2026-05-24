@@ -158,7 +158,7 @@ fn nullValue(comptime T: type) T {
     };
 }
 
-pub fn getFunctionVkName(func: anytype) []const u8 {
+fn getFunctionVkName(func: anytype) []const u8 {
     const t = @tagName(func);
     return "vk" ++ std.ascii.toUpper(t[0]) ++ t[1..];
 }
@@ -183,3 +183,8 @@ fn getFunctionVkNames(comptime Functions: type, comptime funcs: []const Function
     }
 }
 fn maybeUnused(_: anytype) void {}
+pub fn isDispatchableHandle(comptime T: type) bool {
+    const info = @typeInfo(T);
+    if (info != .@"enum") return false;
+    return info.@"enum".tag_type == usize;
+}

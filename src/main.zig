@@ -2067,7 +2067,7 @@ const render = struct {
         }
         try writer.writeByte('\n');
     }
-    pub fn render(registry: Registry, writer: *Writer, allocator: Allocator) Writer.Error!void {
+    pub fn render(registry: Registry, writer: *Writer) Writer.Error!void {
         try writer.print("{s}\n", .{@embedFile("preamble.zig")});
         try printConstants(registry.constants, writer);
         var it = registry.types.iterator();
@@ -2088,7 +2088,7 @@ const render = struct {
             }
         }
 
-        try printCommands(registry, writer, allocator);
+        try printCommands(registry, writer);
         try printExtensions(registry, writer);
         //try printVulkanContext(registry, writer);
     }
@@ -2543,28 +2543,7 @@ const render = struct {
         try writer.writeByte(std.ascii.toLower(stripped[0]));
         try writer.writeAll(stripped[1..]);
     }
-    pub fn printCommands(registry: Registry, writer: *Writer, allocator: Allocator) Writer.Error!void {
-        var base: std.ArrayList(CommandWithName) = .empty;
-        var instance: std.ArrayList(CommandWithName) = .empty;
-        var device: std.ArrayList(CommandWithName) = .empty;
-
-        var it = registry.commands.iterator();
-        while (it.next()) |c| {
-            const new: CommandWithName = .{
-                .name = c.key_ptr.*,
-                .command = c.value_ptr.*,
-            };
-            if (isGlobalCommand(new.command, registry)) {
-                base.append(allocator, new) catch @panic("oom");
-                continue;
-            }
-            if (new.command.params.len != 0 and std.mem.eql(u8, new.command.params[0].c_var.type.base.name, "VkInstance")) {
-                instance.append(allocator, new) catch @panic("oom");
-                continue;
-            }
-            device.append(allocator, new) catch @panic("oom");
-        }
-
+    pub fn printCommands(registry: Registry, writer: *Writer) Writer.Error!void {
         try writer.writeAll(
             \\
             \\/// Any of these is sufficient to satisfy command requirements
@@ -2578,22 +2557,8 @@ const render = struct {
             \\}
             \\};
         );
-        try printExternGlobalFunctions(base.items, writer);
-        try printCommandGroup(base.items, writer, .{
-            .func_arg = "",
-            .group = "Global",
-            .load_param = ".null_handle",
-        });
-        try printCommandGroup(instance.items, writer, .{
-            .func_arg = ", instance: Instance",
-            .group = "Instance",
-            .load_param = "instance",
-        });
-        try printCommandGroup(device.items, writer, .{
-            .func_arg = ", device: Device",
-            .group = "Device",
-            .load_param = "device",
-        });
+        try printExternGlobalFunctions(registry, writer);
+        try printCommandGroup(registry, writer);
     }
     const PrintData = struct {
         group: []const u8,
@@ -2713,39 +2678,48 @@ const render = struct {
             try writer.writeAll(self.name);
         }
     };
-    fn printExternGlobalFunctions(commands: []const CommandWithName, writer: *Writer) Writer.Error!void {
+    fn printExternGlobalFunctions(registry: Registry, writer: *Writer) Writer.Error!void {
         try writer.writeAll(
             \\
-            \\/// Provides global functions as load-time loaded functions.
-            \\pub const extern_global_functions = struct{
+            \\/// Provides global commands as load-time loaded functions.
+            \\pub const extern_global_commands = struct{
         );
-        for (commands) |c| {
-            const provider: Provider = .{ .p = c.command.providers };
-            const command_name: CommandFunctionName = .parseFromText(c.name);
-            const params: Params = .{ .params = c.command.params };
+        var it = registry.commands.iterator();
+        while (it.next()) |entry| {
+            const name = entry.key_ptr.*;
+            const command = entry.value_ptr.*;
+            if (!isGlobalCommand(command, registry)) continue;
+            const provider: Provider = .{ .p = command.providers };
+            const command_name: CommandFunctionName = .parseFromText(name);
+            const params: Params = .{ .params = command.params };
             try writer.print(
                 \\{[provider]f}
                 \\extern "vulkan-1" fn {[raw_name]s}(
                 \\{[params]f}
-                \\) callconv(vulkan_api) GlobalFunctions.{[name]f}.getReturnType();
+                \\) callconv(vulkan_api) Commands.{[name]f}.getReturnType();
                 \\pub const {[name]f} = {[raw_name]s};
             , .{
                 .provider = provider,
                 .name = command_name,
-                .raw_name = c.name,
+                .raw_name = name,
                 .params = params,
             });
         }
         try writer.writeAll("};");
     }
-    pub fn printCommandGroup(commands: []const CommandWithName, writer: *Writer, print_data: PrintData) Writer.Error!void {
+    pub fn printCommandGroup(registry: Registry, writer: *Writer) Writer.Error!void {
+        const it = registry.commands.iterator();
+        const Iterator = @TypeOf(it);
         const CommandList = struct {
-            commands: []const CommandWithName,
+            commands: Iterator,
 
             pub fn format(self: @This(), w: *Writer) Writer.Error!void {
-                for (self.commands) |c| {
-                    const provider: Provider = .{ .p = c.command.providers };
-                    const name: CommandFunctionName = .parseFromText(c.name);
+                var i = self.commands;
+                while (i.next()) |entry| {
+                    const command = entry.value_ptr.*;
+                    const command_name = entry.key_ptr.*;
+                    const provider: Provider = .{ .p = command.providers };
+                    const name: CommandFunctionName = .parseFromText(command_name);
                     try w.print(
                         \\{[provider]f}
                         \\{[name]f},
@@ -2786,11 +2760,14 @@ const render = struct {
         };
 
         const CommandSignatureTypeGroup = struct {
-            commands: []const CommandWithName,
+            commands: Iterator,
 
             pub fn format(self: @This(), w: *Writer) Writer.Error!void {
-                for (self.commands) |c| {
-                    const s: CommandSignatureType = .parse(c.name, c.command);
+                var i = self.commands;
+                while (i.next()) |entry| {
+                    const command = entry.value_ptr.*;
+                    const command_name = entry.key_ptr.*;
+                    const s: CommandSignatureType = .parse(command_name, command);
                     try w.print("{f}", .{s});
                 }
             }
@@ -2836,15 +2813,18 @@ const render = struct {
             }
         };
         const Requirements = struct {
-            commands: []const CommandWithName,
+            commands: Iterator,
 
             pub fn format(self: @This(), w: *Writer) Writer.Error!void {
                 try w.writeAll(
                     \\pub fn requirements(self: @This()) CommandDependencyRequirements{
                     \\    return switch(self) {
                 );
-                for (self.commands) |c| {
-                    const req: Requirement = .parse(.parseFromText(c.name), c.command.providers);
+                var i = self.commands;
+                while (i.next()) |entry| {
+                    const command = entry.value_ptr.*;
+                    const command_name = entry.key_ptr.*;
+                    const req: Requirement = .parse(.parseFromText(command_name), command.providers);
                     try w.print("{f}", .{req});
                 }
 
@@ -2855,9 +2835,9 @@ const render = struct {
             }
         };
 
-        const signature_group: CommandSignatureTypeGroup = .{ .commands = commands };
-        const command_list: CommandList = .{ .commands = commands };
-        const requirements: Requirements = .{ .commands = commands };
+        const signature_group: CommandSignatureTypeGroup = .{ .commands = it };
+        const command_list: CommandList = .{ .commands = it };
+        const requirements: Requirements = .{ .commands = it };
         const conv_functions =
             \\pub fn getType(comptime self: @This()) type{
             \\const t = @tagName(self);
@@ -2878,10 +2858,20 @@ const render = struct {
             \\pub fn isSatisfied(command: @This(), provided: CommandDependencyRequirements) bool{
             \\    return provided.satifies(command.requirements());
             \\}
+            \\pub const LoaderType = enum{ global, instance, device };
+            \\pub fn loaderType(self: @This()) LoaderType{
+            \\    const Type = self.getType();
+            \\    const info = @typeInfo(Type).@"fn";
+            \\    if(info.params.len == 0) return .global;
+            \\    const first = info.params[0];
+            \\    if(!isDispatchableHandle(first.type)) return .global;
+            \\    if(first.type.? == Instance) return .instance;
+            \\    return .device;
+            \\}
         ;
 
         try writer.print(
-            \\pub const {[group]s}Functions=enum{{
+            \\pub const Commands=enum{{
             \\{[command_list]f}
             \\pub const all_commands = std.enums.values(@This());
             \\{[command_signatures]f}
@@ -2889,7 +2879,6 @@ const render = struct {
             \\{[requirements]f}
             \\}};
         , .{
-            .group = print_data.group,
             .command_list = command_list,
             .command_signatures = signature_group,
             .conv_functions = conv_functions,
@@ -2995,7 +2984,7 @@ pub fn main(init: std.process.Init) !void {
     const source = blk: {
         var writer: Writer.Allocating = .init(allocator);
         const registry = Registry.parse(api, xml, allocator);
-        try render.render(registry, &writer.writer, allocator);
+        try render.render(registry, &writer.writer);
         break :blk try writer.toOwnedSliceSentinel(0);
     };
 
