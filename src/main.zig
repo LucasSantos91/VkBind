@@ -1884,7 +1884,7 @@ const render = struct {
         try writer.writeAll(
             \\
             \\/// Provides global functions as load-time loaded functions.
-            \\pub const global_functions = struct{
+            \\pub const extern_global_functions = struct{
         );
         for (commands) |c| {
             try printProvider(c.command.providers, writer);
@@ -1904,6 +1904,15 @@ const render = struct {
             try writer.print("={s};", .{c.name});
         }
         try writer.writeAll("};");
+        try writer.writeAll("pub const extern_global_loader: GlobalLoader(.all_commands) = .{.ptrs=.{");
+        for (commands) |c| {
+            try writer.writeByte('.');
+            try printCommandName(c.name, writer);
+            try writer.writeAll("=extern_global_functions.");
+            try printCommandName(c.name, writer);
+            try writer.writeByte(',');
+        }
+        try writer.writeAll("}};");
     }
     pub fn printCommandGroup(commands: []const CommandWithName, writer: *Writer, print_data: PrintData) Writer.Error!void {
         const conv_funcs =
@@ -1935,6 +1944,7 @@ const render = struct {
                 try printCommandName(c.name, writer);
                 try writer.writeByte(',');
             }
+            try writer.writeAll("pub const all_commands = std.enums.values(@This());");
             for (commands) |c| {
                 try printCommandType(c.name, c.command, writer);
             }
