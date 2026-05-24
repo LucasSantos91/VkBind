@@ -1691,6 +1691,14 @@ const render = struct {
         try printCommands(registry, writer, allocator);
         try printExtensions(registry, writer);
     }
+    fn isGlobalCommand(command: Registry.Command, registry: Registry) bool {
+        if (command.params.len == 0) return true;
+        const first = command.params[0];
+        const first_type = registry.types.get(first.c_var.type.base.name) orelse @panic("Missing type for first parameter");
+        if (first_type.type != .handle) return true;
+        if (!first_type.type.handle.dispatchable) return true;
+        return false;
+    }
 
     fn printExtensions(registry: Registry, writer: *Writer) Writer.Error!void {
         try writer.writeAll("pub const Extension = enum{pub const Type = enum{device, instance};");
@@ -1814,12 +1822,6 @@ const render = struct {
         try writer.writeAll(stripped[1..]);
     }
     pub fn printCommands(registry: Registry, writer: *Writer, allocator: Allocator) Writer.Error!void {
-        const GlobalCommands = enum {
-            vkEnumerateInstanceVersion,
-            vkEnumerateInstanceExtensionProperties,
-            vkEnumerateInstanceLayerProperties,
-            vkCreateInstance,
-        };
         var base: std.ArrayList(CommandWithName) = .empty;
         var instance: std.ArrayList(CommandWithName) = .empty;
         var device: std.ArrayList(CommandWithName) = .empty;
@@ -1830,7 +1832,7 @@ const render = struct {
                 .name = c.key_ptr.*,
                 .command = c.value_ptr.*,
             };
-            if (enumFromName(GlobalCommands, c.key_ptr.*)) |_| {
+            if (isGlobalCommand(new.command, registry)) {
                 base.append(allocator, new) catch @panic("oom");
                 continue;
             }
