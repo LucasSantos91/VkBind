@@ -1843,12 +1843,19 @@ const render = struct {
         });
     }
     fn printHandle(name: []const u8, e_c: Registry.TypeCommon, writer: *Writer) Writer.Error!void {
-        try printComment(e_c.comment, writer);
-        try printProvider(e_c.providers, writer);
+        const comment: Comment = .parse(e_c.comment);
+        const provider: Provider = .{ .p = e_c.providers };
         const e = e_c.type.handle;
-        try writer.print("pub const {s}=enum({s}){{null_handle,_}};", .{
-            stripPrefix(name, "Vk"),
-            if (e.dispatchable) "usize" else "u64",
+        const n: TypeName = .parse(name);
+        try writer.print(
+            \\{[comment]f}
+            \\{[provider]f}
+            \\pub const {[name]f}=enum({[t]s}){{null_handle,_}};
+        , .{
+            .comment = comment,
+            .provider = provider,
+            .name = n,
+            .t = if (e.dispatchable) "usize" else "u64",
         });
     }
     fn printBasetype(name: []const u8, e: Registry.TypeCommon, writer: *Writer) Writer.Error!void {
@@ -1941,13 +1948,21 @@ const render = struct {
         try writer.writeByte(';');
     }
     fn printAlias(name: []const u8, e_c: Registry.TypeCommon, writer: *Writer) Writer.Error!void {
-        try printComment(e_c.comment, writer);
-        try printProvider(e_c.providers, writer);
+        const comment: Comment = .parse(e_c.comment);
+        const provider: Provider = .{ .p = e_c.providers };
         const e = e_c.type.alias;
-        const prefix = "Vk";
-        const n = stripPrefix(name, prefix);
-        const c = stripPrefix(e.canonical, prefix);
-        try writer.print("pub const {s}={s};", .{ n, c });
+        const a_name: TypeName = .parse(name);
+        const c_name: TypeName = .parse(e.canonical);
+        try writer.print(
+            \\{[comment]f}
+            \\{[provider]f}
+            \\pub const {[a_name]f} = {[c_name]f};
+        , .{
+            .comment = comment,
+            .provider = provider,
+            .a_name = a_name,
+            .c_name = c_name,
+        });
     }
     fn printConstants(constants: []const Registry.Constant, writer: *Writer) Writer.Error!void {
         for (constants) |c| {
