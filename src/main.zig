@@ -1690,6 +1690,7 @@ const render = struct {
 
         try printCommands(registry, writer, allocator);
         try printExtensions(registry, writer);
+        try printVulkanContext(registry, writer);
     }
     fn isGlobalCommand(command: Registry.Command, registry: Registry) bool {
         if (command.params.len == 0) return true;
@@ -1698,6 +1699,87 @@ const render = struct {
         if (first_type.type != .handle) return true;
         if (!first_type.type.handle.dispatchable) return true;
         return false;
+    }
+    fn printVulkanContext(registry: Registry, writer: *Writer) Writer.Error!void {
+        try writer.writeAll(
+            \\pub const VulkanContextConfig = struct{
+            \\pub const Globals = union(enum){
+            \\load_time,
+            \\run_time: []const GlobalFunctions,
+            \\};
+            \\ globals: Globals = .load_time,
+            \\ instance: []const InstanceFunctions,
+            \\ device: []const DeviceFunctions,
+            \\ apiVersion: ApiVersion = .{ .minor = 0 },
+            \\ extensions: []const Extension = &.{},
+            \\};
+            \\pub fn VulkanContext(comptime config: VulkanContextConfig) type{
+            \\return struct{
+            \\comptime{ if(Extension.missingDependenciesFor(config.extensions, config.apiVersion)) |e|
+            \\@panic("Missing dependencies for extension " ++ e.name.name);
+            \\}
+            \\var globals: switch(config.globals){
+            \\.load_time => void,
+            \\.run_time => |f| GlobalFunctions(f),
+            \\} = undefined;
+            \\pub fn initGlobalLoader(loader: anytype) void{
+            \\switch(comptime config.globals){
+            \\.load_time => {},
+            \\.run_time => globals.init(loader),
+            \\}}
+            \\var instance_loader: InstanceLoader(config.instance) = undefined;
+            \\var device_loader: DeviceLoader(config.device) = undefined;
+            \\pub fn initInstanceLoader(load_function: anytype, instance: Instance) void{
+            \\instance_loader.init(load_function, instance);
+            \\}
+            \\pub fn initDeviceLoader(load_function: anytype, device: Device) void{
+            \\device_loader.init(load_function, device);
+            \\}
+        );
+        const printCommand = struct {
+            pub fn call(command: Registry.Command, command_name: []const u8, group: []const u8, w: *Writer) Writer.Error!void {
+                try printProvider(command.providers, w);
+                try w.writeAll("pub fn ");
+                try printCommandName(command_name, w);
+                try w.writeByte('(');
+                for (command.params) |p| {
+                    try printZigVar(p, command.params, w);
+                    try w.writeByte(',');
+                }
+                try w.writeByte(')');
+                if (command.success_codes.len != 0) {
+                    try w.print("{s}Functions.{s}Result", .{ group, stripPrefix(command_name, "vk") });
+                } else {
+                    try printCBaseType(command.ret, w);
+                }
+                try w.writeByte('{');
+            }
+        }.call;
+
+        var command_it = registry.commands.iterator();
+        while (command_it.next()) |command_entry| {
+            const command_name = command_entry.key_ptr.*;
+            const command = command_entry.value_ptr;
+            if (isGlobalCommand(command.*, registry)) {
+                try printCommand(command.*, command_name, "Global", writer);
+                try writer.writeAll(
+                    \\return switch(comptime config.globals){
+                    \\.load_time=>extern_global_functions.
+                );
+                try printCommandName(command_name, writer);
+                try writer.writeAll(
+                    \\,
+                    \\.run_time => globals.
+                );
+                try printCommandName(command_name, writer);
+                try writer.writeAll("}.?(");
+                for (command.params) |p| {
+                    try writer.print("@\"{s}\",", .{p.c_var.name});
+                }
+                try writer.writeAll(");}");
+            }
+        }
+        try writer.writeAll("};}");
     }
 
     fn printExtensions(registry: Registry, writer: *Writer) Writer.Error!void {
