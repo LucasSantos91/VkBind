@@ -2704,6 +2704,15 @@ const render = struct {
             }
         }
     };
+    const ExtensionName = struct {
+        name: []const u8,
+        pub fn parse(name: Registry.ExtensionName) @This() {
+            return .{ .name = stripPrefix(name.name, "VK_") };
+        }
+        pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+            try writer.writeAll(self.name);
+        }
+    };
     fn printExternGlobalFunctions(commands: []const CommandWithName, writer: *Writer) Writer.Error!void {
         try writer.writeAll(
             \\
@@ -2736,10 +2745,11 @@ const render = struct {
             pub fn format(self: @This(), w: *Writer) Writer.Error!void {
                 for (self.commands) |c| {
                     const provider: Provider = .{ .p = c.command.providers };
+                    const name: CommandFunctionName = .parseFromText(c.name);
                     try w.print(
                         \\{[provider]f}
-                        \\{[name]s},
-                    , .{ .name = c.name, .provider = provider });
+                        \\{[name]f},
+                    , .{ .name = name, .provider = provider });
                 }
             }
         };
@@ -2785,9 +2795,69 @@ const render = struct {
                 }
             }
         };
+        const Requirement = struct {
+            name: CommandFunctionName,
+            version: []const u8,
+            extensions: ExtensionList,
+
+            const ExtensionList = struct {
+                extensions: []const Registry.ExtensionName,
+
+                pub fn format(self: @This(), w: *Writer) Writer.Error!void {
+                    for (self.extensions) |e| {
+                        const n: ExtensionName = .parse(e);
+                        try w.print(".{f},", .{n});
+                    }
+                }
+            };
+
+            pub fn parse(command_name: CommandFunctionName, providers: Registry.Providers) @This() {
+                return .{
+                    .name = command_name,
+                    .version = if (providers.version) |v|
+                        stripPrefix(v.number, "1.")
+                    else
+                        "99",
+                    .extensions = .{ .extensions = providers.extensions },
+                };
+            }
+
+            pub fn format(self: @This(), w: *Writer) Writer.Error!void {
+                try w.print(
+                    \\.{[name]f} => .{{ 
+                    \\  .version = .{{ .minor = {[version]s} }},
+                    \\  .extensions = &.{{ {[extensions]f} }},
+                    \\}},
+                , .{
+                    .name = self.name,
+                    .version = self.version,
+                    .extensions = self.extensions,
+                });
+            }
+        };
+        const Requirements = struct {
+            commands: []const CommandWithName,
+
+            pub fn format(self: @This(), w: *Writer) Writer.Error!void {
+                try w.writeAll(
+                    \\pub fn requirements(self: @This()) CommandDependencyRequirements{
+                    \\    return switch(self) {
+                );
+                for (self.commands) |c| {
+                    const req: Requirement = .parse(.parseFromText(c.name), c.command.providers);
+                    try w.print("{f}", .{req});
+                }
+
+                try w.writeAll(
+                    \\  };
+                    \\}
+                );
+            }
+        };
 
         const signature_group: CommandSignatureTypeGroup = .{ .commands = commands };
         const command_list: CommandList = .{ .commands = commands };
+        const requirements: Requirements = .{ .commands = commands };
         const conv_functions =
             \\pub fn getType(comptime self: @This()) type{
             \\const t = @tagName(self);
@@ -2816,15 +2886,17 @@ const render = struct {
             \\pub const all_commands = std.enums.values(@This());
             \\{[command_signatures]f}
             \\{[conv_functions]s}
+            \\{[requirements]f}
             \\}};
         , .{
             .group = print_data.group,
             .command_list = command_list,
             .command_signatures = signature_group,
             .conv_functions = conv_functions,
+            .requirements = requirements,
         });
         //try writer.writeAll(
-        //    \\pub fn requirements(command: @This())CommandDependencyRequirements{
+        //    \\
         //    \\return switch(command){
         //);
         //for (commands) |c| {
