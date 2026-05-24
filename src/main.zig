@@ -1560,22 +1560,73 @@ const render = struct {
         return stripBitSuffix(n);
     }
     fn printEnum(name: []const u8, e_c: Registry.TypeCommon, writer: *Writer) Writer.Error!void {
-        try printComment(e_c.comment, writer);
-        try printProvider(e_c.providers, writer);
+        const Aliases = struct {
+            aliases: []const Registry.Enum.Alias,
+            enum_name: TypeName,
+
+            pub fn format(self: @This(), w: *Writer) Writer.Error!void {
+                for (self.aliases) |a| {
+                    const c: Comment = .parse(a.comment);
+                    const p: Provider = .{ .p = a.providers };
+                    const alias_name: EnumName = .parse(a.name, self.enum_name);
+                    const canonical_name: EnumName = .parse(a.canonical, self.enum_name);
+                    try w.print(
+                        \\{[comment]f}
+                        \\{[provider]f}
+                        \\pub const {[alias_name]f} = @This().{[canonical_name]f};
+                    , .{
+                        .comment = c,
+                        .provider = p,
+                        .alias_name = alias_name,
+                        .canonical_name = canonical_name,
+                    });
+                }
+            }
+        };
+        const Values = struct {
+            values: []const Registry.Enum.Value,
+            enum_name: TypeName,
+
+            pub fn format(self: @This(), w: *Writer) Writer.Error!void {
+                for (self.values) |v| {
+                    const c: Comment = .parse(v.comment);
+                    const p: Provider = .{ .p = v.providers };
+                    const n: EnumName = .parse(v.name, self.enum_name);
+
+                    try w.print(
+                        \\{[comment]f}
+                        \\{[provider]f}
+                        \\{[name]f} = {[value]s},
+                    , .{
+                        .comment = c,
+                        .provider = p,
+                        .name = n,
+                        .value = v.value,
+                    });
+                }
+            }
+        };
+
+        const comment: Comment = .parse(e_c.comment);
+        const provider: Provider = .{ .p = e_c.providers };
         const e = e_c.type.@"enum";
-        const stripped_name: TypeName = .parse(name);
-        try writer.print("pub const {f}=enum(c_int){{", .{stripped_name});
-        for (e.values) |v| {
-            try printComment(v.comment, writer);
-            try printProvider(v.providers, writer);
-            try writer.print("@\"{s}\"={s},", .{ stripEnumName(v.name, stripped_name), v.value });
-        }
-        for (e.aliases) |a| {
-            try printComment(a.comment, writer);
-            try printProvider(a.providers, writer);
-            try writer.print("pub const @\"{s}\"=@This().@\"{s}\";", .{ stripEnumName(a.name, stripped_name), stripEnumName(a.canonical, stripped_name) });
-        }
-        try writer.writeAll("};");
+        const enum_name: TypeName = .parse(name);
+        const values: Values = .{ .values = e.values, .enum_name = enum_name };
+        const aliases: Aliases = .{ .aliases = e.aliases, .enum_name = enum_name };
+        try writer.print(
+            \\{[comment]f}
+            \\{[provider]f}
+            \\pub const {[name]f}=enum(c_int){{
+            \\{[values]f}
+            \\{[aliases]f}
+            \\}};
+        , .{
+            .name = enum_name,
+            .comment = comment,
+            .provider = provider,
+            .values = values,
+            .aliases = aliases,
+        });
     }
     fn printStruct(name: []const u8, e_c: Registry.TypeCommon, writer: *Writer) Writer.Error!void {
         try printComment(e_c.comment, writer);
