@@ -1268,68 +1268,252 @@ const render = struct {
             });
         }
     }
+    const Mixins = struct {
+        mixins: []const []const u8,
+        mixin_kind: []const u8,
+        flags_name: TypeName,
+        flag_bits_name: TypeName,
+
+        pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+            for (self.mixins) |m| {
+                try writer.print(
+                    \\pub const {[mixin]s}={[mixin_kind]s}Mixin({[flags]f},{[flag_bits]f}).{[mixin]s};
+                , .{
+                    .mixin = m,
+                    .mixin_kind = self.mixin_kind,
+                    .flags = self.flags_name,
+                    .flag_bits = self.flag_bits_name,
+                });
+            }
+        }
+    };
+    const Comment = struct {
+        text: ?[]const u8,
+
+        pub fn parse(text: ?[]const u8) @This() {
+            const t = text orelse return .{ .text = null };
+            return .{ .text = tryStripPrefix(t, "// ") orelse t };
+        }
+
+        pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+            if (self.text) |t| {
+                try writer.print("\n/// {s}\n", .{t});
+            }
+        }
+    };
+    const Provider = struct {
+        p: Registry.Providers,
+
+        pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+            const p = self.p;
+            if (p.version == null and p.extensions.len == 0) return;
+            try writer.writeAll(
+                \\
+                \\/// Provided by 
+            );
+            if (p.version) |version| {
+                try writer.print("Vulkan {s}", .{version.number});
+                if (p.extensions.len != 0) {
+                    try writer.writeAll(", ");
+                }
+            }
+            for (p.extensions[0..p.extensions.len -| 1]) |e| {
+                try writer.print("{s}, ", .{e.name});
+            }
+            if (p.extensions.len != 0) {
+                try writer.writeAll(p.extensions[p.extensions.len - 1].name);
+            }
+            try writer.writeByte('\n');
+        }
+    };
+    const TypeName = struct {
+        name: []const u8,
+
+        pub fn parse(name: []const u8) @This() {
+            return .{ .name = stripPrefix(name, "Vk") };
+        }
+        pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+            try writer.writeAll(self.name);
+        }
+    };
+    const EnumName = struct {
+        name: []const u8,
+
+        pub fn parse(entry_name: []const u8, enum_name: TypeName) @This() {
+            return .{ .name = stripEnumNameAndBitSuffix(entry_name, enum_name) };
+        }
+        pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+            try writer.print("@\"{s}\"", .{self.name});
+        }
+    };
     fn printFlags(registry: Registry, name: []const u8, e_c: Registry.TypeCommon, writer: *Writer) Writer.Error!void {
-        const mixins: []const []const u8 = &.{ "toInt", "fromInt", "merge", "intersection", "negation", "difference", "toBit", "fromBit", "set", "unset" };
+        const mixins_funcs: []const []const u8 = &.{ "toInt", "fromInt", "merge", "intersection", "negation", "difference", "toBit", "fromBit", "set", "unset" };
 
-        try printComment(e_c.comment, writer);
-        try printProvider(e_c.providers, writer);
+        const comment: Comment = .parse(e_c.comment);
+        const provider: Provider = .{ .p = e_c.providers };
         const e = e_c.type.flags;
+        const flags_name: TypeName = .parse(name);
+        const Bits = struct {
+            b: Registry.FlagBits,
+            flags_name: TypeName,
 
-        const stripped = stripPrefix(name, "Vk");
-        try writer.print("pub const {s}=packed struct(u{t}){{", .{ stripped, e.bitwidth });
+            const Reserved = struct {
+                diff: u8,
+                bitpos: u8,
+
+                pub fn format(self: @This(), w: *Writer) Writer.Error!void {
+                    if (self.diff > 1) {
+                        try w.print("_reserved_{}:u{} = 0,", .{ self.bitpos, self.diff - 1 });
+                    }
+                }
+            };
+
+            pub fn format(self: @This(), w: *Writer) Writer.Error!void {
+                const flag_bits = self.b;
+                var last_bitpos = if (flag_bits.bits.len != 0) flag_bits.bits[0].bitpos else undefined;
+                for (flag_bits.bits) |b| {
+                    const bit_comment: Comment = .parse(b.comment);
+                    const bit_provider: Provider = .{ .p = b.providers };
+                    const bit_name: EnumName = .parse(b.name, self.flags_name);
+                    const diff = b.bitpos - last_bitpos;
+                    const reserved: Reserved = .{ .diff = diff, .bitpos = b.bitpos };
+                    try w.print(
+                        \\{[comment]f}
+                        \\{[provider]f}
+                        \\{[reserved]f}
+                        \\{[bit_name]f}: bool = false,
+                    , .{
+                        .comment = bit_comment,
+                        .provider = bit_provider,
+                        .bit_name = bit_name,
+                        .reserved = reserved,
+                    });
+                    last_bitpos = b.bitpos;
+                }
+                for (flag_bits.aggregates) |agg| {
+                    const bit_comment: Comment = .parse(agg.comment);
+                    const bit_provider: Provider = .{ .p = agg.providers };
+                    const bit_name: EnumName = .parse(agg.name, self.flags_name);
+                    try w.print(
+                        \\{[comment]f}
+                        \\{[provider]f}
+                        \\pub const {[bit_name]f}: @This() = @bitCast({[value]s});
+                    , .{
+                        .comment = bit_comment,
+                        .provider = bit_provider,
+                        .bit_name = bit_name,
+                        .value = agg.value,
+                    });
+                }
+            }
+        };
+        var mixins: Mixins = .{
+            .mixins = mixins_funcs,
+            .mixin_kind = "Flags",
+            .flags_name = flags_name,
+            .flag_bits_name = .{ .name = "undefined" },
+        };
+        try writer.print(
+            \\{[comment]f}
+            \\{[provider]f}
+            \\pub const {[name]f} = packed struct(u{[bitwidth]t}){{
+            \\
+        , .{
+            .comment = comment,
+            .provider = provider,
+            .name = flags_name,
+            .bitwidth = e.bitwidth,
+        });
         if (e.bit_flags) |flag_bits_name| {
             const flag_bits_ = registry.resolveAlias(flag_bits_name);
             if (flag_bits_.type != .flag_bits) panic("Expected {s} to be FlagBits", .{flag_bits_name});
             const flag_bits = flag_bits_.type.flag_bits;
-            var last_bitpos = if (flag_bits.bits.len != 0) flag_bits.bits[0].bitpos else undefined;
-            for (flag_bits.bits) |b| {
-                try printComment(b.comment, writer);
-                try printProvider(b.providers, writer);
-                const diff = b.bitpos - last_bitpos;
-                if (diff > 1) {
-                    try writer.print("_reserved_{}:u{} = 0,", .{ b.bitpos, diff - 1 });
-                }
-                try writer.print("@\"{s}\":bool=false,", .{stripEnumNameAndBitSuffix(b.name, stripped)});
-                last_bitpos = b.bitpos;
-            }
-            for (flag_bits.aggregates) |agg| {
-                try printComment(agg.comment, writer);
-                try printProvider(agg.providers, writer);
-                try writer.print("pub const @\"{s}\":@This() = @bitCast({s});", .{ stripEnumNameAndBitSuffix(agg.name, stripped), agg.value });
-            }
-
-            try printMixins(mixins, stripped, stripPrefix(flag_bits_name, "Vk"), "Flags", writer);
-
-            try writer.writeAll("};");
+            const bits: Bits = .{
+                .b = flag_bits,
+                .flags_name = flags_name,
+            };
+            const flag_bits_type_name: TypeName = .parse(flag_bits_name);
+            mixins.flag_bits_name = flag_bits_type_name;
+            try writer.print(
+                \\{[bits]f}
+                \\{[mixins]f}
+                \\}};
+            , .{
+                .bits = bits,
+                .mixins = mixins,
+            });
             if (flag_bits.bits.len != 0) {
-                try printFlagBitsFromFlags(flag_bits_name, flag_bits_, writer, stripped);
+                try printFlagBitsFromFlags(flag_bits_type_name, flag_bits_, writer, flags_name);
             }
         } else {
-            try writer.writeAll("};");
+            try writer.print(
+                \\{[mixins]f}
+                \\}};
+            , .{
+                .mixins = mixins,
+            });
         }
     }
-    fn printFlagBitsFromFlags(name: []const u8, e_c: Registry.TypeCommon, writer: *Writer, flags_name: []const u8) Writer.Error!void {
-        const mixins: []const []const u8 = &.{ "toFlags", "fromFlags", "toInt", "fromInt" };
+    fn printFlagBitsFromFlags(flag_bits_name: TypeName, e_c: Registry.TypeCommon, writer: *Writer, flags_name: TypeName) Writer.Error!void {
+        const mixin_funcs: []const []const u8 = &.{ "toFlags", "fromFlags", "toInt", "fromInt" };
 
-        try printComment(e_c.comment, writer);
-        try printProvider(e_c.providers, writer);
+        const comment: Comment = .parse(e_c.comment);
+        const provider: Provider = .{ .p = e_c.providers };
+        const mixins: Mixins = .{
+            .mixins = mixin_funcs,
+            .mixin_kind = "FlagBits",
+            .flags_name = flags_name,
+            .flag_bits_name = flag_bits_name,
+        };
         const e = e_c.type.flag_bits;
+        const Bits = struct {
+            bits: Registry.FlagBits,
+            enum_name: TypeName,
 
-        const stripped_name = stripPrefix(name, "Vk");
+            pub fn format(self: @This(), w: *Writer) Writer.Error!void {
+                for (self.bits.bits) |b| {
+                    const name: EnumName = .parse(b.name, self.enum_name);
+                    const c: Comment = .parse(b.comment);
+                    const p: Provider = .{ .p = b.providers };
+                    try w.print(
+                        \\
+                        \\{[comment]f}
+                        \\{[provider]f}
+                        \\{[name]f}=1<<{[bitpos]},
+                        \\
+                    , .{
+                        .comment = c,
+                        .provider = p,
+                        .name = name,
+                        .bitpos = b.bitpos,
+                    });
+                }
+            }
+        };
+        const bits: Bits = .{
+            .bits = e,
+            .enum_name = flag_bits_name,
+        };
 
-        try writer.print("pub const {s}=enum(u{t}){{", .{ stripped_name, e.bitwidth });
-        for (e.bits) |b| {
-            try printComment(b.comment, writer);
-            try printProvider(b.providers, writer);
-            try writer.print("@\"{s}\"=1<<{},", .{ stripEnumNameAndBitSuffix(b.name, stripped_name), b.bitpos });
-        }
-
-        try printMixins(mixins, flags_name, stripped_name, "FlagBits", writer);
-        try writer.writeAll("};");
+        try writer.print(
+            \\{[comment]f}
+            \\{[provider]f}
+            \\pub const {[name]f} = enum(u{[bitwidth]t}){{
+            \\{[bits]f}
+            \\{[mixins]f}
+            \\}};
+        , .{
+            .comment = comment,
+            .provider = provider,
+            .name = flag_bits_name,
+            .bitwidth = e.bitwidth,
+            .mixins = mixins,
+            .bits = bits,
+        });
     }
     fn printFlagBits(name: []const u8, e_c: Registry.TypeCommon, writer: *Writer) Writer.Error!void {
         if (e_c.type.flag_bits.bits.len != 0) return;
-        try printFlagBitsFromFlags(name, e_c, writer, "undefined");
+        try printFlagBitsFromFlags(.parse(name), e_c, writer, .{ .name = "undefined" });
     }
     fn extractVersion(name: []const u8) []const u8 {
         var i = name.len;
@@ -1343,27 +1527,27 @@ const render = struct {
         }
         return name[i..];
     }
-    fn stripEnumName(entry_name: []const u8, enum_name: []const u8) []const u8 {
-        var stripped = stripPrefix(entry_name, "VK_");
-        if (entry_name.len <= enum_name.len) return stripped;
-        var e_name = enum_name;
+    fn stripEnumName(entry_name: []const u8, enum_name: TypeName) []const u8 {
+        var stripped_entry_name = stripPrefix(entry_name, "VK_");
+        if (entry_name.len <= enum_name.name.len) return stripped_entry_name;
+        var local_enum_name = enum_name.name;
         outer: while (true) {
-            const under = std.mem.findScalar(u8, stripped, '_') orelse break;
-            if (under > e_name.len) break;
-            const entry_segment = stripped[0..under];
-            for (entry_segment, e_name[0..under]) |entry, name| {
+            const under = std.mem.findScalar(u8, stripped_entry_name, '_') orelse break;
+            if (under > local_enum_name.len) break;
+            const entry_segment = stripped_entry_name[0..under];
+            for (entry_segment, local_enum_name[0..under]) |entry, name| {
                 if (std.ascii.toUpper(name) != entry) {
-                    if (std.mem.eql(u8, entry_segment, extractVersion(e_name))) {
-                        stripped = stripped[under + 1 ..];
+                    if (std.mem.eql(u8, entry_segment, extractVersion(local_enum_name))) {
+                        stripped_entry_name = stripped_entry_name[under + 1 ..];
                     }
                     break :outer;
                 }
             }
-            stripped = stripped[under + 1 ..];
-            e_name = e_name[under..];
+            stripped_entry_name = stripped_entry_name[under + 1 ..];
+            local_enum_name = local_enum_name[under..];
         }
 
-        return stripped;
+        return stripped_entry_name;
     }
     fn stripBitSuffix(name: []const u8) []const u8 {
         if (std.mem.findLast(u8, name, "_BIT")) |i| {
@@ -1371,7 +1555,7 @@ const render = struct {
         }
         return name;
     }
-    fn stripEnumNameAndBitSuffix(entry_name: []const u8, enum_name: []const u8) []const u8 {
+    fn stripEnumNameAndBitSuffix(entry_name: []const u8, enum_name: TypeName) []const u8 {
         const n = stripEnumName(entry_name, enum_name);
         return stripBitSuffix(n);
     }
@@ -1379,8 +1563,8 @@ const render = struct {
         try printComment(e_c.comment, writer);
         try printProvider(e_c.providers, writer);
         const e = e_c.type.@"enum";
-        const stripped_name = stripPrefix(name, "Vk");
-        try writer.print("pub const {s}=enum(c_int){{", .{stripped_name});
+        const stripped_name: TypeName = .parse(name);
+        try writer.print("pub const {f}=enum(c_int){{", .{stripped_name});
         for (e.values) |v| {
             try printComment(v.comment, writer);
             try printProvider(v.providers, writer);
