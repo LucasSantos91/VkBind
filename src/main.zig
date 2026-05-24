@@ -1629,145 +1629,218 @@ const render = struct {
         });
     }
     fn printStruct(name: []const u8, e_c: Registry.TypeCommon, writer: *Writer) Writer.Error!void {
-        try printComment(e_c.comment, writer);
-        try printProvider(e_c.providers, writer);
-        const e = e_c.type.@"struct";
-        try writer.print("pub const {s}=extern struct{{", .{stripPrefix(name, "Vk")});
-        var members = e.members;
-        if (e.s_type) |s_type| {
-            try writer.print("sType: StructureType=.{s},", .{stripPrefix(s_type, "VK_STRUCTURE_TYPE_")});
-            members = members[1..];
-        }
-        var in_bitfield = false;
-        var bit_field_index: usize = 0;
-        for (members) |m| {
-            if (m.c_var.type.amount == .bitfield) {
-                if (!in_bitfield) {
-                    try writer.print("p{}:packed struct{{", .{bit_field_index});
-                    bit_field_index += 1;
-                    in_bitfield = true;
+        const Members = struct {
+            e: Registry.Struct,
+
+            pub fn format(self: @This(), w: *Writer) Writer.Error!void {
+                const e = self.e;
+                var members = e.members;
+                if (e.s_type) |s_type| {
+                    try w.print("sType: StructureType=.{s},", .{stripPrefix(s_type, "VK_STRUCTURE_TYPE_")});
+                    members = members[1..];
                 }
-            } else {
+
+                var in_bitfield = false;
+                var bit_field_index: usize = 0;
+                for (members) |m| {
+                    if (m.c_var.type.amount == .bitfield) {
+                        if (!in_bitfield) {
+                            try w.print("p{}:packed struct{{", .{bit_field_index});
+                            bit_field_index += 1;
+                            in_bitfield = true;
+                        }
+                    } else {
+                        if (in_bitfield) {
+                            try w.writeAll("},");
+                            in_bitfield = false;
+                        }
+                    }
+
+                    const v: ZigVar = .parse(m, members);
+                    try w.print("{f}", .{v});
+                    if (v.v.v.extra[0].optional) {
+                        try w.print("= nullValue({f})", .{v.v});
+                    }
+                    try w.writeByte(',');
+                }
+
                 if (in_bitfield) {
-                    try writer.writeAll("},");
-                    in_bitfield = false;
+                    try w.writeAll("},");
                 }
             }
-            const l = m.extra[0].len;
-            var optional = m.extra[0].optional;
-            blk: {
-                var comma_it: CommaIterator = .{ .text = l };
-                const first = comma_it.next() orelse break :blk;
-                if (!optional and enumFromName(enum { @"null-terminated", @"1" }, first) == null) {
-                    for (members) |mem| {
-                        if (!std.mem.eql(u8, mem.c_var.name, l)) continue;
-                        for (mem.extra) |ex| {
-                            if (ex.optional) {
-                                optional = true;
-                                break :blk;
-                            }
+        };
+        const comment: Comment = .parse(e_c.comment);
+        const provider: Provider = .{ .p = e_c.providers };
+        const e = e_c.type.@"struct";
+        const members: Members = .{ .e = e };
+        const struct_name: TypeName = .parse(name);
+        try writer.print(
+            \\{[comment]f}
+            \\{[provider]f}
+            \\pub const {[struct_name]f}=extern struct{{
+            \\{[members]f}
+            \\}};
+        , .{
+            .comment = comment,
+            .provider = provider,
+            .struct_name = struct_name,
+            .members = members,
+        });
+    }
+    const ZigVar = struct {
+        v: ZigType,
+
+        pub fn parse(zig_var: Registry.ZigVar, others: []const Registry.ZigVar) @This() {
+            return .{ .v = .parse(zig_var, others) };
+        }
+        pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+            const ptr_len = self.v.v.c_var.type.base.ptrs.len;
+            if (self.v.v.c_var.type.amount == .array and self.v.len_kind[0] == .@"null-terminated") {
+                try writer.writeAll("\n/// Null-terminated\n");
+            }
+            for (self.v.len_kind[0..ptr_len], self.v.v.extra[0..ptr_len]) |b, extra| {
+                switch (b) {
+                    .other_member, .expression => {
+                        try writer.print("\n/// Length given by {s}\n", .{extra.len});
+                        break;
+                    },
+                    .@"null-terminated", .single => {},
+                }
+            }
+            const comment: Comment = .parse(self.v.v.c_var.comment);
+            try writer.print(
+                \\{[comment]f}
+                \\{[name]s}: {[type]f}
+            , .{
+                .name = self.v.v.c_var.name,
+                .comment = comment,
+                .type = self.v,
+            });
+        }
+    };
+
+    const ZigType = struct {
+        const max_ptr = Registry.CBaseType.max_ptr;
+        v: Registry.ZigVar,
+        len_kind: [max_ptr]LenKind,
+
+        const LenKind = enum { single, @"null-terminated", expression, other_member };
+
+        pub fn parse(zig_var: Registry.ZigVar, others: []const Registry.ZigVar) @This() {
+            var result: @This() = .{
+                .v = zig_var,
+                .len_kind = undefined,
+            };
+            for (&result.v.extra, &result.len_kind) |*extra, *len_kind| {
+                if (extra.len.len == 0) {
+                    len_kind.* = .single;
+                } else {
+                    if (enumFromName(enum { @"null-terminated", @"1" }, extra.len)) |l| switch (l) {
+                        .@"null-terminated" => {
+                            len_kind.* = .@"null-terminated";
+                        },
+                        .@"1" => {
+                            len_kind.* = .single;
+                        },
+                    } else {
+                        len_kind.* = .expression;
+                        extra.optional = true;
+
+                        for (others) |o| {
+                            if (!std.mem.eql(u8, o.c_var.name, extra.len)) continue;
+                            len_kind.* = .other_member;
+                            extra.optional = false;
+                            for (o.extra) |e| if (e.optional) {
+                                extra.optional = true;
+                                break;
+                            };
+                            break;
                         }
                     }
                 }
             }
-            try printZigVar(m, members, writer);
-            if (optional) {
-                try writer.writeAll("=nullValue(");
-                try printZigType(m, members, writer);
-                try writer.writeByte(')');
+            return result;
+        }
+
+        pub fn format(self: @This(), w: *Writer) Writer.Error!void {
+            if (self.v.c_var.type.amount == .bitfield) {
+                try w.print("u{s}", .{self.v.c_var.type.amount.bitfield});
+                return;
             }
-            try writer.writeByte(',');
-        }
-        if (in_bitfield) {
-            try writer.writeAll("},");
-        }
-        try writer.writeAll("};");
-    }
-    fn printZigVar(zig_var: Registry.ZigVar, others: []const Registry.ZigVar, writer: *Writer) Writer.Error!void {
-        blk: {
-            const l = zig_var.extra[0].len;
-            var comma_it: CommaIterator = .{ .text = l };
-            const first = comma_it.next() orelse break :blk;
-            if (enumFromName(enum { @"null-terminated", @"1" }, first)) |kind| {
+            const ptr_len = self.v.c_var.type.base.ptrs.len;
+
+            for (self.v.extra[0..ptr_len], self.v.c_var.type.base.ptrs.buffer[0..ptr_len], self.len_kind[0..ptr_len]) |extra, ptr, kind| {
+                if (extra.optional) {
+                    try w.writeByte('?');
+                }
                 switch (kind) {
-                    .@"null-terminated" => {
-                        if (zig_var.c_var.type.amount == .array)
-                            try writer.writeAll("\n/// Null-terminated\n");
+                    .other_member, .expression => {
+                        try w.writeAll("[*]");
                     },
-                    .@"1" => {},
+                    .@"null-terminated" => {
+                        try w.writeAll("[*:0]");
+                    },
+                    .single => {
+                        try w.writeByte('*');
+                    },
                 }
+                if (ptr == .@"const") {
+                    try w.writeAll("const ");
+                }
+            }
+
+            if (self.v.c_var.type.amount == .array) {
+                try w.writeByte('[');
+                switch (self.v.c_var.type.amount.array) {
+                    .literal => |l| try w.writeAll(l),
+                    .constant => |c| try writeConstant(c, w),
+                }
+                try w.writeByte(']');
+            }
+
+            //OVERRIDE: Overriding API versions from u32 to our own ApiVersion
+            if (enumFromName(enum { apiVersion, pApiVersion }, self.v.c_var.name)) |_| {
+                try w.writeAll("ApiVersion");
+            } else if (self.v.c_var.type.base.ptrs.len != 0 and std.mem.eql(u8, self.v.c_var.type.base.name, "void")) {
+                try w.writeAll("anyopaque");
             } else {
-                try writer.print("\n/// length given by {s}\n", .{l});
+                const n: GenericTypeName = .parse(self.v.c_var.type.base.name);
+                try w.print("{f}", .{n});
             }
         }
-        try printComment(zig_var.c_var.comment, writer);
-
-        try writer.print("@\"{s}\":", .{zig_var.c_var.name});
-        try printZigType(zig_var, others, writer);
-    }
-    fn printZigType(zig_var: Registry.ZigVar, others: []const Registry.ZigVar, writer: *Writer) Writer.Error!void {
-        if (zig_var.c_var.type.amount == .bitfield) {
-            try writer.print("u{s}", .{zig_var.c_var.type.amount.bitfield});
-            return;
-        }
-        const ptrs = zig_var.c_var.type.base.ptrs.constSlice();
-        for (ptrs, zig_var.extra[0..ptrs.len]) |kind, extra| {
-            var optional = extra.optional;
-            const p_text = if (extra.len.len == 0)
-                "*"
-            else if (enumFromName(enum { @"null-terminated", @"1" }, extra.len)) |l| switch (l) {
-                .@"null-terminated" => "[*:0]",
-                .@"1" => "*",
-            } else blk: {
-                if (!optional) outer: {
-                    for (others) |o| {
-                        if (!std.mem.eql(u8, o.c_var.name, extra.len)) continue;
-                        optional = o.extra[0].optional;
-                        break :outer;
-                    } else optional = true;
-                }
-                break :blk "[*]";
-            };
-            if (optional) {
-                try writer.writeByte('?');
-            }
-            try writer.writeAll(p_text);
-            if (kind == .@"const") {
-                try writer.writeAll("const ");
-            }
-        }
-        if (zig_var.c_var.type.amount == .array) {
-            try writer.writeByte('[');
-            switch (zig_var.c_var.type.amount.array) {
-                .literal => |l| try writer.writeAll(l),
-                .constant => |c| try writeConstant(c, writer),
-            }
-            try writer.writeByte(']');
-        }
-
-        //OVERRIDE: Overriding API versions from u32 to our own ApiVersion
-        if (enumFromName(enum { apiVersion, pApiVersion }, zig_var.c_var.name)) |_| {
-            try writer.writeAll("ApiVersion");
-        } else if (zig_var.c_var.type.base.ptrs.len != 0 and std.mem.eql(u8, zig_var.c_var.type.base.name, "void")) {
-            try writer.writeAll("anyopaque");
-        } else {
-            try printGenericTypeName(zig_var.c_var.type.base.name, writer);
-        }
-    }
+    };
     fn writeConstant(name: []const u8, writer: *Writer) Writer.Error!void {
         if (name.len <= 3) panic("Malformed constant name: {s}", .{name});
         try writer.writeAll(name[3..]);
     }
     fn printUnion(name: []const u8, e_c: Registry.TypeCommon, writer: *Writer) Writer.Error!void {
-        try printComment(e_c.comment, writer);
-        try printProvider(e_c.providers, writer);
+        const Members = struct {
+            e: Registry.Union,
+
+            pub fn format(self: @This(), w: *Writer) Writer.Error!void {
+                for (self.e.members) |m| {
+                    const v: ZigVar = .parse(m, self.e.members);
+                    try w.print("{f},", .{v});
+                }
+            }
+        };
+        const comment: Comment = .parse(e_c.comment);
+        const provider: Provider = .{ .p = e_c.providers };
         const e = e_c.type.@"union";
-        try writer.print("pub const {s}=extern union{{", .{stripPrefix(name, "Vk")});
-        for (e.members) |m| {
-            try printZigVar(m, e.members, writer);
-            try writer.writeByte(',');
-        }
-        try writer.writeAll("};");
+        const n: TypeName = .parse(name);
+        const members: Members = .{ .e = e };
+        try writer.print(
+            \\{[comment]f}
+            \\{[provider]f}
+            \\pub const {[name]f}=extern union{{
+            \\{[members]f}
+            \\}};
+        , .{
+            .comment = comment,
+            .provider = provider,
+            .name = n,
+            .members = members,
+        });
     }
     fn printHandle(name: []const u8, e_c: Registry.TypeCommon, writer: *Writer) Writer.Error!void {
         try printComment(e_c.comment, writer);
@@ -1788,17 +1861,36 @@ const render = struct {
         _ = e;
         _ = writer;
     }
-    fn printGenericTypeName(name: []const u8, writer: *Writer) Writer.Error!void {
-        if (tryStripPrefix(name, "PFN_vk")) |n| {
-            try writer.print("Pfn{s}", .{n});
-        } else if (tryStripPrefix(name, "Vk")) |n| {
-            try writer.writeAll(n);
-        } else if (enumFromName(Primitives, name)) |n| {
-            try writer.writeAll(n.toZig());
-        } else {
-            try writer.writeAll(name);
+    const GenericTypeName = struct {
+        name: []const u8,
+        kind: Kind,
+
+        const Kind = enum {
+            vk,
+            pfn,
+            primitive,
+            none,
+        };
+
+        pub fn parse(name: []const u8) @This() {
+            return if (tryStripPrefix(name, "PFN_vk")) |n| .{
+                .name = n,
+                .kind = .pfn,
+            } else if (tryStripPrefix(name, "Vk")) |n| .{
+                .name = n,
+                .kind = .vk,
+            } else if (enumFromName(Primitives, name)) |n| .{
+                .name = n.toZig(),
+                .kind = .primitive,
+            } else .{ .name = name, .kind = .none };
         }
-    }
+        pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+            if (self.kind == .pfn) {
+                try writer.writeAll("Pfn");
+            }
+            try writer.writeAll(self.name);
+        }
+    };
     fn printCType(c_type: Registry.CType, writer: *Writer) Writer.Error!void {
         if (c_type.amount == .bitfield) {
             try writer.print("u{s}", .{c_type.amount.bitfield});
@@ -1826,7 +1918,8 @@ const render = struct {
             return;
         }
 
-        try printGenericTypeName(base_type.name, writer);
+        const name: GenericTypeName = .parse(base_type.name);
+        try writer.print("{f}", .{name});
     }
 
     fn printCVar(c_var: Registry.CVar, writer: *Writer) Writer.Error!void {
@@ -1920,7 +2013,7 @@ const render = struct {
 
         try printCommands(registry, writer, allocator);
         try printExtensions(registry, writer);
-        try printVulkanContext(registry, writer);
+        //try printVulkanContext(registry, writer);
     }
     fn isGlobalCommand(command: Registry.Command, registry: Registry) bool {
         if (command.params.len == 0) return true;
@@ -2074,7 +2167,8 @@ const render = struct {
                 try w.writeByte('(');
                 for (command.params[0 .. command.params.len - if (code_status.is_create) @as(u1, 1) else @as(u1, 0)]) |p| {
                     if (isAllocator(p)) continue;
-                    try printZigVar(p, command.params, w);
+                    const zig_var: ZigVar = .parse(p, command.params);
+                    try w.print("{f}", .{zig_var});
                     if (isDispatchable(p, r)) {
                         try w.writeAll("Wrapper");
                     }
@@ -2087,7 +2181,8 @@ const render = struct {
                             var last = command.params[command.params.len - 1];
                             last.c_var.type.base.ptrs.len = 0;
                             last.c_var.comment = null;
-                            try printZigType(last, command.params, w);
+                            const zig_var: ZigVar = .parse(last, command.params);
+                            try w.print("{f}", .{zig_var});
                             if (isDispatchable(last, r)) {
                                 try w.writeAll("Wrapper");
                             }
@@ -2148,7 +2243,8 @@ const render = struct {
                     last.c_var.type.base.ptrs.len -= 1;
                     last.c_var.comment = null;
                     try w.writeAll("var temp:");
-                    try printZigType(last, command.params, w);
+                    const zig_var: ZigVar = .parse(last, command.params);
+                    try w.print("{f}", .{zig_var});
                     try w.writeAll("=undefined;");
                     try w.print("const {s}=&temp;", .{src.c_var.name});
                 }
@@ -2440,7 +2536,8 @@ const render = struct {
             try printProvider(c.command.providers, writer);
             try writer.print("extern \"vulkan-1\" fn {s}(", .{c.name});
             for (c.command.params) |p| {
-                try printZigVar(p, c.command.params, writer);
+                const zig_var: ZigVar = .parse(p, c.command.params);
+                try writer.print("{f}", .{zig_var});
                 try writer.writeByte(',');
             }
             try writer.writeAll(") callconv(vulkan_api)");
@@ -2542,7 +2639,8 @@ const render = struct {
                 try printCommandName(c.name, writer);
                 try writer.writeAll("(loader: *const @This(),");
                 for (c.command.params) |p| {
-                    try printZigVar(p, c.command.params, writer);
+                    const zig_var: ZigVar = .parse(p, c.command.params);
+                    try writer.print("{f}", .{zig_var});
                     try writer.writeByte(',');
                 }
                 try writer.writeByte(')');
@@ -2582,7 +2680,8 @@ const render = struct {
         }
         try writer.print("pub const {s} = fn(", .{stripped});
         for (c.params) |p| {
-            try printZigVar(p, c.params, writer);
+            const zig_var: ZigVar = .parse(p, c.params);
+            try writer.print("{f}", .{zig_var});
             try writer.writeByte(',');
         }
         try writer.writeAll(")callconv(vulkan_api)");
