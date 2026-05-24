@@ -1770,7 +1770,7 @@ const render = struct {
             fn isAllocator(zig_var: Registry.ZigVar) bool {
                 return std.mem.eql(u8, zig_var.c_var.name, "pAllocator");
             }
-            pub fn printCommand(command: Registry.Command, command_name: []const u8, group: []const u8, w: *Writer) Writer.Error!void {
+            pub fn printCommand(command: Registry.Command, r: Registry, command_name: []const u8, group: []const u8, w: *Writer) Writer.Error!void {
                 try printProvider(command.providers, w);
                 try w.writeAll("pub fn ");
                 try printCommandName(command_name, w);
@@ -1778,6 +1778,9 @@ const render = struct {
                 for (command.params) |p| {
                     if (isAllocator(p)) continue;
                     try printZigVar(p, command.params, w);
+                    if (isDispatchable(p, r)) {
+                        try w.writeAll("Wrapper");
+                    }
                     try w.writeByte(',');
                 }
                 try w.writeByte(')');
@@ -1791,9 +1794,31 @@ const render = struct {
                 try w.writeAll(");");
             }
             pub fn isDispatchable(zig_var: Registry.ZigVar, r: Registry) bool {
-                const t: Registry.TypeCommon = r.get(zig_var.c_var.type.base.name) orelse return false;
-                if (t.type != .handle) return zig_var;
+                const t: Registry.TypeCommon = r.types.get(zig_var.c_var.type.base.name) orelse return false;
+                if (t.type != .handle) return false;
                 return t.type.handle.dispatchable;
+            }
+            fn printParams(command: Registry.Command, r: Registry, w: *Writer) Writer.Error!void {
+                for (command.params) |p| {
+                    if (isAllocator(p)) {
+                        try w.writeAll("getAllocator(),");
+                    } else {
+                        const is_dispatchable = isDispatchable(p, r);
+                        const is_ptr = p.c_var.type.base.ptrs.len != 0;
+                        if (is_dispatchable) {
+                            if (is_ptr) {
+                                try w.writeAll("@ptrCast(");
+                            } else {
+                                try w.writeAll("@bitCast(");
+                            }
+                        }
+                        try w.print("@\"{s}\"", .{p.c_var.name});
+                        if (is_dispatchable) {
+                            try w.writeByte(')');
+                        }
+                        try w.writeByte(',');
+                    }
+                }
             }
         };
 
@@ -1802,7 +1827,7 @@ const render = struct {
             const command_name = command_entry.key_ptr.*;
             const command = command_entry.value_ptr.*;
             if (isGlobalCommand(command, registry)) {
-                try helper.printCommand(command, command_name, "Global", writer);
+                try helper.printCommand(command, registry, command_name, "Global", writer);
                 try writer.writeAll(
                     \\return switch(comptime config.globals){
                     \\.load_time=>extern_global_functions.
@@ -1814,15 +1839,35 @@ const render = struct {
                 );
                 try printCommandName(command_name, writer);
                 try writer.writeAll("}.?(");
-                for (command.params) |p| {
-                    if (helper.isAllocator(p)) {
-                        try writer.writeAll("getAllocator(),");
-                    } else {
-                        try writer.print("@\"{s}\",", .{p.c_var.name});
-                    }
-                }
+                try helper.printParams(command, registry, writer);
                 try writer.writeAll(");}");
             }
+        }
+
+        const instance_handle = registry.types.getPtr("VkInstance") orelse @panic("Failed to find VkInstance");
+        var types_it = registry.types.iterator();
+        while (types_it.next()) |registry_type| {
+            if (registry_type.value_ptr.type != .handle) continue;
+            if (!registry_type.value_ptr.type.handle.dispatchable) continue;
+            try writer.print("pub const {[name]s}Wrapper = struct{{handle:{[name]s},", .{ .name = stripPrefix(registry_type.key_ptr.*, "Vk") });
+            command_it = registry.commands.iterator();
+            while (command_it.next()) |c_entry| {
+                const command_name = c_entry.key_ptr.*;
+                const command = c_entry.value_ptr.*;
+                if (command.params.len == 0) continue;
+                const first = command.params[0].c_var.type.base.name;
+                const handle = registry.types.getPtr(first) orelse continue;
+                if (handle != registry_type.value_ptr) continue;
+                const is_instance = handle == instance_handle;
+                try helper.printCommand(command, registry, command_name, if (is_instance) "Instance" else "Device", writer);
+                try writer.print("return {s}_loader.", .{if (is_instance) "instance" else "device"});
+                try printCommandName(command_name, writer);
+                try writer.writeAll(".?(");
+                try helper.printParams(command, registry, writer);
+                try writer.writeAll(");}");
+            }
+
+            try writer.writeAll("};");
         }
         try writer.writeAll("};}");
     }
