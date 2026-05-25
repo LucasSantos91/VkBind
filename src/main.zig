@@ -2706,6 +2706,7 @@ const render = struct {
 
                     it = .{ .text = codes.error_codes };
                     while (it.next()) |c| {
+                        if (shouldErrorBeSkipped(c)) continue;
                         try printCode(c, writer);
                     }
                     try writer.writeAll("};");
