@@ -1207,6 +1207,8 @@ pub const Registry = struct {
 };
 
 const render = struct {
+    const command_group_name = "Command";
+    const loader_name = "Loader";
     const Primitives = enum {
         void,
         char,
@@ -2310,7 +2312,7 @@ const render = struct {
             fn printFunctionBody(
                 command: Registry.Command,
                 command_name: []const u8,
-                loader_name: []const u8,
+                loader_name_: []const u8,
                 w: *Writer,
                 code_status: CodeStatus,
                 r: Registry,
@@ -2326,7 +2328,7 @@ const render = struct {
                     try w.writeAll("=undefined;");
                     try w.print("const {s}=&temp;", .{src.c_var.name});
                 }
-                try w.print("return {s} {s}.", .{ if (code_status.has_success_codes) "switch(" else "", loader_name });
+                try w.print("return {s} {s}.", .{ if (code_status.has_success_codes) "switch(" else "", loader_name_ });
                 try printCommandName(command_name, w);
                 try w.writeAll(".?(");
                 try printParams(command, r, w);
@@ -2696,13 +2698,14 @@ const render = struct {
                 \\{[provider]f}
                 \\extern "vulkan-1" fn {[raw_name]s}(
                 \\{[params]f}
-                \\) callconv(vulkan_api) Commands.{[name]f}.getReturnType();
+                \\) callconv(vulkan_api) {[command_group]s}.{[name]f}.getReturnType();
                 \\pub const {[name]f} = {[raw_name]s};
             , .{
                 .provider = provider,
                 .name = command_name,
                 .raw_name = name,
                 .params = params,
+                .command_group = command_group_name,
             });
         }
         try writer.writeAll("};");
@@ -2834,10 +2837,87 @@ const render = struct {
                 );
             }
         };
+        const ParamNames = struct {
+            params: Params,
+
+            pub fn format(self: @This(), w: *Writer) Writer.Error!void {
+                for (self.params.params) |v| {
+                    try w.print("{s},", .{v.c_var.name});
+                }
+            }
+        };
+        const LoaderCommandReturnType = struct {
+            base: CommandReturnType,
+
+            pub fn parse(command_name: CommandTypeName, command: Registry.Command) @This() {
+                return .{ .base = .parse(command_name, command) };
+            }
+
+            pub fn format(self: @This(), w: *Writer) Writer.Error!void {
+                switch (self.base) {
+                    .base => |b| try w.print("{f}", .{b}),
+                    .codes => |codes| try w.print(command_group_name ++ ".{f}Result", .{codes}),
+                }
+            }
+        };
+        const CommandLoaderDeclaration = struct {
+            command_name: CommandFunctionName,
+            ret: LoaderCommandReturnType,
+            params: Params,
+            provider: Provider,
+
+            pub fn parse(name: []const u8, command: Registry.Command) @This() {
+                const command_name: CommandFunctionName = .parseFromText(name);
+                const ret: LoaderCommandReturnType = .parse(command_name.name, command);
+                const params: Params = .{ .params = command.params };
+                return .{
+                    .command_name = command_name,
+                    .ret = ret,
+                    .params = params,
+                    .provider = .{ .p = command.providers },
+                };
+            }
+
+            pub fn format(self: @This(), w: *Writer) Writer.Error!void {
+                const param_names: ParamNames = .{ .params = self.params };
+                try w.print(
+                    \\{[provider]f}
+                    \\pub fn {[command_name]f}(
+                    \\  loader: *const @This(),
+                    \\  {[params]f}
+                    \\) {[ret]f}{{
+                    \\return loader.ptrs.{[command_name]f}.?(
+                    \\{[param_names]f}
+                    \\);
+                    \\}}
+                , .{
+                    .provider = self.provider,
+                    .command_name = self.command_name,
+                    .params = self.params,
+                    .ret = self.ret,
+                    .param_names = param_names,
+                });
+            }
+        };
+
+        const CommandLoaderDeclarationGroup = struct {
+            commands: Iterator,
+
+            pub fn format(self: @This(), w: *Writer) Writer.Error!void {
+                var i = self.commands;
+                while (i.next()) |entry| {
+                    const command = entry.value_ptr.*;
+                    const command_name = entry.key_ptr.*;
+                    const s: CommandLoaderDeclaration = .parse(command_name, command);
+                    try w.print("{f}", .{s});
+                }
+            }
+        };
 
         const signature_group: CommandSignatureTypeGroup = .{ .commands = it };
         const command_list: CommandList = .{ .commands = it };
         const requirements: Requirements = .{ .commands = it };
+        const declaration_group: CommandLoaderDeclarationGroup = .{ .commands = it };
         const conv_functions =
             \\pub fn getType(comptime self: @This()) type{
             \\const t = @tagName(self);
@@ -2869,20 +2949,74 @@ const render = struct {
             \\    return .device;
             \\}
         ;
+        const loader_preamble =
+            \\pub fn 
+        ++ loader_name ++
+            \\(commands: [] 
+        ++ command_group_name ++
+            \\) type{
+            \\const filtered = filterCommands(commands);
+            \\return struct{
+            \\      pub const global_count = filtered.global.len;
+            \\      pub const instance_count = filtered.instance.len;
+            \\      pub const device_count = filtered.device.len;
+            \\      pub const Ptrs = MakePtrGroup(filtered.global ++ filtered.instance ++ filtered.device);
+            \\      ptrs: Ptrs,
+            \\
+            \\      fn getNames(comptime start: usize, comptime len: usize) [len][]const u8{
+            \\          var names: [len][]const u8 = undefined;
+            \\          for(&names, commands[start..][0..len]) |*n, c|{
+            \\              n.* = c.getVkName();
+            \\          }
+            \\          return names;
+            \\      }
+            \\      fn getPtrs(self: *@This(), comptime start: usize, comptime len: usize) [len]PfnVoidFunction{
+            \\          const ptrs: *[commands.len]PfnVoidFunction = @ptrCast(self.ptrs);
+            \\          return ptrs.*[start..][0..len];
+            \\      }
+            \\      pub fn initGlobalCommands(self: *@This(), loader: anytype) void{
+            \\          const ptrs = self.getPtrs(0, global_count);
+            \\          const names = getNames(0, global_count);
+            \\          for(ptrs, names) |*p, name|{
+            \\              p.* = loader(.null_handle, name);
+            \\          }
+            \\      }
+            \\      pub fn initInstanceCommands(self: *@This(), loader: anytype, instance: Instance) void{
+            \\          const ptrs = self.getPtrs(global_count, instance_count);
+            \\          const names = getNames(global_count, instance_count);
+            \\          for(ptrs, names) |*p, name|{
+            \\              p.* = loader(instance, name);
+            \\          }
+            \\      }
+            \\      pub fn initDeviceCommands(self: *@This(), loader: anytype, device: Device) void{
+            \\          const ptrs = self.getPtrs(global_count + instance_count, device_count);
+            \\          const names = getNames(global_count + instance_count, device_count);
+            \\          for(ptrs, names) |*p, name|{
+            \\              p.* = loader(device, name);
+            \\          }
+            \\      }
+        ;
 
         try writer.print(
-            \\pub const Commands=enum{{
+            \\pub const {[command_group_name]s}=enum{{
             \\{[command_list]f}
             \\pub const all_commands = std.enums.values(@This());
             \\{[command_signatures]f}
             \\{[conv_functions]s}
             \\{[requirements]f}
             \\}};
+            \\{[loader_preamble]s}
+            \\{[declaration_group]f}
+            \\}};
+            \\}}
         , .{
+            .command_group_name = command_group_name,
             .command_list = command_list,
             .command_signatures = signature_group,
             .conv_functions = conv_functions,
             .requirements = requirements,
+            .loader_preamble = loader_preamble,
+            .declaration_group = declaration_group,
         });
         //try writer.writeAll(
         //    \\

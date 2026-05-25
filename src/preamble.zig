@@ -162,7 +162,8 @@ fn getFunctionVkName(func: anytype) []const u8 {
     const t = @tagName(func);
     return "vk" ++ std.ascii.toUpper(t[0]) ++ t[1..];
 }
-fn MakeLoader(comptime Functions: type, comptime funcs: []const Functions) type {
+
+fn MakePtrGroup(comptime funcs: []const Command) type {
     var types: [funcs.len]type = undefined;
     var names: [funcs.len][]const u8 = undefined;
     const attr: [funcs.len]std.builtin.Type.StructField.Attributes = @splat(.{});
@@ -171,6 +172,31 @@ fn MakeLoader(comptime Functions: type, comptime funcs: []const Functions) type 
         n.* = @tagName(f);
     }
     return @Struct(.@"extern", null, &names, &types, attr);
+}
+
+const FilteredCommands = struct {
+    global: []const Command,
+    instance: []const Command,
+    device: []const Command,
+};
+fn filterCommands(comptime funcs: []const Command) FilteredCommands {
+    var result: FilteredCommands = .{
+        .global = &.{},
+        .instance = &.{},
+        .device = &.{},
+    };
+    for (funcs) |f| switch (f) {
+        .global => {
+            result.global = result.global ++ &.{f};
+        },
+        .instance => {
+            result.instance = result.instance ++ &.{f};
+        },
+        .device => {
+            result.device = result.device ++ &.{f};
+        },
+    };
+    return result;
 }
 fn getFunctionVkNames(comptime Functions: type, comptime funcs: []const Functions) []const []const u8 {
     comptime {
