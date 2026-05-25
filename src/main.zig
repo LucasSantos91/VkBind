@@ -2102,322 +2102,322 @@ const render = struct {
         if (!first_type.type.handle.dispatchable) return true;
         return false;
     }
-    fn printVulkanContext(registry: Registry, writer: *Writer) Writer.Error!void {
-        try writer.writeAll(
-            \\pub const VulkanContextConfig = struct{
-            \\pub const Globals = union(enum){
-            \\load_time,
-            \\run_time: []const GlobalFunctions,
-            \\};
-            \\pub const AllocatorConfig = union(enum){
-            \\compile_time: ?*const AllocationCallbacks,
-            \\run_time,
-            \\};
-            \\ globals: Globals = .load_time,
-            \\ instance: []const InstanceFunctions,
-            \\ device: []const DeviceFunctions,
-            \\ apiVersion: ApiVersion = .{ .minor = 0 },
-            \\ extensions: []const Extension = &.{},
-            \\ allocator: AllocatorConfig,
-            \\};
-            \\pub fn VulkanContext(comptime config: VulkanContextConfig) type{
-            \\return struct{
-            \\comptime{ if(Extension.missingDependenciesFor(config.extensions, config.apiVersion)) |e|
-            \\@panic("Missing dependencies for extension " ++ e.name.name);
-            \\}
-            \\var runtime_allocator: switch(config.allocator){
-            \\.compile_time => void,
-            \\.run_time =>?*const AllocationCallbacks,
-            \\} = undefined;
-            \\pub fn initAllocator(pAllocator: ?*const AllocationCallbacks) void{
-            \\runtime_allocator = pAllocator;
-            \\}
-            \\pub fn getAllocator()?*const AllocationCallbacks{
-            \\ return switch(comptime config.allocator){
-            \\.comptime_time => |a| a,
-            \\.run_time => runtime_allocator,
-            \\};
-            \\}
-            \\var globals: switch(config.globals){
-            \\.load_time => void,
-            \\.run_time => |f| GlobalFunctions(f),
-            \\} = undefined;
-            \\pub fn initGlobalLoader(loader: anytype) void{
-            \\switch(comptime config.globals){
-            \\.load_time => {},
-            \\.run_time => globals.init(loader),
-            \\}}
-            \\var instance_loader: InstanceLoader(config.instance) = undefined;
-            \\var device_loader: DeviceLoader(config.device) = undefined;
-            \\pub fn initInstanceLoader(load_function: anytype, instance: Instance) void{
-            \\instance_loader.init(load_function, instance);
-            \\}
-            \\pub fn initDeviceLoader(load_function: anytype, device: Device) void{
-            \\device_loader.init(load_function, device);
-            \\}
-            \\const provided_extensions: CommandDependencyRequirements = .{
-            \\        .version = config.apiVersion,
-            \\        .extensions = config.extensions,
-            \\};
-            \\fn assertDependencies(comptime cmd: anytype) void{
-            \\   comptime{
-            \\  if(!provided_extensions.satisfy(cmd.requirements())){
-            \\   @compileError("Requirements not met for command: " ++ @tagName(cmd));
-            \\}
-            \\}
-            \\}
-        );
-        const helper = struct {
-            fn isAllocator(zig_var: Registry.ZigVar) bool {
-                return std.mem.eql(u8, zig_var.c_var.name, "pAllocator");
-            }
-            const CodeStatus = struct {
-                has_success_codes: bool,
-                success_only: bool,
-                has_error_codes: bool,
-                has_only_ignored_error_codes: bool,
-                is_create: bool,
+    //fn printVulkanContext(registry: Registry, writer: *Writer) Writer.Error!void {
+    //    try writer.writeAll(
+    //        \\pub const VulkanContextConfig = struct{
+    //        \\pub const Globals = union(enum){
+    //        \\load_time,
+    //        \\run_time: []const GlobalFunctions,
+    //        \\};
+    //        \\pub const AllocatorConfig = union(enum){
+    //        \\compile_time: ?*const AllocationCallbacks,
+    //        \\run_time,
+    //        \\};
+    //        \\ globals: Globals = .load_time,
+    //        \\ instance: []const InstanceFunctions,
+    //        \\ device: []const DeviceFunctions,
+    //        \\ apiVersion: ApiVersion = .{ .minor = 0 },
+    //        \\ extensions: []const Extension = &.{},
+    //        \\ allocator: AllocatorConfig,
+    //        \\};
+    //        \\pub fn VulkanContext(comptime config: VulkanContextConfig) type{
+    //        \\return struct{
+    //        \\comptime{ if(Extension.missingDependenciesFor(config.extensions, config.apiVersion)) |e|
+    //        \\@panic("Missing dependencies for extension " ++ e.name.name);
+    //        \\}
+    //        \\var runtime_allocator: switch(config.allocator){
+    //        \\.compile_time => void,
+    //        \\.run_time =>?*const AllocationCallbacks,
+    //        \\} = undefined;
+    //        \\pub fn initAllocator(pAllocator: ?*const AllocationCallbacks) void{
+    //        \\runtime_allocator = pAllocator;
+    //        \\}
+    //        \\pub fn getAllocator()?*const AllocationCallbacks{
+    //        \\ return switch(comptime config.allocator){
+    //        \\.comptime_time => |a| a,
+    //        \\.run_time => runtime_allocator,
+    //        \\};
+    //        \\}
+    //        \\var globals: switch(config.globals){
+    //        \\.load_time => void,
+    //        \\.run_time => |f| GlobalFunctions(f),
+    //        \\} = undefined;
+    //        \\pub fn initGlobalLoader(loader: anytype) void{
+    //        \\switch(comptime config.globals){
+    //        \\.load_time => {},
+    //        \\.run_time => globals.init(loader),
+    //        \\}}
+    //        \\var instance_loader: InstanceLoader(config.instance) = undefined;
+    //        \\var device_loader: DeviceLoader(config.device) = undefined;
+    //        \\pub fn initInstanceLoader(load_function: anytype, instance: Instance) void{
+    //        \\instance_loader.init(load_function, instance);
+    //        \\}
+    //        \\pub fn initDeviceLoader(load_function: anytype, device: Device) void{
+    //        \\device_loader.init(load_function, device);
+    //        \\}
+    //        \\const provided_extensions: CommandDependencyRequirements = .{
+    //        \\        .version = config.apiVersion,
+    //        \\        .extensions = config.extensions,
+    //        \\};
+    //        \\fn assertDependencies(comptime cmd: anytype) void{
+    //        \\   comptime{
+    //        \\  if(!provided_extensions.satisfy(cmd.requirements())){
+    //        \\   @compileError("Requirements not met for command: " ++ @tagName(cmd));
+    //        \\}
+    //        \\}
+    //        \\}
+    //    );
+    //    const helper = struct {
+    //        fn isAllocator(zig_var: Registry.ZigVar) bool {
+    //            return std.mem.eql(u8, zig_var.c_var.name, "pAllocator");
+    //        }
+    //        const CodeStatus = struct {
+    //            has_success_codes: bool,
+    //            success_only: bool,
+    //            has_error_codes: bool,
+    //            has_only_ignored_error_codes: bool,
+    //            is_create: bool,
 
-                pub fn parse(command: Registry.Command, command_name: []const u8) @This() {
-                    var result: @This() = undefined;
-                    if (command.success_codes.len == 0) {
-                        result.has_success_codes = false;
-                        result.success_only = true;
-                    } else {
-                        result.has_success_codes = true;
-                        result.success_only = std.mem.eql(u8, command.success_codes, "VK_SUCCESS");
-                    }
-                    if (command.error_codes.len == 0) {
-                        result.has_error_codes = false;
-                        result.has_only_ignored_error_codes = true;
-                    } else {
-                        result.has_error_codes = true;
-                        var count_error_codes: usize = 0;
-                        var skip: usize = 0;
-                        var it: CommaIterator = .{ .text = command.error_codes };
-                        while (it.next()) |e| {
-                            count_error_codes += 1;
-                            if (shouldErrorBeSkipped(e)) skip += 1;
-                        }
-                        result.has_only_ignored_error_codes = count_error_codes == skip;
-                    }
-                    if (command.params.len == 0 or !result.success_only) {
-                        result.is_create = false;
-                    } else blk: {
-                        const last = command.params[command.params.len - 1];
-                        const ptrs = last.c_var.type.base.ptrs;
-                        if (ptrs.len == 0 or ptrs.buffer[0] == .@"const" or (last.extra[0].len.len != 0 and !std.mem.eql(u8, last.extra[0].len, "1"))) {
-                            result.is_create = false;
-                            break :blk;
-                        }
-                        const stripped = stripPrefix(command_name, "vk");
-                        result.is_create = (std.mem.startsWith(u8, stripped, "Create") or
-                            std.mem.startsWith(u8, stripped, "Enumerate"));
-                    }
-                    return result;
-                }
-            };
-            pub fn printCommand(command: Registry.Command, r: Registry, command_name: []const u8, group: []const u8, w: *Writer, code_status: CodeStatus) Writer.Error!void {
-                const type_name = stripPrefix(command_name, "vk");
-                if (code_status.has_success_codes and !code_status.success_only) {
-                    try w.print(
-                        \\pub const {s}Result = enum(@typeInfo(Result).@"enum".tag_type){{
-                        \\pub fn toResult(self: @This()) Result{{return @enumFromInt(@intFromEnum(self));}}
-                    , .{type_name});
-                    var it: CommaIterator = .{ .text = command.success_codes };
-                    while (it.next()) |code| {
-                        try w.print("{[name]s}=@intFromEnum(Result.{[name]s}),", .{ .name = stripPrefix(code, "VK_") });
-                    }
-                    try w.writeAll("};");
-                }
-                if (code_status.has_error_codes and !code_status.has_only_ignored_error_codes) {
-                    try w.print("pub const {s}Error = error{{", .{type_name});
-                    var it: CommaIterator = .{ .text = command.error_codes };
-                    while (it.next()) |code| {
-                        if (shouldErrorBeSkipped(code)) continue;
-                        try w.print("{s},", .{tryStripPrefix(code, "VK_ERROR_") orelse stripPrefix(code, "VK_")});
-                    }
-                    try w.writeAll("};");
-                }
+    //            pub fn parse(command: Registry.Command, command_name: []const u8) @This() {
+    //                var result: @This() = undefined;
+    //                if (command.success_codes.len == 0) {
+    //                    result.has_success_codes = false;
+    //                    result.success_only = true;
+    //                } else {
+    //                    result.has_success_codes = true;
+    //                    result.success_only = std.mem.eql(u8, command.success_codes, "VK_SUCCESS");
+    //                }
+    //                if (command.error_codes.len == 0) {
+    //                    result.has_error_codes = false;
+    //                    result.has_only_ignored_error_codes = true;
+    //                } else {
+    //                    result.has_error_codes = true;
+    //                    var count_error_codes: usize = 0;
+    //                    var skip: usize = 0;
+    //                    var it: CommaIterator = .{ .text = command.error_codes };
+    //                    while (it.next()) |e| {
+    //                        count_error_codes += 1;
+    //                        if (shouldErrorBeSkipped(e)) skip += 1;
+    //                    }
+    //                    result.has_only_ignored_error_codes = count_error_codes == skip;
+    //                }
+    //                if (command.params.len == 0 or !result.success_only) {
+    //                    result.is_create = false;
+    //                } else blk: {
+    //                    const last = command.params[command.params.len - 1];
+    //                    const ptrs = last.c_var.type.base.ptrs;
+    //                    if (ptrs.len == 0 or ptrs.buffer[0] == .@"const" or (last.extra[0].len.len != 0 and !std.mem.eql(u8, last.extra[0].len, "1"))) {
+    //                        result.is_create = false;
+    //                        break :blk;
+    //                    }
+    //                    const stripped = stripPrefix(command_name, "vk");
+    //                    result.is_create = (std.mem.startsWith(u8, stripped, "Create") or
+    //                        std.mem.startsWith(u8, stripped, "Enumerate"));
+    //                }
+    //                return result;
+    //            }
+    //        };
+    //        pub fn printCommand(command: Registry.Command, r: Registry, command_name: []const u8, group: []const u8, w: *Writer, code_status: CodeStatus) Writer.Error!void {
+    //            const type_name = stripPrefix(command_name, "vk");
+    //            if (code_status.has_success_codes and !code_status.success_only) {
+    //                try w.print(
+    //                    \\pub const {s}Result = enum(@typeInfo(Result).@"enum".tag_type){{
+    //                    \\pub fn toResult(self: @This()) Result{{return @enumFromInt(@intFromEnum(self));}}
+    //                , .{type_name});
+    //                var it: CommaIterator = .{ .text = command.success_codes };
+    //                while (it.next()) |code| {
+    //                    try w.print("{[name]s}=@intFromEnum(Result.{[name]s}),", .{ .name = stripPrefix(code, "VK_") });
+    //                }
+    //                try w.writeAll("};");
+    //            }
+    //            if (code_status.has_error_codes and !code_status.has_only_ignored_error_codes) {
+    //                try w.print("pub const {s}Error = error{{", .{type_name});
+    //                var it: CommaIterator = .{ .text = command.error_codes };
+    //                while (it.next()) |code| {
+    //                    if (shouldErrorBeSkipped(code)) continue;
+    //                    try w.print("{s},", .{tryStripPrefix(code, "VK_ERROR_") orelse stripPrefix(code, "VK_")});
+    //                }
+    //                try w.writeAll("};");
+    //            }
 
-                try printProvider(command.providers, w);
-                try w.writeAll("pub fn ");
-                try printCommandName(command_name, w);
-                try w.writeByte('(');
-                for (command.params[0 .. command.params.len - if (code_status.is_create) @as(u1, 1) else @as(u1, 0)]) |p| {
-                    if (isAllocator(p)) continue;
-                    const zig_var: ZigVar = .parse(p, command.params);
-                    try w.print("{f}", .{zig_var});
-                    if (isDispatchable(p, r)) {
-                        try w.writeAll("Wrapper");
-                    }
-                    try w.writeByte(',');
-                }
-                try w.writeByte(')');
-                if (code_status.has_success_codes) {
-                    if (code_status.success_only) {
-                        if (code_status.is_create) {
-                            var last = command.params[command.params.len - 1];
-                            last.c_var.type.base.ptrs.len = 0;
-                            last.c_var.comment = null;
-                            const zig_var: ZigVar = .parse(last, command.params);
-                            try w.print("{f}", .{zig_var});
-                            if (isDispatchable(last, r)) {
-                                try w.writeAll("Wrapper");
-                            }
-                        } else {
-                            try w.writeAll("void");
-                        }
-                    } else {
-                        try w.print("{s}Result", .{type_name});
-                    }
-                } else {
-                    const ret: CBaseType = .{ .v = command.ret };
-                    try w.print("{f}", .{ret});
-                }
-                if (code_status.has_error_codes and !code_status.has_only_ignored_error_codes) {
-                    try w.print("!{s}Error", .{type_name});
-                }
-                try w.print("{{comptime assertDependencies({s}Functions.", .{group});
-                try printCommandName(command_name, w);
-                try w.writeAll(");");
-            }
-            pub fn isDispatchable(zig_var: Registry.ZigVar, r: Registry) bool {
-                const t: Registry.TypeCommon = r.types.get(zig_var.c_var.type.base.name) orelse return false;
-                if (t.type != .handle) return false;
-                return t.type.handle.dispatchable;
-            }
-            fn printParams(command: Registry.Command, r: Registry, w: *Writer) Writer.Error!void {
-                for (command.params) |p| {
-                    if (isAllocator(p)) {
-                        try w.writeAll("getAllocator(),");
-                    } else {
-                        const is_dispatchable = isDispatchable(p, r);
-                        const is_ptr = p.c_var.type.base.ptrs.len != 0;
-                        if (is_dispatchable) {
-                            if (is_ptr) {
-                                try w.writeAll("@ptrCast(");
-                            } else {
-                                try w.writeAll("@bitCast(");
-                            }
-                        }
-                        try w.print("@\"{s}\"", .{p.c_var.name});
-                        if (is_dispatchable) {
-                            try w.writeByte(')');
-                        }
-                        try w.writeByte(',');
-                    }
-                }
-            }
-            fn printFunctionBody(
-                command: Registry.Command,
-                command_name: []const u8,
-                loader_name_: []const u8,
-                w: *Writer,
-                code_status: CodeStatus,
-                r: Registry,
-            ) Writer.Error!void {
-                if (code_status.is_create) {
-                    const src = command.params[command.params.len - 1];
-                    var last = src;
-                    last.c_var.type.base.ptrs.len -= 1;
-                    last.c_var.comment = null;
-                    try w.writeAll("var temp:");
-                    const zig_var: ZigVar = .parse(last, command.params);
-                    try w.print("{f}", .{zig_var});
-                    try w.writeAll("=undefined;");
-                    try w.print("const {s}=&temp;", .{src.c_var.name});
-                }
-                try w.print("return {s} {s}.", .{ if (code_status.has_success_codes) "switch(" else "", loader_name_ });
-                try printCommandName(command_name, w);
-                try w.writeAll(".?(");
-                try printParams(command, r, w);
-                try w.writeByte(')');
-                if (code_status.has_success_codes) {
-                    try w.writeAll("){");
-                    var it: CommaIterator = .{ .text = command.success_codes };
-                    while (it.next()) |code| {
-                        const stripped = stripPrefix(code, "VK_");
-                        try w.print(".{s}=>", .{stripped});
-                        if (code_status.success_only) {
-                            if (code_status.is_create) {
-                                try w.writeAll("temp,");
-                            } else {
-                                try w.writeAll("{},");
-                            }
-                        } else {
-                            try w.print(".{s},", .{stripped});
-                        }
-                    }
-                    it = .{ .text = command.error_codes };
-                    while (it.next()) |code| {
-                        if (shouldErrorBeSkipped(code)) continue;
-                        const stripped = stripPrefix(code, "VK_");
-                        try w.print(".{[name]s} => error.{[name]s},", .{ .name = stripped });
-                    }
-                    try w.writeByte('}');
-                }
-                try w.writeAll(";}");
-            }
-        };
+    //            try printProvider(command.providers, w);
+    //            try w.writeAll("pub fn ");
+    //            try printCommandName(command_name, w);
+    //            try w.writeByte('(');
+    //            for (command.params[0 .. command.params.len - if (code_status.is_create) @as(u1, 1) else @as(u1, 0)]) |p| {
+    //                if (isAllocator(p)) continue;
+    //                const zig_var: ZigVar = .parse(p, command.params);
+    //                try w.print("{f}", .{zig_var});
+    //                if (isDispatchable(p, r)) {
+    //                    try w.writeAll("Wrapper");
+    //                }
+    //                try w.writeByte(',');
+    //            }
+    //            try w.writeByte(')');
+    //            if (code_status.has_success_codes) {
+    //                if (code_status.success_only) {
+    //                    if (code_status.is_create) {
+    //                        var last = command.params[command.params.len - 1];
+    //                        last.c_var.type.base.ptrs.len = 0;
+    //                        last.c_var.comment = null;
+    //                        const zig_var: ZigVar = .parse(last, command.params);
+    //                        try w.print("{f}", .{zig_var});
+    //                        if (isDispatchable(last, r)) {
+    //                            try w.writeAll("Wrapper");
+    //                        }
+    //                    } else {
+    //                        try w.writeAll("void");
+    //                    }
+    //                } else {
+    //                    try w.print("{s}Result", .{type_name});
+    //                }
+    //            } else {
+    //                const ret: CBaseType = .{ .v = command.ret };
+    //                try w.print("{f}", .{ret});
+    //            }
+    //            if (code_status.has_error_codes and !code_status.has_only_ignored_error_codes) {
+    //                try w.print("!{s}Error", .{type_name});
+    //            }
+    //            try w.print("{{comptime assertDependencies({s}Functions.", .{group});
+    //            try printCommandName(command_name, w);
+    //            try w.writeAll(");");
+    //        }
+    //        pub fn isDispatchable(zig_var: Registry.ZigVar, r: Registry) bool {
+    //            const t: Registry.TypeCommon = r.types.get(zig_var.c_var.type.base.name) orelse return false;
+    //            if (t.type != .handle) return false;
+    //            return t.type.handle.dispatchable;
+    //        }
+    //        fn printParams(command: Registry.Command, r: Registry, w: *Writer) Writer.Error!void {
+    //            for (command.params) |p| {
+    //                if (isAllocator(p)) {
+    //                    try w.writeAll("getAllocator(),");
+    //                } else {
+    //                    const is_dispatchable = isDispatchable(p, r);
+    //                    const is_ptr = p.c_var.type.base.ptrs.len != 0;
+    //                    if (is_dispatchable) {
+    //                        if (is_ptr) {
+    //                            try w.writeAll("@ptrCast(");
+    //                        } else {
+    //                            try w.writeAll("@bitCast(");
+    //                        }
+    //                    }
+    //                    try w.print("@\"{s}\"", .{p.c_var.name});
+    //                    if (is_dispatchable) {
+    //                        try w.writeByte(')');
+    //                    }
+    //                    try w.writeByte(',');
+    //                }
+    //            }
+    //        }
+    //        fn printFunctionBody(
+    //            command: Registry.Command,
+    //            command_name: []const u8,
+    //            loader_name_: []const u8,
+    //            w: *Writer,
+    //            code_status: CodeStatus,
+    //            r: Registry,
+    //        ) Writer.Error!void {
+    //            if (code_status.is_create) {
+    //                const src = command.params[command.params.len - 1];
+    //                var last = src;
+    //                last.c_var.type.base.ptrs.len -= 1;
+    //                last.c_var.comment = null;
+    //                try w.writeAll("var temp:");
+    //                const zig_var: ZigVar = .parse(last, command.params);
+    //                try w.print("{f}", .{zig_var});
+    //                try w.writeAll("=undefined;");
+    //                try w.print("const {s}=&temp;", .{src.c_var.name});
+    //            }
+    //            try w.print("return {s} {s}.", .{ if (code_status.has_success_codes) "switch(" else "", loader_name_ });
+    //            try printCommandName(command_name, w);
+    //            try w.writeAll(".?(");
+    //            try printParams(command, r, w);
+    //            try w.writeByte(')');
+    //            if (code_status.has_success_codes) {
+    //                try w.writeAll("){");
+    //                var it: CommaIterator = .{ .text = command.success_codes };
+    //                while (it.next()) |code| {
+    //                    const stripped = stripPrefix(code, "VK_");
+    //                    try w.print(".{s}=>", .{stripped});
+    //                    if (code_status.success_only) {
+    //                        if (code_status.is_create) {
+    //                            try w.writeAll("temp,");
+    //                        } else {
+    //                            try w.writeAll("{},");
+    //                        }
+    //                    } else {
+    //                        try w.print(".{s},", .{stripped});
+    //                    }
+    //                }
+    //                it = .{ .text = command.error_codes };
+    //                while (it.next()) |code| {
+    //                    if (shouldErrorBeSkipped(code)) continue;
+    //                    const stripped = stripPrefix(code, "VK_");
+    //                    try w.print(".{[name]s} => error.{[name]s},", .{ .name = stripped });
+    //                }
+    //                try w.writeByte('}');
+    //            }
+    //            try w.writeAll(";}");
+    //        }
+    //    };
 
-        var command_it = registry.commands.iterator();
-        while (command_it.next()) |command_entry| {
-            const command_name = command_entry.key_ptr.*;
-            const command = command_entry.value_ptr.*;
-            if (isGlobalCommand(command, registry)) {
-                const code_status: helper.CodeStatus = .parse(command, command_name);
-                try helper.printCommand(command, registry, command_name, "Global", writer, code_status);
-                try writer.writeAll(
-                    \\const f = switch(comptime config.globals){
-                    \\.load_time=>extern_global_functions,
-                    \\.run_time => globals,
-                    \\};
-                );
+    //    var command_it = registry.commands.iterator();
+    //    while (command_it.next()) |command_entry| {
+    //        const command_name = command_entry.key_ptr.*;
+    //        const command = command_entry.value_ptr.*;
+    //        if (isGlobalCommand(command, registry)) {
+    //            const code_status: helper.CodeStatus = .parse(command, command_name);
+    //            try helper.printCommand(command, registry, command_name, "Global", writer, code_status);
+    //            try writer.writeAll(
+    //                \\const f = switch(comptime config.globals){
+    //                \\.load_time=>extern_global_functions,
+    //                \\.run_time => globals,
+    //                \\};
+    //            );
 
-                try helper.printFunctionBody(
-                    command,
-                    command_name,
-                    "f",
-                    writer,
-                    code_status,
-                    registry,
-                );
-            }
-        }
+    //            try helper.printFunctionBody(
+    //                command,
+    //                command_name,
+    //                "f",
+    //                writer,
+    //                code_status,
+    //                registry,
+    //            );
+    //        }
+    //    }
 
-        const instance_handle = registry.types.getPtr("VkInstance") orelse @panic("Failed to find VkInstance");
-        var types_it = registry.types.iterator();
-        while (types_it.next()) |registry_type| {
-            if (registry_type.value_ptr.type != .handle) continue;
-            if (!registry_type.value_ptr.type.handle.dispatchable) continue;
-            try writer.print("pub const {[name]s}Wrapper = struct{{handle:{[name]s},", .{ .name = stripPrefix(registry_type.key_ptr.*, "Vk") });
-            command_it = registry.commands.iterator();
-            while (command_it.next()) |c_entry| {
-                const command_name = c_entry.key_ptr.*;
-                const command = c_entry.value_ptr.*;
-                if (command.params.len == 0) continue;
-                const first = command.params[0].c_var.type.base.name;
-                const handle = registry.types.getPtr(first) orelse continue;
-                if (handle != registry_type.value_ptr) continue;
-                const is_instance = handle == instance_handle;
-                const group = if (is_instance) "Instance" else "Device";
-                const code_status: helper.CodeStatus = .parse(command, command_name);
-                try helper.printCommand(command, registry, command_name, group, writer, code_status);
-                try helper.printFunctionBody(
-                    command,
-                    command_name,
-                    if (is_instance) "instance_loader" else "device_loader",
-                    writer,
-                    code_status,
-                    registry,
-                );
-            }
+    //    const instance_handle = registry.types.getPtr("VkInstance") orelse @panic("Failed to find VkInstance");
+    //    var types_it = registry.types.iterator();
+    //    while (types_it.next()) |registry_type| {
+    //        if (registry_type.value_ptr.type != .handle) continue;
+    //        if (!registry_type.value_ptr.type.handle.dispatchable) continue;
+    //        try writer.print("pub const {[name]s}Wrapper = struct{{handle:{[name]s},", .{ .name = stripPrefix(registry_type.key_ptr.*, "Vk") });
+    //        command_it = registry.commands.iterator();
+    //        while (command_it.next()) |c_entry| {
+    //            const command_name = c_entry.key_ptr.*;
+    //            const command = c_entry.value_ptr.*;
+    //            if (command.params.len == 0) continue;
+    //            const first = command.params[0].c_var.type.base.name;
+    //            const handle = registry.types.getPtr(first) orelse continue;
+    //            if (handle != registry_type.value_ptr) continue;
+    //            const is_instance = handle == instance_handle;
+    //            const group = if (is_instance) "Instance" else "Device";
+    //            const code_status: helper.CodeStatus = .parse(command, command_name);
+    //            try helper.printCommand(command, registry, command_name, group, writer, code_status);
+    //            try helper.printFunctionBody(
+    //                command,
+    //                command_name,
+    //                if (is_instance) "instance_loader" else "device_loader",
+    //                writer,
+    //                code_status,
+    //                registry,
+    //            );
+    //        }
 
-            try writer.writeAll("};");
-        }
-        try writer.writeAll("};}");
-    }
+    //        try writer.writeAll("};");
+    //    }
+    //    try writer.writeAll("};}");
+    //}
 
     fn printExtensions(registry: Registry, writer: *Writer) Writer.Error!void {
         const ExtensionList = struct {
@@ -2588,32 +2588,13 @@ const render = struct {
             }
         }
     }
-    fn printExtension(e: Registry.Extension, writer: *Writer) Writer.Error!void {
-        try writer.print("\n/// {t} extension\n", .{e.kind});
-        if (e.promoted) |p| {
-            try writer.print("\n/// Promoted to {s}\n", .{p});
-        }
-        if (e.depends) |d| {
-            try writer.print("\n/// depends on {s}\n", .{d});
-        }
-        try writer.print("{s},", .{stripPrefix(e.name.name, "VK_")});
-    }
+
     fn shouldErrorBeSkipped(name: []const u8) bool {
         // OVERRIDE: Skipping undefined behavior errors
         if (enumFromName(enum { VK_ERROR_UNKNOWN, VK_ERROR_VALIDATION_FAILED }, name)) |_| return true;
         return false;
     }
 
-    fn printResultEntry(name: []const u8, writer: *Writer) Writer.Error!void {
-        if (shouldErrorBeSkipped(name)) return;
-        try writer.print("{[name]s}=@intFromEnum(Result.{[name]s}),", .{ .name = stripPrefix(name, "VK_") });
-    }
-    fn printCommandName(name: []const u8, writer: *Writer) Writer.Error!void {
-        const stripped = stripPrefix(name, "vk");
-        if (stripped.len == 0) @panic("Empty command name");
-        try writer.writeByte(std.ascii.toLower(stripped[0]));
-        try writer.writeAll(stripped[1..]);
-    }
     pub fn printCommands(registry: Registry, writer: *Writer) Writer.Error!void {
         try writer.writeAll(
             \\
@@ -2631,15 +2612,7 @@ const render = struct {
         try printExternGlobalFunctions(registry, writer);
         try printCommandGroup(registry, writer);
     }
-    const PrintData = struct {
-        group: []const u8,
-        func_arg: []const u8,
-        load_param: []const u8,
-    };
-    const CommandWithName = struct {
-        command: Registry.Command,
-        name: []const u8,
-    };
+
     const CommandTypeName = struct {
         name: []const u8,
         pub fn parse(name: []const u8) @This() {
