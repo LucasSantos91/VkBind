@@ -1991,7 +1991,7 @@ const render = struct {
         }
     };
     fn printFuncpointer(name: []const u8, e_c: Registry.TypeCommon, writer: *Writer) Writer.Error!void {
-        const comment: Comment = .parse(name);
+        const comment: Comment = .parse(e_c.comment);
         const provider: Provider = .{ .p = e_c.providers };
         const e = e_c.type.funcpointer;
         const n: FuncpointerName = .parse(name);
