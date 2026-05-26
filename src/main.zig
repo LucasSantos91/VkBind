@@ -2213,13 +2213,24 @@ const render = struct {
             }
         };
         const Ret = union(enum) {
+            const RetZigType = struct {
+                v: ZigType,
+                dispatchable: bool,
+            };
+            zig_type: RetZigType,
             base: CBaseType,
             name: CommandTypeName,
 
             pub const void_ret: @This() = .{ .base = .{ .v = .{ .name = "void" } } };
-
+            pub fn parseZigVar(zig_var: Registry.ZigVar, others: []const Registry.ZigVar, r: Registry) @This() {
+                return .{ .zig_type = .{
+                    .v = .parse(zig_var, others),
+                    .dispatchable = isDispatchableHandleByTypeName(zig_var.c_var.type.base.name, r),
+                } };
+            }
             pub fn format(self: @This(), w: *Writer) Writer.Error!void {
                 switch (self) {
+                    .zig_type => |z| try w.print("{f}{s}", .{ z.v, if (z.dispatchable) "Wrapper" else "" }),
                     .base => |b| try w.print("{f}", .{b}),
                     .name => |n| try w.print("{f}Result", .{n}),
                 }
@@ -2233,7 +2244,8 @@ const render = struct {
                     if (VCParams.isPAllocator(p)) {
                         try w.writeAll("getAllocator(),");
                     } else {
-                        try w.print("{s},", .{p.c_var.name});
+                        const zig_type: ZigType = .parse(p, self.params);
+                        try w.print("justFreakingCastTheThing({s},{f}),", .{ p.c_var.name, zig_type });
                     }
                 }
             }
@@ -2297,9 +2309,8 @@ const render = struct {
         const error_ret: ErrorRet = .{ .name = if (has_error_codes) name.name else null };
         const ret: Ret = if (has_success_codes) blk: {
             break :blk if (is_create_command) {
-                var v = last_param.c_var.type.base;
-                v.ptrs.len -= 1;
-                break :blk .{ .base = .{ .v = v } };
+                last_param.c_var.type.base.ptrs.len -= 1;
+                break :blk .parseZigVar(last_param, command.params, registry);
             } else if (only_success_code)
                 Ret.void_ret
             else

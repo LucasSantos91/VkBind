@@ -214,3 +214,11 @@ pub fn isDispatchableHandle(comptime T: type) bool {
     if (info != .@"enum") return false;
     return info.@"enum".tag_type == usize;
 }
+
+inline fn justFreakingCastTheThing(variable: anytype, comptime Target: type) Target {
+    const Variable = @TypeOf(variable);
+    comptime std.debug.assert(@sizeOf(Variable) == @sizeOf(Target) and @alignOf(Variable) == @alignOf(Target));
+    const ptr = &variable;
+    const casted: *const Target = @ptrCast(@alignCast(ptr));
+    return casted.*;
+}
