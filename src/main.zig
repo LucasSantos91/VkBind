@@ -2268,15 +2268,16 @@ const render = struct {
             .registry = registry,
         };
         const error_ret: ErrorRet = .{ .name = if (has_error_codes) name.name else null };
-        const ret: Ret = if (has_success_codes) blk: {
-            break :blk if (is_create_command) {
+        const ret: Ret =
+            if (is_create_command) blk: {
                 last_param.c_var.type.base.ptrs.len -= 1;
                 break :blk .parseZigVar(last_param, registry);
-            } else if (only_success_code)
-                Ret.void_ret
-            else
-                .{ .name = name.name };
-        } else .{ .base = .{ .v = command.ret } };
+            } else if (has_success_codes) blk: {
+                break :blk if (only_success_code)
+                    Ret.void_ret
+                else
+                    .{ .name = name.name };
+            } else .{ .base = .{ .v = command.ret } };
         const param_names: ParamNames = .{ .params = command.params };
         const switch_prongs: SwitchProngs = .{
             .enabled = has_success_codes,
