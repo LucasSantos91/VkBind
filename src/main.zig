@@ -2049,7 +2049,7 @@ const render = struct {
 
         try printCommands(registry, writer);
         try printExtensions(registry, writer);
-        //try printVulkanContext(registry, writer);
+        try printVulkanContext(registry, writer);
     }
     fn isGlobalCommand(command: Registry.Command, registry: Registry) bool {
         if (command.params.len == 0) return true;
@@ -2085,7 +2085,7 @@ const render = struct {
             const last = command.params[command.params.len - 1];
             if (last.c_var.type.base.ptrs.len == 0) break :blk false;
             if (last.extra[0].optional) break :blk false;
-            if (!(last.extra[0].len.len == 0 or std.mem.eql(u8, last.extra[0].len, "1"))) break :blk false;
+            if (last.extra[0].len != .@"1") break :blk false;
             const n = name.name.name;
             break :blk std.mem.startsWith(u8, n, "Create") or
                 std.mem.startsWith(u8, n, "Enumerate");
@@ -2152,7 +2152,7 @@ const render = struct {
             pub fn format(self: @This(), w: *Writer) Writer.Error!void {
                 for (self.params) |p| {
                     if (isPAllocator(p)) continue;
-                    const z: ZigVar = .parse(p, self.params);
+                    const z: ZigVar = .parse(p);
                     try w.print("{f}", .{z});
                     if (isDispatchableHandleByTypeName(p.c_var.type.base.name, self.registry)) {
                         try w.writeAll("Wrapper");
@@ -2179,9 +2179,9 @@ const render = struct {
             name: CommandTypeName,
 
             pub const void_ret: @This() = .{ .base = .{ .v = .{ .name = "void" } } };
-            pub fn parseZigVar(zig_var: Registry.ZigVar, others: []const Registry.ZigVar, r: Registry) @This() {
+            pub fn parseZigVar(zig_var: Registry.ZigVar, r: Registry) @This() {
                 return .{ .zig_type = .{
-                    .v = .parse(zig_var, others),
+                    .v = .parse(zig_var),
                     .dispatchable = isDispatchableHandleByTypeName(zig_var.c_var.type.base.name, r),
                 } };
             }
@@ -2201,7 +2201,7 @@ const render = struct {
                     if (VCParams.isPAllocator(p)) {
                         try w.writeAll("getAllocator(),");
                     } else {
-                        const zig_type: ZigType = .parse(p, self.params);
+                        const zig_type: ZigType = .parse(p);
                         try w.print("justFreakingCastTheThing({s},{f}),", .{ p.c_var.name, zig_type });
                     }
                 }
@@ -2267,7 +2267,7 @@ const render = struct {
         const ret: Ret = if (has_success_codes) blk: {
             break :blk if (is_create_command) {
                 last_param.c_var.type.base.ptrs.len -= 1;
-                break :blk .parseZigVar(last_param, command.params, registry);
+                break :blk .parseZigVar(last_param, registry);
             } else if (only_success_code)
                 Ret.void_ret
             else
