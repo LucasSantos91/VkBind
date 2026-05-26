@@ -2102,7 +2102,16 @@ const render = struct {
         if (!first_type.type.handle.dispatchable) return true;
         return false;
     }
-    fn printVulkanContextCommand(command_name: []const u8, command: Registry.Command, loader: []const u8, writer: *Writer) Writer.Error!void {
+    fn isDispatchableHandle(t: Registry.TypeCommon) bool {
+        if (t.type != .handle) return false;
+        return t.type.handle.dispatchable;
+    }
+    fn isDispatchableHandleByTypeName(name: []const u8, registry: Registry) bool {
+        const t = registry.types.get(name) orelse return false;
+        return isDispatchableHandle(t);
+    }
+
+    fn printVulkanContextCommand(command_name: []const u8, command: Registry.Command, loader: []const u8, registry: Registry, writer: *Writer) Writer.Error!void {
         const has_success_codes = command.success_codes.len != 0;
         const only_success_code = std.mem.eql(u8, command.success_codes, "VK_SUCCESS");
         const has_error_codes = blk: {
@@ -2174,6 +2183,7 @@ const render = struct {
 
         const VCParams = struct {
             params: []const Registry.ZigVar,
+            registry: Registry,
 
             fn isPAllocator(v: Registry.ZigVar) bool {
                 const b = v.c_var.type.base;
@@ -2185,7 +2195,11 @@ const render = struct {
                 for (self.params) |p| {
                     if (isPAllocator(p)) continue;
                     const z: ZigVar = .parse(p, self.params);
-                    try w.print("{f},", .{z});
+                    try w.print("{f}", .{z});
+                    if (isDispatchableHandleByTypeName(p.c_var.type.base.name, self.registry)) {
+                        try w.writeAll("Wrapper");
+                    }
+                    try w.writeByte(',');
                 }
             }
         };
@@ -2260,7 +2274,10 @@ const render = struct {
             .name = name.name,
         };
         const provider: Provider = .{ .p = command.providers };
-        const params: VCParams = .{ .params = command.params };
+        const params: VCParams = .{
+            .params = command.params,
+            .registry = registry,
+        };
         const error_ret: ErrorRet = .{ .name = if (has_error_codes) name.name else null };
         const ret: Ret = if (has_success_codes) blk: {
             break :blk if (only_success_code)
@@ -2281,7 +2298,7 @@ const render = struct {
             \\pub fn {[name]f}(
             \\{[params]f}
             \\) {[error_ret]f}{[ret]f} {{
-            \\return {[maybe_switch]s}{[loader]s}.?(
+            \\return {[maybe_switch]s}{[loader]s}.{[name]f}(
             \\  {[param_names]f}
             \\){[switch_prongs]f};
             \\}}
@@ -2375,14 +2392,18 @@ const render = struct {
                 \\  .run_time => loader,
                 \\}
             ;
-            try printVulkanContextCommand(entry.key_ptr.*, entry.value_ptr.*, global_loader, writer);
+            try printVulkanContextCommand(
+                entry.key_ptr.*,
+                entry.value_ptr.*,
+                global_loader,
+                registry,
+                writer,
+            );
         }
 
         var types_it = registry.types.iterator();
         while (types_it.next()) |t| {
-            const type_common = t.value_ptr.*;
-            if (type_common.type != .handle) continue;
-            if (!type_common.type.handle.dispatchable) continue;
+            if (!isDispatchableHandle(t.value_ptr.*)) continue;
             const name: TypeName = .parse(t.key_ptr.*);
             try writer.print(
                 \\pub const {[name]f}Wrapper = struct{{
@@ -2395,7 +2416,13 @@ const render = struct {
                 if (command.params.len == 0) continue;
                 const first = command.params[0];
                 if (!std.mem.eql(u8, t.key_ptr.*, first.c_var.type.base.name)) continue;
-                try printVulkanContextCommand(command_entry.key_ptr.*, command, "loader", writer);
+                try printVulkanContextCommand(
+                    command_entry.key_ptr.*,
+                    command,
+                    "loader",
+                    registry,
+                    writer,
+                );
             }
             try writer.writeAll("};");
         }
