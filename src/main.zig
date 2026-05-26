@@ -488,9 +488,21 @@ pub const Registry = struct {
     };
 
     const ZigVar = struct {
+        const Len = union(enum) {
+            @"1",
+            @"null-terminated",
+            expression: []const u8,
+
+            pub fn parse(text: []const u8) @This() {
+                return if (enumFromName(enum { @"1", @"null-terminated" }, text)) |e| switch (e) {
+                    .@"1" => .@"1",
+                    .@"null-terminated" => .@"null-terminated",
+                } else .{ .expression = text };
+            }
+        };
         const Ptr = struct {
             optional: bool,
-            len: []const u8,
+            len: Len,
         };
 
         c_var: CVar,
@@ -499,7 +511,7 @@ pub const Registry = struct {
         pub fn parse(xml: XmlNode) @This() {
             var result: @This() = .{
                 .c_var = .parse(xml),
-                .extra = @splat(.{ .optional = false, .len = &.{} }),
+                .extra = @splat(.{ .optional = false, .len = .@"1" }),
             };
             if (xml.attr.get("optional")) |opt| {
                 var it: CommaIterator = .{ .text = opt };
@@ -513,7 +525,7 @@ pub const Registry = struct {
                 var it: CommaIterator = .{ .text = len };
                 for (&result.extra) |*e| {
                     if (it.next()) |text| {
-                        e.len = text;
+                        e.len = .parse(text);
                     } else break;
                 }
             }
@@ -1251,25 +1263,6 @@ const render = struct {
         if (!std.mem.startsWith(u8, name, prefix)) return null;
         return name[prefix.len..];
     }
-    fn printComment(comment_: ?[]const u8, writer: *Writer) Writer.Error!void {
-        if (comment_ == null) return;
-        const prefix = "// ";
-        var text = comment_.?;
-        if (std.mem.startsWith(u8, text, prefix)) {
-            text = text[prefix.len..];
-        }
-        try writer.print("\n/// {s}\n", .{text});
-    }
-    fn printMixins(mixins: []const []const u8, flags: []const u8, flag_bits: []const u8, mixin_kind: []const u8, writer: *Writer) Writer.Error!void {
-        for (mixins) |m| {
-            try writer.print("pub const {[mixin]s}={[mixin_kind]s}Mixin({[flags]s},{[flag_bits]s}).{[mixin]s};", .{
-                .mixin = m,
-                .mixin_kind = mixin_kind,
-                .flags = flags,
-                .flag_bits = flag_bits,
-            });
-        }
-    }
     const Mixins = struct {
         mixins: []const []const u8,
         mixin_kind: []const u8,
@@ -1658,7 +1651,7 @@ const render = struct {
                         }
                     }
 
-                    const v: ZigVar = .parse(m, members);
+                    const v: ZigVar = .parse(m);
                     try w.print("{f}", .{v});
                     if (v.v.v.extra[0].optional) {
                         try w.print("= nullValue({f})", .{v.v});
@@ -1692,21 +1685,21 @@ const render = struct {
     const ZigVar = struct {
         v: ZigType,
 
-        pub fn parse(zig_var: Registry.ZigVar, others: []const Registry.ZigVar) @This() {
-            return .{ .v = .parse(zig_var, others) };
+        pub fn parse(zig_var: Registry.ZigVar) @This() {
+            return .{ .v = .parse(zig_var) };
         }
         pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
             const ptr_len = self.v.v.c_var.type.base.ptrs.len;
-            if (self.v.v.c_var.type.amount == .array and self.v.len_kind[0] == .@"null-terminated") {
+            if (self.v.v.c_var.type.amount == .array and self.v.v.extra[0].len == .@"null-terminated") {
                 try writer.writeAll("\n/// Null-terminated\n");
             }
-            for (self.v.len_kind[0..ptr_len], self.v.v.extra[0..ptr_len]) |b, extra| {
-                switch (b) {
-                    .other_member, .expression => {
-                        try writer.print("\n/// Length given by {s}\n", .{extra.len});
+            for (self.v.v.extra[0..ptr_len]) |extra| {
+                switch (extra.len) {
+                    .expression => |e| {
+                        try writer.print("\n/// Length given by {s}\n", .{e});
                         break;
                     },
-                    .@"null-terminated", .single => {},
+                    .@"null-terminated", .@"1" => {},
                 }
             }
             const comment: Comment = .parse(self.v.v.c_var.comment);
@@ -1724,44 +1717,11 @@ const render = struct {
     const ZigType = struct {
         const max_ptr = Registry.CBaseType.max_ptr;
         v: Registry.ZigVar,
-        len_kind: [max_ptr]LenKind,
 
-        const LenKind = enum { single, @"null-terminated", expression, other_member };
-
-        pub fn parse(zig_var: Registry.ZigVar, others: []const Registry.ZigVar) @This() {
-            var result: @This() = .{
+        pub fn parse(zig_var: Registry.ZigVar) @This() {
+            return .{
                 .v = zig_var,
-                .len_kind = undefined,
             };
-            for (&result.v.extra, &result.len_kind) |*extra, *len_kind| {
-                if (extra.len.len == 0) {
-                    len_kind.* = .single;
-                } else {
-                    if (enumFromName(enum { @"null-terminated", @"1" }, extra.len)) |l| switch (l) {
-                        .@"null-terminated" => {
-                            len_kind.* = .@"null-terminated";
-                        },
-                        .@"1" => {
-                            len_kind.* = .single;
-                        },
-                    } else {
-                        len_kind.* = .expression;
-                        extra.optional = true;
-
-                        for (others) |o| {
-                            if (!std.mem.eql(u8, o.c_var.name, extra.len)) continue;
-                            len_kind.* = .other_member;
-                            extra.optional = false;
-                            for (o.extra) |e| if (e.optional) {
-                                extra.optional = true;
-                                break;
-                            };
-                            break;
-                        }
-                    }
-                }
-            }
-            return result;
         }
 
         pub fn format(self: @This(), w: *Writer) Writer.Error!void {
@@ -1771,18 +1731,18 @@ const render = struct {
             }
             const ptr_len = self.v.c_var.type.base.ptrs.len;
 
-            for (self.v.extra[0..ptr_len], self.v.c_var.type.base.ptrs.buffer[0..ptr_len], self.len_kind[0..ptr_len]) |extra, ptr, kind| {
+            for (self.v.extra[0..ptr_len], self.v.c_var.type.base.ptrs.buffer[0..ptr_len]) |extra, ptr| {
                 if (extra.optional) {
                     try w.writeByte('?');
                 }
-                switch (kind) {
-                    .other_member, .expression => {
+                switch (extra.len) {
+                    .expression => {
                         try w.writeAll("[*]");
                     },
                     .@"null-terminated" => {
                         try w.writeAll("[*:0]");
                     },
-                    .single => {
+                    .@"1" => {
                         try w.writeByte('*');
                     },
                 }
@@ -1821,7 +1781,7 @@ const render = struct {
 
             pub fn format(self: @This(), w: *Writer) Writer.Error!void {
                 for (self.e.members) |m| {
-                    const v: ZigVar = .parse(m, self.e.members);
+                    const v: ZigVar = .parse(m);
                     try w.print("{f},", .{v});
                 }
             }
@@ -1985,7 +1945,7 @@ const render = struct {
 
         pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
             for (self.params) |p| {
-                const v: ZigVar = .parse(p, self.params);
+                const v: ZigVar = .parse(p);
                 try writer.print("{f},", .{v});
             }
         }
@@ -2033,41 +1993,38 @@ const render = struct {
             // OVERRIDE: true and false have been subsumed into Bool32
             if (enumFromName(enum { VK_TRUE, VK_FALSE }, c.name)) |_| continue;
 
-            try printComment(c.comment, writer);
-            try printProvider(c.providers, writer);
-            try writer.writeAll("pub const ");
-            try writeConstant(c.name, writer);
+            const comment: Comment = .parse(c.comment);
+            const provider: Provider = .{ .p = c.providers };
+            const name: ConstantName = .parse(c.name);
             const zig_type: Primitives = enumFromName(Primitives, c.type) orelse panic("Unknown primitive type: {s}", .{c.type});
-            const zig_type_text = zig_type.toZig();
-            try writer.print(":{s}=", .{zig_type_text});
+            var value = c.value;
             const nums_and_point = "0123456789.";
-            if (std.mem.findScalar(u8, c.value, '~')) |i| {
-                var t = c.value[i + 1 ..];
-                const end = std.mem.findNone(u8, t, nums_and_point) orelse c.value.len;
-                t = t[0..end];
-                try writer.print("~@as({s},{s});", .{ zig_type_text, t });
-            } else {
-                const end = std.mem.findNone(u8, c.value, nums_and_point) orelse c.value.len;
-                try writer.print("{s};", .{c.value[0..end]});
-            }
+            const negate = if (std.mem.findScalar(u8, c.value, '~')) |i| blk: {
+                value = value[i + 1 ..];
+                const end = std.mem.findNone(u8, value, nums_and_point) orelse c.value.len;
+                value = value[0..end];
+                break :blk true;
+            } else blk: {
+                const end = std.mem.findNone(u8, c.value, nums_and_point) orelse value.len;
+                value = value[0..end];
+                break :blk false;
+            };
+
+            try writer.print(
+                \\{[comment]f}
+                \\{[provider]f}
+                \\pub const {[name]f}: {[primitive]s} = {[maybe_negate]s}@as({[primitive]s}, {[value]s});
+            ,
+                .{
+                    .name = name,
+                    .primitive = zig_type.toZig(),
+                    .maybe_negate = if (negate) "~" else "",
+                    .value = value,
+                    .provider = provider,
+                    .comment = comment,
+                },
+            );
         }
-    }
-    fn printProvider(p: Registry.Providers, writer: *Writer) Writer.Error!void {
-        if (p.version == null and p.extensions.len == 0) return;
-        try writer.writeAll("\n/// Provided by ");
-        if (p.version) |version| {
-            try writer.print("Vulkan {s}", .{version.number});
-            if (p.extensions.len != 0) {
-                try writer.writeAll(", ");
-            }
-        }
-        for (p.extensions[0..p.extensions.len -| 1]) |e| {
-            try writer.print("{s}, ", .{e.name});
-        }
-        if (p.extensions.len != 0) {
-            try writer.writeAll(p.extensions[p.extensions.len - 1].name);
-        }
-        try writer.writeByte('\n');
     }
     pub fn render(registry: Registry, writer: *Writer) Writer.Error!void {
         try writer.print("{s}\n", .{@embedFile("preamble.zig")});
@@ -2092,7 +2049,7 @@ const render = struct {
 
         try printCommands(registry, writer);
         try printExtensions(registry, writer);
-        try printVulkanContext(registry, writer);
+        //try printVulkanContext(registry, writer);
     }
     fn isGlobalCommand(command: Registry.Command, registry: Registry) bool {
         if (command.params.len == 0) return true;
