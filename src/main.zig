@@ -2102,8 +2102,204 @@ const render = struct {
         if (!first_type.type.handle.dispatchable) return true;
         return false;
     }
+    fn printVulkanContextCommand(command_name: []const u8, command: Registry.Command, loader: []const u8, writer: *Writer) Writer.Error!void {
+        const has_success_codes = command.success_codes.len != 0;
+        const only_success_code = std.mem.eql(u8, command.success_codes, "VK_SUCCESS");
+        const has_error_codes = blk: {
+            var it: CommaIterator = .{ .text = command.error_codes };
+            while (it.next()) |code| {
+                if (!shouldErrorBeSkipped(code)) break :blk true;
+            }
+            break :blk false;
+        };
+        const name: CommandFunctionName = .parseFromText(command_name);
+        const is_create_command = blk: {
+            if (command.params.len == 0) break :blk false;
+            const last = command.params[command.params.len - 1];
+            if (last.c_var.type.base.ptrs.len == 0) break :blk false;
+            if (last.extra[0].optional) break :blk false;
+            const n = name.name.name;
+            break :blk std.mem.startsWith(u8, n, "create") or
+                std.mem.startsWith(u8, n, "enumerate");
+        };
+        _ = is_create_command;
+
+        const ResultDecl = struct {
+            enabled: bool,
+            success_codes: []const u8,
+            name: CommandTypeName,
+
+            pub fn format(self: @This(), w: *Writer) Writer.Error!void {
+                if (!self.enabled) return;
+                try w.print(
+                    \\ pub const {f}Result = enum(@typeInfo(Result).@"enum".tag_type){{
+                , .{self.name});
+                var it: CommaIterator = .{ .text = self.success_codes };
+                while (it.next()) |code| {
+                    const n: ConstantName = .parse(code);
+                    try w.print("{[name]f} = @intFromEnum(Result.{[name]f}),", .{ .name = n });
+                }
+                try w.writeAll("};");
+            }
+        };
+        const ErrorName = struct {
+            name: []const u8,
+            pub fn parse(name_: []const u8) @This() {
+                const n = stripPrefix(name_, "VK_");
+                return .{ .name = tryStripPrefix(n, "ERROR_") orelse n };
+            }
+            pub fn format(self: @This(), w: *Writer) Writer.Error!void {
+                try w.writeAll(self.name);
+            }
+        };
+        const ErrorDecl = struct {
+            enabled: bool,
+            error_codes: []const u8,
+            name: CommandTypeName,
+
+            pub fn format(self: @This(), w: *Writer) Writer.Error!void {
+                if (!self.enabled) return;
+                try w.print(
+                    \\ pub const {f}Error = error{{
+                , .{self.name});
+                var it: CommaIterator = .{ .text = self.error_codes };
+                while (it.next()) |code| {
+                    if (shouldErrorBeSkipped(code)) continue;
+                    const n: ErrorName = .parse(code);
+                    try w.print("{f},", .{n});
+                }
+                try w.writeAll("};");
+            }
+        };
+
+        const VCParams = struct {
+            params: []const Registry.ZigVar,
+
+            fn isPAllocator(v: Registry.ZigVar) bool {
+                const b = v.c_var.type.base;
+                if (b.ptrs.len != 1) return false;
+                return std.mem.eql(u8, b.name, "VkAllocationCallbacks");
+            }
+
+            pub fn format(self: @This(), w: *Writer) Writer.Error!void {
+                for (self.params) |p| {
+                    if (isPAllocator(p)) continue;
+                    const z: ZigVar = .parse(p, self.params);
+                    try w.print("{f},", .{z});
+                }
+            }
+        };
+        const ErrorRet = struct {
+            name: ?CommandTypeName,
+
+            pub fn format(self: @This(), w: *Writer) Writer.Error!void {
+                const n = self.name orelse return;
+                try w.print("{f}Error!", .{n});
+            }
+        };
+        const Ret = union(enum) {
+            base: CBaseType,
+            name: CommandTypeName,
+
+            pub const void_ret: @This() = .{ .base = .{ .v = .{ .name = "void" } } };
+
+            pub fn format(self: @This(), w: *Writer) Writer.Error!void {
+                switch (self) {
+                    .base => |b| try w.print("{f}", .{b}),
+                    .name => |n| try w.print("{f}Result", .{n}),
+                }
+            }
+        };
+        const ParamNames = struct {
+            params: []const Registry.ZigVar,
+
+            pub fn format(self: @This(), w: *Writer) Writer.Error!void {
+                for (self.params) |p| {
+                    if (VCParams.isPAllocator(p)) {
+                        try w.writeAll("getAllocator(),");
+                    } else {
+                        try w.print("{s},", .{p.c_var.name});
+                    }
+                }
+            }
+        };
+        const SwitchProngs = struct {
+            enabled: bool,
+            success_codes: ?[]const u8,
+            error_codes: []const u8,
+            pub fn format(self: @This(), w: *Writer) Writer.Error!void {
+                if (!self.enabled) return;
+                try w.writeAll("){");
+                if (self.success_codes) |codes| {
+                    var it: CommaIterator = .{ .text = codes };
+                    while (it.next()) |code| {
+                        const n: ConstantName = .parse(code);
+                        try w.print(".{[name]f} => .{[name]f},", .{ .name = n });
+                    }
+                } else {
+                    try w.writeAll(".SUCCESS => {},");
+                }
+                var it: CommaIterator = .{ .text = self.error_codes };
+                while (it.next()) |code| {
+                    if (shouldErrorBeSkipped(code)) continue;
+                    const n: ErrorName = .parse(code);
+                    try w.print(".{[name]f} => error.{[name]f},", .{ .name = n });
+                }
+                try w.writeByte('}');
+            }
+        };
+
+        const result_decl: ResultDecl = .{
+            .enabled = has_success_codes and !only_success_code,
+            .success_codes = command.success_codes,
+            .name = name.name,
+        };
+        const error_decl: ErrorDecl = .{
+            .enabled = has_error_codes,
+            .error_codes = command.error_codes,
+            .name = name.name,
+        };
+        const provider: Provider = .{ .p = command.providers };
+        const params: VCParams = .{ .params = command.params };
+        const error_ret: ErrorRet = .{ .name = if (has_error_codes) name.name else null };
+        const ret: Ret = if (has_success_codes) blk: {
+            break :blk if (only_success_code)
+                Ret.void_ret
+            else
+                .{ .name = name.name };
+        } else .{ .base = .{ .v = command.ret } };
+        const param_names: ParamNames = .{ .params = command.params };
+        const switch_prongs: SwitchProngs = .{
+            .enabled = has_success_codes,
+            .success_codes = if (only_success_code) null else command.success_codes,
+            .error_codes = command.error_codes,
+        };
+        try writer.print(
+            \\{[result_decl]f}
+            \\{[error_decl]f}
+            \\{[provider]f}
+            \\pub fn {[name]f}(
+            \\{[params]f}
+            \\) {[error_ret]f}{[ret]f} {{
+            \\return {[maybe_switch]s}{[loader]s}.?(
+            \\  {[param_names]f}
+            \\){[switch_prongs]f};
+            \\}}
+        , .{
+            .result_decl = result_decl,
+            .error_decl = error_decl,
+            .provider = provider,
+            .name = name,
+            .params = params,
+            .error_ret = error_ret,
+            .ret = ret,
+            .maybe_switch = if (has_success_codes) "switch(" else "",
+            .loader = loader,
+            .param_names = param_names,
+            .switch_prongs = switch_prongs,
+        });
+    }
     fn printVulkanContext(registry: Registry, writer: *Writer) Writer.Error!void {
-        _ = registry;
         try writer.writeAll(
             \\pub const VulkanContextConfig = struct{
             \\  pub const Globals = enum{
@@ -2170,10 +2366,40 @@ const render = struct {
             \\      }
         );
 
-        try writer.print(
-            \\  }};
-            \\}}
-        , .{});
+        var it = registry.commands.iterator();
+        while (it.next()) |entry| {
+            if (!isGlobalCommand(entry.value_ptr.*, registry)) continue;
+            const global_loader =
+                \\switch(comptime config.globals){
+                \\  .load_time => extern_global_commands,
+                \\  .run_time => loader,
+                \\}
+            ;
+            try printVulkanContextCommand(entry.key_ptr.*, entry.value_ptr.*, global_loader, writer);
+        }
+
+        var types_it = registry.types.iterator();
+        while (types_it.next()) |t| {
+            const type_common = t.value_ptr.*;
+            if (type_common.type != .handle) continue;
+            if (!type_common.type.handle.dispatchable) continue;
+            const name: TypeName = .parse(t.key_ptr.*);
+            try writer.print(
+                \\pub const {[name]f}Wrapper = struct{{
+                \\handle: {[name]f},
+                \\
+            , .{ .name = name });
+            it = registry.commands.iterator();
+            while (it.next()) |command_entry| {
+                const command = command_entry.value_ptr.*;
+                if (command.params.len == 0) continue;
+                const first = command.params[0];
+                if (!std.mem.eql(u8, t.key_ptr.*, first.c_var.type.base.name)) continue;
+                try printVulkanContextCommand(command_entry.key_ptr.*, command, "loader", writer);
+            }
+            try writer.writeAll("};");
+        }
+        try writer.writeAll("};}");
     }
     //    const helper = struct {
     //        fn isAllocator(zig_var: Registry.ZigVar) bool {
@@ -2655,73 +2881,6 @@ const render = struct {
             try writer.writeAll(self.name);
         }
     };
-    const CommandReturnType = union(enum) {
-        codes: CommandTypeName,
-        base: CBaseType,
-
-        pub fn parse(command_name: CommandTypeName, command: Registry.Command) @This() {
-            return if (command.success_codes.len != 0)
-                .{ .codes = command_name }
-            else
-                .{ .base = .{ .v = command.ret } };
-        }
-
-        pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
-            switch (self) {
-                .base => |b| try writer.print("{f}", .{b}),
-                .codes => |codes| try writer.print("{f}Result", .{codes}),
-            }
-        }
-    };
-
-    pub const CommandReturnTypeDeclaration = union(enum) {
-        empty,
-        codes: Codes,
-
-        const Codes = struct {
-            error_codes: []const u8,
-            success_codes: []const u8,
-            command_name: CommandTypeName,
-        };
-
-        pub fn parse(command_name: CommandTypeName, command: Registry.Command) @This() {
-            return if (command.success_codes.len != 0)
-                .{ .codes = .{
-                    .command_name = command_name,
-                    .error_codes = command.error_codes,
-                    .success_codes = command.success_codes,
-                } }
-            else
-                .empty;
-        }
-        fn printCode(name: []const u8, writer: *Writer) Writer.Error!void {
-            const n: ConstantName = .parse(name);
-            try writer.print(
-                \\{[name]f} = @intFromEnum(Result.{[name]f}),
-            , .{ .name = n });
-        }
-        pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
-            switch (self) {
-                .empty => {},
-                .codes => |codes| {
-                    try writer.print(
-                        \\pub const {f}Result = enum(@typeInfo(Result).@"enum".tag_type){{
-                    , .{codes.command_name});
-                    var it: CommaIterator = .{ .text = codes.success_codes };
-                    while (it.next()) |c| {
-                        try printCode(c, writer);
-                    }
-
-                    it = .{ .text = codes.error_codes };
-                    while (it.next()) |c| {
-                        if (shouldErrorBeSkipped(c)) continue;
-                        try printCode(c, writer);
-                    }
-                    try writer.writeAll("};");
-                }
-            }
-        }
-    };
     const ExtensionName = struct {
         name: []const u8,
         pub fn parse(name: Registry.ExtensionName) @This() {
@@ -2762,6 +2921,74 @@ const render = struct {
         try writer.writeAll("};");
     }
     pub fn printCommandGroup(registry: Registry, writer: *Writer) Writer.Error!void {
+        const CommandReturnType = union(enum) {
+            codes: CommandTypeName,
+            base: CBaseType,
+
+            pub fn parse(command_name: CommandTypeName, command: Registry.Command) @This() {
+                return if (command.success_codes.len != 0)
+                    .{ .codes = command_name }
+                else
+                    .{ .base = .{ .v = command.ret } };
+            }
+
+            pub fn format(self: @This(), w: *Writer) Writer.Error!void {
+                switch (self) {
+                    .base => |b| try w.print("{f}", .{b}),
+                    .codes => |codes| try w.print("{f}Result", .{codes}),
+                }
+            }
+        };
+
+        const CommandReturnTypeDeclaration = union(enum) {
+            empty,
+            codes: Codes,
+
+            const Codes = struct {
+                error_codes: []const u8,
+                success_codes: []const u8,
+                command_name: CommandTypeName,
+            };
+
+            pub fn parse(command_name: CommandTypeName, command: Registry.Command) @This() {
+                return if (command.success_codes.len != 0)
+                    .{ .codes = .{
+                        .command_name = command_name,
+                        .error_codes = command.error_codes,
+                        .success_codes = command.success_codes,
+                    } }
+                else
+                    .empty;
+            }
+            fn printCode(name: []const u8, w: *Writer) Writer.Error!void {
+                const n: ConstantName = .parse(name);
+                try w.print(
+                    \\{[name]f} = @intFromEnum(Result.{[name]f}),
+                , .{ .name = n });
+            }
+            pub fn format(self: @This(), w: *Writer) Writer.Error!void {
+                switch (self) {
+                    .empty => {},
+                    .codes => |codes| {
+                        try w.print(
+                            \\pub const {f}Result = enum(@typeInfo(Result).@"enum".tag_type){{
+                        , .{codes.command_name});
+                        var it: CommaIterator = .{ .text = codes.success_codes };
+                        while (it.next()) |c| {
+                            try printCode(c, w);
+                        }
+
+                        it = .{ .text = codes.error_codes };
+                        while (it.next()) |c| {
+                            if (shouldErrorBeSkipped(c)) continue;
+                            try printCode(c, w);
+                        }
+                        try w.writeAll("};");
+                    }
+                }
+            }
+        };
+
         const it = registry.commands.iterator();
         const Iterator = @TypeOf(it);
         const CommandList = struct {
