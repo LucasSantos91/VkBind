@@ -2067,6 +2067,10 @@ const render = struct {
         const t = registry.types.get(name) orelse return false;
         return isDispatchableHandle(t);
     }
+    fn isExemptFromCreateCommand(name: []const u8) bool {
+        //OVERRIDE: These functions will not be treated as create commands, even though they meet the other criter
+        return enumFromName(enum { CommandFunctionName }, name) != null;
+    }
 
     fn printVulkanContextCommand(command_name: []const u8, command: Registry.Command, loader: []const u8, registry: Registry, writer: *Writer) Writer.Error!void {
         const has_success_codes = command.success_codes.len != 0;
@@ -2084,11 +2088,11 @@ const render = struct {
             if (command.params.len == 0) break :blk false;
             const last = command.params[command.params.len - 1];
             if (last.c_var.type.base.ptrs.len == 0) break :blk false;
+            if (last.c_var.type.base.ptrs.buffer[0] != .mutable) break :blk false;
             if (last.extra[0].optional) break :blk false;
             if (last.extra[0].len != .@"1") break :blk false;
             const n = name.name.name;
-            break :blk std.mem.startsWith(u8, n, "Create") or
-                std.mem.startsWith(u8, n, "Enumerate");
+            break :blk !isExemptFromCreateCommand(n);
         };
 
         const ResultDecl = struct {
