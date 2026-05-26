@@ -1705,7 +1705,7 @@ const render = struct {
             const comment: Comment = .parse(self.v.v.c_var.comment);
             try writer.print(
                 \\{[comment]f}
-                \\{[name]s}: {[type]f}
+                \\@"{[name]s}": {[type]f}
             , .{
                 .name = self.v.v.c_var.name,
                 .comment = comment,
@@ -2069,7 +2069,7 @@ const render = struct {
     }
     fn isExemptFromCreateCommand(name: []const u8) bool {
         //OVERRIDE: These functions will not be treated as create commands, even though they meet the other criter
-        return enumFromName(enum { CommandFunctionName }, name) != null;
+        return enumFromName(enum { QueueSignalReleaseImageOHOS }, name) != null;
     }
 
     fn printVulkanContextCommand(command_name: []const u8, command: Registry.Command, loader: []const u8, registry: Registry, writer: *Writer) Writer.Error!void {
@@ -2085,6 +2085,8 @@ const render = struct {
         const name: CommandFunctionName = .parseFromText(command_name);
         const is_create_command = blk: {
             if (has_success_codes and !only_success_code) break :blk false;
+            if (!((std.mem.eql(u8, command.ret.name, "void") or
+                std.mem.eql(u8, command.ret.name, "VkResult")))) break :blk false;
             if (command.params.len == 0) break :blk false;
             const last = command.params[command.params.len - 1];
             if (last.c_var.type.base.ptrs.len == 0) break :blk false;
@@ -2206,7 +2208,9 @@ const render = struct {
                         try w.writeAll("getAllocator(),");
                     } else {
                         const zig_type: ZigType = .parse(p);
-                        try w.print("justFreakingCastTheThing({s},{f}),", .{ p.c_var.name, zig_type });
+                        try w.print(
+                            \\justFreakingCastTheThing(@"{s}",{f}),
+                        , .{ p.c_var.name, zig_type });
                     }
                 }
             }
@@ -3148,7 +3152,9 @@ const render = struct {
 
             pub fn format(self: @This(), w: *Writer) Writer.Error!void {
                 for (self.params.params) |v| {
-                    try w.print("{s},", .{v.c_var.name});
+                    try w.print(
+                        \\@"{s}",
+                    , .{v.c_var.name});
                 }
             }
         };
