@@ -2123,15 +2123,16 @@ const render = struct {
         };
         const name: CommandFunctionName = .parseFromText(command_name);
         const is_create_command = blk: {
+            if (has_success_codes and !only_success_code) break :blk false;
             if (command.params.len == 0) break :blk false;
             const last = command.params[command.params.len - 1];
             if (last.c_var.type.base.ptrs.len == 0) break :blk false;
             if (last.extra[0].optional) break :blk false;
+            if (!(last.extra[0].len.len == 0 or std.mem.eql(u8, last.extra[0].len, "1"))) break :blk false;
             const n = name.name.name;
-            break :blk std.mem.startsWith(u8, n, "create") or
-                std.mem.startsWith(u8, n, "enumerate");
+            break :blk std.mem.startsWith(u8, n, "Create") or
+                std.mem.startsWith(u8, n, "Enumerate");
         };
-        _ = is_create_command;
 
         const ResultDecl = struct {
             enabled: bool,
@@ -2251,7 +2252,7 @@ const render = struct {
                         try w.print(".{[name]f} => .{[name]f},", .{ .name = n });
                     }
                 } else {
-                    try w.writeAll(".SUCCESS => {},");
+                    try w.writeAll(".SUCCESS => temp,");
                 }
                 var it: CommaIterator = .{ .text = self.error_codes };
                 while (it.next()) |code| {
@@ -2262,7 +2263,18 @@ const render = struct {
                 try w.writeByte('}');
             }
         };
+        const MaybeTempRef = struct {
+            name: ?[]const u8,
 
+            pub fn format(self: @This(), w: *Writer) Writer.Error!void {
+                const n = self.name orelse return;
+                try w.print("const {s} = &temp;", .{n});
+            }
+        };
+        var last_param: Registry.ZigVar = undefined;
+        if (is_create_command) {
+            last_param = command.params[command.params.len - 1];
+        }
         const result_decl: ResultDecl = .{
             .enabled = has_success_codes and !only_success_code,
             .success_codes = command.success_codes,
@@ -2275,12 +2287,20 @@ const render = struct {
         };
         const provider: Provider = .{ .p = command.providers };
         const params: VCParams = .{
-            .params = command.params,
+            .params = if (is_create_command)
+                command.params[0 .. command.params.len - 1]
+            else
+                command.params,
+
             .registry = registry,
         };
         const error_ret: ErrorRet = .{ .name = if (has_error_codes) name.name else null };
         const ret: Ret = if (has_success_codes) blk: {
-            break :blk if (only_success_code)
+            break :blk if (is_create_command) {
+                var v = last_param.c_var.type.base;
+                v.ptrs.len -= 1;
+                break :blk .{ .base = .{ .v = v } };
+            } else if (only_success_code)
                 Ret.void_ret
             else
                 .{ .name = name.name };
@@ -2291,6 +2311,9 @@ const render = struct {
             .success_codes = if (only_success_code) null else command.success_codes,
             .error_codes = command.error_codes,
         };
+        const maybe_temp_ref: MaybeTempRef = .{
+            .name = if (is_create_command) last_param.c_var.name else null,
+        };
         try writer.print(
             \\{[result_decl]f}
             \\{[error_decl]f}
@@ -2298,6 +2321,10 @@ const render = struct {
             \\pub fn {[name]f}(
             \\{[params]f}
             \\) {[error_ret]f}{[ret]f} {{
+            \\assertDependencies(.{[name]f});
+            \\var temp: {[ret]f} = undefined;
+            \\maybeUnused(&temp);
+            \\{[maybe_temp_ref]f}
             \\return {[maybe_switch]s}{[loader]s}.{[name]f}(
             \\  {[param_names]f}
             \\){[switch_prongs]f};
@@ -2310,6 +2337,7 @@ const render = struct {
             .params = params,
             .error_ret = error_ret,
             .ret = ret,
+            .maybe_temp_ref = maybe_temp_ref,
             .maybe_switch = if (has_success_codes) "switch(" else "",
             .loader = loader,
             .param_names = param_names,
