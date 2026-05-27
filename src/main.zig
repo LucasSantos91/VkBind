@@ -1372,7 +1372,8 @@ const render = struct {
         name: []const u8,
 
         pub fn parse(name: []const u8) @This() {
-            return .{ .name = stripPrefix(name, "Vk") };
+            return .{ .name = tryStripPrefix(name, "Vk") orelse
+                stripPrefix(name, "StdVideo") };
         }
         pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
             try writer.writeAll(self.name);
