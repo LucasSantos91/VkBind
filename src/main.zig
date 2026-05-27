@@ -657,18 +657,18 @@ pub const Registry = struct {
     const VkTypes = std.StringHashMapUnmanaged(TypeCommon);
     const Commands = std.StringHashMapUnmanaged(Command);
     const Constant = struct {
-        name: []const u8,
         value: []const u8,
         type: []const u8,
         comment: ?[]const u8,
         providers: Providers = .{},
     };
+    const Constants = std.StringHashMapUnmanaged(Constant);
 
     api: Api,
     allocator: Allocator,
     authors: []const []const u8 = &.{},
     types: VkTypes = .{},
-    constants: []const Constant = &.{},
+    constants: Constants = .{},
     commands: Commands = .{},
     versions: []const VkVersion = &.{},
     extensions: []const Extension = &.{},
@@ -921,23 +921,21 @@ pub const Registry = struct {
         }
     }
     fn parseConstants(self: *@This(), xml: XmlNode) void {
-        var constants: std.ArrayList(Constant) = .{
-            .items = @constCast(self.constants),
-            .capacity = self.constants.len,
-        };
-        constants.ensureTotalCapacity(self.allocator, xml.children.len) catch @panic("oom");
         var it = xml.childrenIterator();
         while (it.nextNode("enum")) |node| {
-            if (!self.matchApi(node)) continue;
-            const new = constants.addOneAssumeCapacity();
-            new.* = .{
-                .name = node.attr.get("name") orelse @panic("Nameless constant"),
+            const type_text = node.attr.get("type") orelse {
+                // Must be an extension name or version, just ignore
+                continue;
+            };
+            const name = node.attr.get("name") orelse @panic("Nameless constant");
+            const gp = self.constants.getOrPut(self.allocator, name) catch @panic("oom");
+            if (gp.found_existing) panic("Duplicate constant: {s}", .{name});
+            gp.value_ptr.* = .{
                 .value = node.attr.get("value") orelse @panic("Valueless constant"),
-                .type = node.attr.get("type") orelse @panic("Typeless constant"),
+                .type = type_text,
                 .comment = getComment(node),
             };
         }
-        self.constants = constants.toOwnedSlice(self.allocator) catch @panic("oom");
     }
     fn parseEnumBits(self: *@This(), xml: XmlNode) void {
         const name = xml.attr.get("name") orelse @panic("Missing enum name");
@@ -1079,15 +1077,21 @@ pub const Registry = struct {
             };
             self.versions = slice_tools.allocated.concat(VkVersion, @constCast(self.versions), &.{new}, self.allocator) catch @panic("oom");
         }
-        self.parseRequires(xml, .parseVersion(version), null);
+        self.parseVkRequires(xml, .parseVersion(version), null);
     }
-    fn parseRequires(self: *@This(), xml: XmlNode, provider: Providers.Provider, ext_number: ?[]const u8) void {
+    fn parseVkRequires(self: *@This(), xml: XmlNode, provider: Providers.Provider, ext_number: ?[]const u8) void {
         var require_it = xml.childrenIterator();
         while (require_it.nextNode("require")) |require_node| {
-            self.parseRequire(require_node, provider, ext_number);
+            self.parseVkRequire(require_node, provider, ext_number);
         }
     }
-    fn parseRequire(self: *@This(), xml: XmlNode, provider: Providers.Provider, ext_number: ?[]const u8) void {
+    fn parseVideoRequires(self: *@This(), xml: XmlNode) void {
+        var require_it = xml.childrenIterator();
+        while (require_it.nextNode("require")) |require_node| {
+            self.parseConstants(require_node);
+        }
+    }
+    fn parseVkRequire(self: *@This(), xml: XmlNode, provider: Providers.Provider, ext_number: ?[]const u8) void {
         for (xml.children) |child| {
             if (child == .text) continue;
             const node = child.node;
@@ -1113,6 +1117,7 @@ pub const Registry = struct {
             }
         }
     }
+
     fn parseExtensions(self: *@This(), xml: XmlNode) void {
         var extension_it = xml.childrenIterator();
         var extensions: std.ArrayList(Extension) = .{
@@ -1120,33 +1125,36 @@ pub const Registry = struct {
             .capacity = self.extensions.len,
         };
         while (extension_it.nextNode("extension")) |node| {
-            if (node.attr.get("supported")) |supported| {
-                if (std.mem.eql(u8, supported, "disabled")) continue;
+            if (node.attr.get("type")) |type_text| {
+                if (node.attr.get("supported")) |supported| {
+                    if (std.mem.eql(u8, supported, "disabled")) continue;
+                }
+                const number = node.attr.get("number") orelse @panic("Missing extension number");
+                const ext_name = node.attr.get("name") orelse @panic("Missing extension name");
+                const new = extensions.addOne(self.allocator) catch @panic("oom");
+                new.* = .{
+                    .name = .parse(ext_name),
+                    .kind = .parse(type_text),
+                    .promoted = node.attr.get("promotedto"),
+                    .depends = node.attr.get("depends"),
+                };
+                self.parseVkRequires(node, .parseExtension(new.name), number);
+            } else {
+                self.parseVideoRequires(node);
             }
-            const number = node.attr.get("number") orelse @panic("Missing extension number");
-            const ext_name = node.attr.get("name") orelse @panic("Missing extension name");
-            const new = extensions.addOne(self.allocator) catch @panic("oom");
-            new.* = .{
-                .name = .parse(ext_name),
-                .kind = .parse(node.attr.get("type") orelse panic("Missing type for extension: {s}", .{ext_name})),
-                .promoted = node.attr.get("promotedto"),
-                .depends = node.attr.get("depends"),
-            };
-            self.parseRequires(node, .parseExtension(new.name), number);
         }
+
         self.extensions = extensions.toOwnedSlice(self.allocator) catch @panic("oom");
     }
 
     fn parseEnumExtension(self: *@This(), xml: XmlNode, extension_number: ?[]const u8, provider: Providers.Provider) void {
         const name = xml.attr.get("name") orelse @panic("Missing enum extension name");
         const extends = xml.attr.get("extends") orelse {
-            // Must be a constant
-            for (self.constants) |*c| {
-                if (std.mem.eql(u8, c.name, name)) {
-                    @constCast(c).providers.add(provider, self.allocator);
-                    return;
-                }
-            }
+            const constant = self.constants.getPtr(name) orelse {
+                // Must be a extension version or name constant, just ignore
+                return;
+            };
+            constant.providers.add(provider, self.allocator);
             return;
         };
         const enum_type = self.types.getPtr(extends) orelse panic("Type not found: {s}", .{extends});
@@ -1613,7 +1621,8 @@ const render = struct {
         return name[i..];
     }
     fn stripEnumName(entry_name: []const u8, enum_name: TypeName) []const u8 {
-        var stripped_entry_name = stripPrefix(entry_name, "VK_");
+        const stripped_entry_name_: ConstantName = .parse(entry_name);
+        var stripped_entry_name = stripped_entry_name_.name;
         if (entry_name.len <= enum_name.name.len) return stripped_entry_name;
         var local_enum_name = enum_name.name;
         outer: while (true) {
@@ -1760,7 +1769,7 @@ const render = struct {
                     } else {
                         if (in_bitfield) {
                             try w.print(
-                                \\_reserved: LockedInt(u{[bits]},{[bits]}) = .@"{[bits]}",
+                                \\_reserved: LockedInt(u{[bits]},0) = .@"0",
                                 \\}},
                             , .{ .bits = remaining_bitfield_bits });
                             remaining_bitfield_bits = undefined;
@@ -1873,7 +1882,12 @@ const render = struct {
             if (self.v.c_var.type.amount == .array) {
                 try w.writeByte('[');
                 switch (self.v.c_var.type.amount.array) {
-                    .literal => |l| try w.writeAll(l),
+                    .literal => |l| {
+                        // video.xml doesn't put the proper tags in array sizes, so
+                        // it ends up in this branch
+                        try w.writeAll(tryStripPrefix(l, "VK_") orelse
+                            tryStripPrefix(l, "STD_VIDEO_") orelse l);
+                    },
                     .constant => |c| try writeConstant(c, w),
                 }
                 try w.writeByte(']');
@@ -1891,8 +1905,8 @@ const render = struct {
         }
     };
     fn writeConstant(name: []const u8, writer: *Writer) Writer.Error!void {
-        if (name.len <= 3) panic("Malformed constant name: {s}", .{name});
-        try writer.writeAll(name[3..]);
+        const constant: ConstantName = .parse(name);
+        try writer.print("{f}", .{constant});
     }
     fn printUnion(name: []const u8, e_c: Registry.TypeCommon, writer: *Writer) Writer.Error!void {
         const Members = struct {
@@ -2111,24 +2125,30 @@ const render = struct {
             .c_name = c_name,
         });
     }
-    fn printConstants(constants: []const Registry.Constant, writer: *Writer) Writer.Error!void {
-        for (constants) |c| {
+    fn printConstants(constants: Registry.Constants, writer: *Writer) Writer.Error!void {
+        var it = constants.iterator();
+        while (it.next()) |entry| {
+            const c_name = entry.key_ptr.*;
+            const c = entry.value_ptr.*;
             // OVERRIDE: true and false have been subsumed into Bool32
-            if (enumFromName(enum { VK_TRUE, VK_FALSE }, c.name)) |_| continue;
+            if (enumFromName(enum { VK_TRUE, VK_FALSE }, c_name)) |_| continue;
 
             const comment: Comment = .parse(c.comment);
             const provider: Provider = .{ .p = c.providers };
-            const name: ConstantName = .parse(c.name);
+            const name: ConstantName = .parse(c_name);
             const zig_type: Primitives = enumFromName(Primitives, c.type) orelse panic("Unknown primitive type: {s}", .{c.type});
             var value = c.value;
-            const nums_and_point = "0123456789.";
-            const negate = if (std.mem.findScalar(u8, c.value, '~')) |i| blk: {
+            const num_characters = "0123456789.";
+
+            const negate = if (std.mem.startsWith(u8, c.value, "0x"))
+                false
+            else if (std.mem.findScalar(u8, c.value, '~')) |i| blk: {
                 value = value[i + 1 ..];
-                const end = std.mem.findNone(u8, value, nums_and_point) orelse c.value.len;
+                const end = std.mem.findNone(u8, value, num_characters) orelse c.value.len;
                 value = value[0..end];
                 break :blk true;
             } else blk: {
-                const end = std.mem.findNone(u8, c.value, nums_and_point) orelse value.len;
+                const end = std.mem.findNone(u8, c.value, num_characters) orelse value.len;
                 value = value[0..end];
                 break :blk false;
             };
@@ -3029,7 +3049,7 @@ const render = struct {
         name: []const u8,
 
         pub fn parse(name: []const u8) @This() {
-            return .{ .name = stripPrefix(name, "VK_") };
+            return .{ .name = tryStripPrefix(name, "VK_") orelse stripPrefix(name, "STD_VIDEO_") };
         }
 
         pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
