@@ -1079,6 +1079,11 @@ pub const Registry = struct {
                     const type_name = node.attr.get("name") orelse continue;
                     const t = self.types.getPtr(type_name) orelse continue;
                     t.providers.add(provider, self.allocator);
+
+                    if (t.type == .alias) {
+                        const canon = self.types.getPtr(t.type.alias.canonical) orelse panic("Failed to find canonical type: {s}", .{t.type.alias.canonical});
+                        canon.providers.add(provider, self.allocator);
+                    }
                 },
             }
         }
