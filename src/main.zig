@@ -2169,7 +2169,22 @@ const render = struct {
             );
         }
     }
+    fn overrideTypes(registry: *const Registry) void {
+        // OVERRIDE
+        const ptr = registry.types.getPtr("VkPresentInfoKHR") orelse return;
+        switch (ptr.type) {
+            .@"struct" => |*s| {
+                if (s.members.len == 0) @panic("PresentInfoKHR has no members");
+                // This shouldn't go wrong
+                const last = @constCast(&s.members[s.members.len - 1]);
+                last.c_var.type.base.name = "Command.QueuePresentKHRResult";
+            },
+            else => @panic("Expected PresentInfoKHR to be a struct"),
+        }
+    }
     pub fn render(registry: *const Registry, writer: *Writer) Writer.Error!void {
+        overrideTypes(registry);
+
         try writer.print("{s}\n", .{@embedFile("preamble.zig")});
         try printConstants(registry.constants, writer);
         var it = registry.types.iterator();
