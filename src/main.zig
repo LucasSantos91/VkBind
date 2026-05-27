@@ -1358,7 +1358,9 @@ const render = struct {
 
                 pub fn format(self: @This(), w: *Writer) Writer.Error!void {
                     if (self.diff > 1) {
-                        try w.print("_reserved_{}:u{} = 0,", .{ self.bitpos, self.diff - 1 });
+                        try w.print(
+                            \\_reserved_{}: LockedInt(u{}, 0) = .@"0",
+                        , .{ self.bitpos, self.diff - 1 });
                     }
                 }
             };
@@ -1631,7 +1633,7 @@ const render = struct {
                 const e = self.e;
                 var members = e.members;
                 if (e.s_type) |s_type| {
-                    try w.print("sType: StructureType=.{s},", .{stripPrefix(s_type, "VK_STRUCTURE_TYPE_")});
+                    try w.print("sType: LockedEnum(StructureType, .{[name]s}) =.{[name]s},", .{ .name = stripPrefix(s_type, "VK_STRUCTURE_TYPE_") });
                     members = members[1..];
                 }
 

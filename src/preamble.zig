@@ -222,3 +222,10 @@ inline fn justFreakingCastTheThing(variable: anytype, comptime Target: type) Tar
     const casted: *const Target = @ptrCast(@alignCast(ptr));
     return casted.*;
 }
+fn LockedEnum(comptime T: type, comptime value: T) type {
+    return @Enum(std.meta.Tag(T), .exhaustive, &.{@tagName(value)}, &.{@intFromEnum(value)});
+}
+
+fn LockedInt(comptime T: type, comptime value: T) type {
+    return @Enum(T, .exhaustive, &.{std.fmt.comptimePrint("{}", .{value})}, &.{value});
+}
