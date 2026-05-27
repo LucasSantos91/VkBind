@@ -153,7 +153,7 @@ const XmlNode = struct {
             try discardWhitespace(reader);
             const b = try reader.peekByte();
             switch (b) {
-                '/' => {
+                '/', '?' => {
                     reader.toss(1);
                     try reader.discardAll(1);
                     return .{ result, true };
@@ -683,12 +683,14 @@ pub const Registry = struct {
         self.authors = list.toOwnedSlice(self.allocator) catch @panic("oom");
     }
     fn parseForeign(self: *@This(), xml: XmlNode) void {
-        const name = xml.attr.get("name") orelse @panic("Nameless foreign type");
-        const gp = self.types.getOrPut(self.allocator, name) catch @panic("oom");
-        if (gp.found_existing) panic("Duplicate foreign type: {s}", .{name});
-        gp.value_ptr.* = .{
-            .type = .{ .foreign = .{} },
-        };
+        _ = self;
+        _ = xml;
+        //const name = xml.attr.get("name") orelse @panic("Nameless foreign type");
+        //const gp = self.types.getOrPut(self.allocator, name) catch @panic("oom");
+        //if (gp.found_existing) return;
+        //gp.value_ptr.* = .{
+        //    .type = .{ .foreign = .{} },
+        //};
     }
     pub fn resolveAlias(self: *const @This(), name: []const u8) TypeCommon {
         var t = self.types.get(name) orelse panic("Failed to find name {s}", .{name});
@@ -867,18 +869,22 @@ pub const Registry = struct {
         }
     }
 
-    pub fn parse(api: Api, xml: XmlNode, allocator: Allocator) @This() {
+    pub fn parse(api: Api, xml: []const XmlNode.NodeOrText, allocator: Allocator) @This() {
         var self: @This() = .{ .api = api, .allocator = allocator };
-        for (xml.children) |child| {
-            const node = if (child == .node) child.node else continue;
-            const tag = enumFromName(enum { types, enums, commands, feature, extensions, tags }, node.tag) orelse continue;
-            switch (tag) {
-                .types => self.parseTypes(node),
-                .enums => self.parseEnums(node),
-                .commands => self.parseCommands(node),
-                .feature => self.parseFeature(node),
-                .extensions => self.parseExtensions(node),
-                .tags => self.parseAuthorTags(node),
+        for (xml) |registry_node| {
+            if (registry_node == .text) continue;
+            if (!std.mem.eql(u8, registry_node.node.tag, "registry")) continue;
+            for (registry_node.node.children) |child| {
+                const node = if (child == .node) child.node else continue;
+                const tag = enumFromName(enum { types, enums, commands, feature, extensions, tags }, node.tag) orelse continue;
+                switch (tag) {
+                    .types => self.parseTypes(node),
+                    .enums => self.parseEnums(node),
+                    .commands => self.parseCommands(node),
+                    .feature => self.parseFeature(node),
+                    .extensions => self.parseExtensions(node),
+                    .tags => self.parseAuthorTags(node),
+                }
             }
         }
 
@@ -1946,12 +1952,16 @@ const render = struct {
         const Kind = enum {
             vk,
             pfn,
+            std_video,
             primitive,
             none,
         };
 
         pub fn parse(name: []const u8) @This() {
-            return if (tryStripPrefix(name, "PFN_vk")) |n| .{
+            return if (tryStripPrefix(name, "StdVideo")) |n| .{
+                .name = n,
+                .kind = .vk,
+            } else if (tryStripPrefix(name, "PFN_vk")) |n| .{
                 .name = n,
                 .kind = .pfn,
             } else if (tryStripPrefix(name, "Vk")) |n| .{
@@ -2163,7 +2173,7 @@ const render = struct {
     fn isGlobalCommand(command: Registry.Command, registry: *const Registry) bool {
         if (command.params.len == 0) return true;
         const first = command.params[0];
-        const first_type = registry.types.get(first.c_var.type.base.name) orelse @panic("Missing type for first parameter");
+        const first_type = registry.types.get(first.c_var.type.base.name) orelse return true;
         if (first_type.type != .handle) return true;
         if (!first_type.type.handle.dispatchable) return true;
         return false;
@@ -3449,10 +3459,7 @@ pub fn main(init: std.process.Init) !void {
     var stdin_reader = stdin.reader(init.io, &stdin_buffer);
     const reader = &stdin_reader.interface;
 
-    _ = try reader.discardDelimiterInclusive('>');
-    _ = try reader.discardDelimiterInclusive('<');
-    const xml: XmlNode = try .parse(reader, allocator);
-    defer xml.deinit(allocator);
+    const xml = try XmlNode.parseChildren(reader, allocator);
 
     var api: Registry.Api = .vulkan;
 
