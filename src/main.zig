@@ -193,6 +193,10 @@ const XmlNode = struct {
                             _ = try reader.discardDelimiterInclusive('>');
                             break;
                         },
+                        '!' => {
+                            reader.toss(1);
+                            _ = try reader.discardDelimiterInclusive('>');
+                        },
                         else => {
                             try n.append(allocator, .{ .node = try .parse(reader, allocator) });
                         },
