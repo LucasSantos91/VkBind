@@ -1407,7 +1407,17 @@ const render = struct {
 
             pub fn format(self: @This(), w: *Writer) Writer.Error!void {
                 const flag_bits = self.b;
-                var last_bitpos = if (flag_bits.bits.len != 0) flag_bits.bits[0].bitpos else undefined;
+                var last_bitpos: u8 = undefined;
+                if (flag_bits.bits.len != 0) {
+                    const first = flag_bits.bits[0];
+                    if (first.bitpos != 0) {
+                        try w.print(
+                            \\_reserved_leading: LockedInt(u{[bits]}, 0) = .@"0",
+                        , .{ .bits = first.bitpos });
+                    }
+
+                    last_bitpos = flag_bits.bits[0].bitpos;
+                }
                 for (flag_bits.bits) |b| {
                     const bit_comment: Comment = .parse(b.comment);
                     const bit_provider: Provider = .{ .p = if (b.extension_bit) b.providers else .{} };
@@ -1426,6 +1436,14 @@ const render = struct {
                         .reserved = reserved,
                     });
                     last_bitpos = b.bitpos;
+                }
+                if (flag_bits.bits.len != 0) {
+                    const remaining = flag_bits.bitwidth.bitSize() - flag_bits.bits[flag_bits.bits.len - 1].bitpos - 1;
+                    if (remaining != 0) {
+                        try w.print(
+                            \\_reserved_trailing: LockedInt(u{[bits]}, 0) = .@"0",
+                        , .{ .bits = remaining });
+                    }
                 }
                 for (flag_bits.aggregates) |agg| {
                     const bit_comment: Comment = .parse(agg.comment);
