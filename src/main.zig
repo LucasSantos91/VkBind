@@ -1570,6 +1570,18 @@ const render = struct {
         if (e_c.type.flag_bits.bits.len != 0) return;
         try printFlagBitsFromFlags(.parse(name), e_c, writer, .{ .name = "undefined" });
     }
+    fn extractAuthor(name: []const u8) []const u8 {
+        var i = name.len;
+        while (i != 0) {
+            i -= 1;
+            const n = name[i];
+            if (!std.ascii.isUpper(n)) {
+                i += 1;
+                break;
+            }
+        }
+        return name[i..];
+    }
     fn extractVersion(name: []const u8) []const u8 {
         var i = name.len;
         while (i != 0) {
@@ -1592,6 +1604,8 @@ const render = struct {
             const entry_segment = stripped_entry_name[0..under];
             for (entry_segment, local_enum_name[0..under]) |entry, name| {
                 if (std.ascii.toUpper(name) != entry) {
+                    const author = extractAuthor(local_enum_name);
+                    local_enum_name = local_enum_name[0 .. local_enum_name.len - author.len];
                     if (std.mem.eql(u8, entry_segment, extractVersion(local_enum_name))) {
                         stripped_entry_name = stripped_entry_name[under + 1 ..];
                     }
