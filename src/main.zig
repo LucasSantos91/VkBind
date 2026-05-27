@@ -350,6 +350,7 @@ pub const Registry = struct {
             value: []const u8,
             comment: ?[]const u8,
             providers: Providers,
+            extension_value: bool,
         };
         values: []const Value,
         aliases: []const @This().Alias,
@@ -366,6 +367,7 @@ pub const Registry = struct {
             name: []const u8,
             comment: ?[]const u8,
             providers: Providers,
+            extension_bit: bool,
         };
         const Aggregate = struct {
             name: []const u8,
@@ -943,6 +945,7 @@ pub const Registry = struct {
                     .value = (node.attr.get("value") orelse panic("Missing value for enum {s}", .{name})),
                     .comment = getComment(node),
                     .providers = .{},
+                    .extension_value = false,
                 };
             }
         }
@@ -994,6 +997,7 @@ pub const Registry = struct {
                     .bitpos = std.fmt.parseInt(FlagBits.Bitpos, bitpos, 10) catch panic("Failed to parse bitpos: {s}", .{bitpos}),
                     .comment = getComment(node),
                     .providers = .{},
+                    .extension_bit = false,
                 };
             }
         }
@@ -1154,6 +1158,7 @@ pub const Registry = struct {
                     .value = value,
                     .comment = comment,
                     .providers = provider.toProviders(self.allocator),
+                    .extension_value = true,
                 };
                 en.values = slice_tools.allocated.concat(Enum.Value, @constCast(en.values), &.{new}, self.allocator) catch @panic("oom");
             },
@@ -1194,6 +1199,7 @@ pub const Registry = struct {
                         .name = name,
                         .comment = comment,
                         .providers = provider.toProviders(self.allocator),
+                        .extension_bit = true,
                     };
 
                     b.bits = slice_tools.allocated.concat(FlagBits.Bit, @constCast(b.bits), &.{new_bit}, self.allocator) catch @panic("oom");
@@ -1297,7 +1303,7 @@ const render = struct {
         }
     };
     const Provider = struct {
-        p: Registry.Providers,
+        p: Registry.Providers = .{},
 
         pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
             const p = self.p;
@@ -1370,7 +1376,7 @@ const render = struct {
                 var last_bitpos = if (flag_bits.bits.len != 0) flag_bits.bits[0].bitpos else undefined;
                 for (flag_bits.bits) |b| {
                     const bit_comment: Comment = .parse(b.comment);
-                    const bit_provider: Provider = .{ .p = b.providers };
+                    const bit_provider: Provider = .{ .p = if (b.extension_bit) b.providers else .{} };
                     const bit_name: EnumName = .parse(b.name, self.flags_name);
                     const diff = b.bitpos - last_bitpos;
                     const reserved: Reserved = .{ .diff = diff, .bitpos = b.bitpos };
@@ -1471,7 +1477,7 @@ const render = struct {
                 for (self.bits.bits) |b| {
                     const name: EnumName = .parse(b.name, self.enum_name);
                     const c: Comment = .parse(b.comment);
-                    const p: Provider = .{ .p = b.providers };
+                    const p: Provider = .{ .p = if (b.extension_bit) b.providers else .{} };
                     try w.print(
                         \\
                         \\{[comment]f}
