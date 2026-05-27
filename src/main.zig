@@ -2515,11 +2515,11 @@ const render = struct {
             \\              .run_time => loader.initGlobalCommands(load_function),
             \\          }
             \\      }
-            \\      pub fn initInstanceCommands(load_function: anytype, instance: Instance) void{
-            \\          loader.initInstanceCommands(load_function, instance);
+            \\      pub fn initInstanceCommands(load_function: anytype, instance: InstanceWrapper) void{
+            \\          loader.initInstanceCommands(load_function, instance.handle);
             \\      }
-            \\      pub fn initDeviceCommands(load_function: anytype, device: Device) void{
-            \\          loader.initDeviceCommands(load_function, device);
+            \\      pub fn initDeviceCommands(load_function: anytype, device: DeviceWrapper) void{
+            \\          loader.initDeviceCommands(load_function, device.handle);
             \\      }
             \\      const provided_extensions: CommandDependencyRequirements = .{
             \\        .version = config.apiVersion,
