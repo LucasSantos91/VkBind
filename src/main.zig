@@ -356,7 +356,17 @@ pub const Registry = struct {
         aliases: []const @This().Alias,
     };
     const Flags = struct {
-        const Bitwidth = enum { @"32", @"64" };
+        const Bitwidth = enum {
+            @"32",
+            @"64",
+
+            pub fn bitSize(self: @This()) u8 {
+                return switch (self) {
+                    .@"32" => 32,
+                    .@"64" => 64,
+                };
+            }
+        };
         bitwidth: Bitwidth = .@"32",
         bit_flags: ?[]const u8 = null,
     };
@@ -407,7 +417,7 @@ pub const Registry = struct {
         pub const Amount = union(enum) {
             single,
             array: ArrayAmount,
-            bitfield: []const u8,
+            bitfield: u8,
         };
 
         base: CBaseType,
@@ -469,7 +479,8 @@ pub const Registry = struct {
                 text = text[i + 1 ..];
                 switch (c) {
                     ':' => {
-                        result.type.amount = .{ .bitfield = text };
+                        text = std.mem.trim(u8, text, " ");
+                        result.type.amount = .{ .bitfield = std.fmt.parseInt(u8, text, 10) catch panic("Failed to parse bitfield width: {s}", .{text}) };
                     },
                     '[' => {
                         if (std.mem.findScalar(u8, text, ']')) |j| {
@@ -1241,10 +1252,10 @@ const render = struct {
         uint8_t,
         int16_t,
         uint16_t,
-        uint32_t,
-        uint64_t,
         int32_t,
+        uint32_t,
         int64_t,
+        uint64_t,
         size_t,
         int,
 
@@ -1258,12 +1269,30 @@ const render = struct {
                 .uint8_t => "u8",
                 .int16_t => "i16",
                 .uint16_t => "u16",
-                .uint32_t => "u32",
-                .uint64_t => "u64",
                 .int32_t => "i32",
+                .uint32_t => "u32",
                 .int64_t => "i64",
+                .uint64_t => "u64",
                 .size_t => "usize",
                 .int => "c_int",
+            };
+        }
+        pub fn bitSize(self: @This()) usize {
+            return switch (self) {
+                .void => 0,
+                .char => 8,
+                .float => 32,
+                .double => 64,
+                .int8_t => 8,
+                .uint8_t => 8,
+                .int16_t => 16,
+                .uint16_t => 16,
+                .uint32_t => 32,
+                .uint64_t => 64,
+                .int32_t => 32,
+                .int64_t => 64,
+                .size_t => @bitSizeOf(usize),
+                .int => @bitSizeOf(c_int),
             };
         }
     };
@@ -1352,7 +1381,7 @@ const render = struct {
             try writer.print("@\"{s}\"", .{self.name});
         }
     };
-    fn printFlags(registry: Registry, name: []const u8, e_c: Registry.TypeCommon, writer: *Writer) Writer.Error!void {
+    fn printFlags(registry: *const Registry, name: []const u8, e_c: Registry.TypeCommon, writer: *Writer) Writer.Error!void {
         const mixins_funcs: []const []const u8 = &.{ "toInt", "fromInt", "merge", "intersection", "negation", "difference", "toBit", "fromBit", "set", "unset" };
 
         const comment: Comment = .parse(e_c.comment);
@@ -1624,7 +1653,7 @@ const render = struct {
         try writer.print(
             \\{[comment]f}
             \\{[provider]f}
-            \\pub const {[name]f}=enum(c_int){{
+            \\pub const {[name]f}=enum(i32){{
             \\{[values]f}
             \\{[aliases]f}
             \\}};
@@ -1636,9 +1665,10 @@ const render = struct {
             .aliases = aliases,
         });
     }
-    fn printStruct(name: []const u8, e_c: Registry.TypeCommon, writer: *Writer) Writer.Error!void {
+    fn printStruct(name: []const u8, e_c: Registry.TypeCommon, registry: *const Registry, writer: *Writer) Writer.Error!void {
         const Members = struct {
             e: Registry.Struct,
+            r: *const Registry,
 
             pub fn format(self: @This(), w: *Writer) Writer.Error!void {
                 const e = self.e;
@@ -1650,37 +1680,63 @@ const render = struct {
 
                 var in_bitfield = false;
                 var bit_field_index: usize = 0;
+                var remaining_bitfield_bits: usize = undefined;
                 for (members) |m| {
+                    const v: ZigVar = .parse(m);
                     if (m.c_var.type.amount == .bitfield) {
                         if (!in_bitfield) {
-                            try w.print("p{}:packed struct{{", .{bit_field_index});
+                            const type_name = m.c_var.type.base.name;
+                            if (enumFromName(Primitives, type_name)) |primitive| {
+                                remaining_bitfield_bits = primitive.bitSize();
+                            } else {
+                                const t = self.r.types.get(type_name) orelse panic("Unknown bit size of bitfield type: {s}", .{type_name});
+                                remaining_bitfield_bits = switch (t.type) {
+                                    .flag_bits => |f| f.bitwidth.bitSize(),
+                                    .flags => |f| f.bitwidth.bitSize(),
+                                    .@"enum" => 32,
+                                    else => panic("Unknown bit size of bitfield type: {s}", .{type_name}),
+                                };
+                            }
+                            try w.print("p{}:packed struct(u{}){{", .{ bit_field_index, remaining_bitfield_bits });
                             bit_field_index += 1;
                             in_bitfield = true;
                         }
+                        try w.print("{f}", .{v});
+                        remaining_bitfield_bits = std.math.sub(usize, remaining_bitfield_bits, m.c_var.type.amount.bitfield) catch @panic("Bits overflow packed member bitwidth");
+                        if (remaining_bitfield_bits == 0) {
+                            try w.writeAll(",}");
+                            in_bitfield = false;
+                        }
                     } else {
                         if (in_bitfield) {
-                            try w.writeAll("},");
+                            try w.print(
+                                \\_reserved: LockedInt(u{[bits]},{[bits]}) = .@"{[bits]}",
+                                \\}},
+                            , .{ .bits = remaining_bitfield_bits });
+                            remaining_bitfield_bits = undefined;
                             in_bitfield = false;
+                        }
+                        try w.print("{f}", .{v});
+                        if (v.v.v.extra[0].optional) {
+                            try w.print("= nullValue({f})", .{v.v});
                         }
                     }
 
-                    const v: ZigVar = .parse(m);
-                    try w.print("{f}", .{v});
-                    if (v.v.v.extra[0].optional) {
-                        try w.print("= nullValue({f})", .{v.v});
-                    }
                     try w.writeByte(',');
                 }
 
                 if (in_bitfield) {
-                    try w.writeAll("},");
+                    try w.print(
+                        \\_reserved: LockedInt(u{[bits]},{[bits]}) = .@"{[bits]}",
+                        \\}},
+                    , .{ .bits = remaining_bitfield_bits });
                 }
             }
         };
         const comment: Comment = .parse(e_c.comment);
         const provider: Provider = .{ .p = e_c.providers };
         const e = e_c.type.@"struct";
-        const members: Members = .{ .e = e };
+        const members: Members = .{ .e = e, .r = registry };
         const struct_name: TypeName = .parse(name);
         try writer.print(
             \\{[comment]f}
@@ -1739,7 +1795,7 @@ const render = struct {
 
         pub fn format(self: @This(), w: *Writer) Writer.Error!void {
             if (self.v.c_var.type.amount == .bitfield) {
-                try w.print("u{s}", .{self.v.c_var.type.amount.bitfield});
+                try w.print("u{}", .{self.v.c_var.type.amount.bitfield});
                 return;
             }
             const ptr_len = self.v.c_var.type.base.ptrs.len;
@@ -1901,7 +1957,7 @@ const render = struct {
         pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
             const c_type = self.v;
             if (c_type.amount == .bitfield) {
-                try writer.print("u{s}", .{c_type.amount.bitfield});
+                try writer.print("u{}", .{c_type.amount.bitfield});
                 return;
             }
             const base: CBaseType = .{ .v = c_type.base };
@@ -2039,7 +2095,7 @@ const render = struct {
             );
         }
     }
-    pub fn render(registry: Registry, writer: *Writer) Writer.Error!void {
+    pub fn render(registry: *const Registry, writer: *Writer) Writer.Error!void {
         try writer.print("{s}\n", .{@embedFile("preamble.zig")});
         try printConstants(registry.constants, writer);
         var it = registry.types.iterator();
@@ -2050,7 +2106,7 @@ const render = struct {
                 .flags => try printFlags(registry, name, v, writer),
                 .flag_bits => try printFlagBits(name, v, writer),
                 .@"enum" => try printEnum(name, v, writer),
-                .@"struct" => try printStruct(name, v, writer),
+                .@"struct" => try printStruct(name, v, registry, writer),
                 .@"union" => try printUnion(name, v, writer),
                 .handle => try printHandle(name, v, writer),
                 .basetype => try printBasetype(name, v, writer),
@@ -2064,7 +2120,7 @@ const render = struct {
         try printExtensions(registry, writer);
         try printVulkanContext(registry, writer);
     }
-    fn isGlobalCommand(command: Registry.Command, registry: Registry) bool {
+    fn isGlobalCommand(command: Registry.Command, registry: *const Registry) bool {
         if (command.params.len == 0) return true;
         const first = command.params[0];
         const first_type = registry.types.get(first.c_var.type.base.name) orelse @panic("Missing type for first parameter");
@@ -2076,7 +2132,7 @@ const render = struct {
         if (t.type != .handle) return false;
         return t.type.handle.dispatchable;
     }
-    fn isDispatchableHandleByTypeName(name: []const u8, registry: Registry) bool {
+    fn isDispatchableHandleByTypeName(name: []const u8, registry: *const Registry) bool {
         const t = registry.types.get(name) orelse return false;
         return isDispatchableHandle(t);
     }
@@ -2085,7 +2141,7 @@ const render = struct {
         return enumFromName(enum { QueueSignalReleaseImageOHOS }, name) != null;
     }
 
-    fn printVulkanContextCommand(command_name: []const u8, command: Registry.Command, loader: []const u8, registry: Registry, writer: *Writer) Writer.Error!void {
+    fn printVulkanContextCommand(command_name: []const u8, command: Registry.Command, loader: []const u8, registry: *const Registry, writer: *Writer) Writer.Error!void {
         const has_success_codes = command.success_codes.len != 0;
         const only_success_code = std.mem.eql(u8, command.success_codes, "VK_SUCCESS");
         const has_error_codes = blk: {
@@ -2160,7 +2216,7 @@ const render = struct {
 
         const VCParams = struct {
             params: []const Registry.ZigVar,
-            registry: Registry,
+            registry: *const Registry,
 
             fn isPAllocator(v: Registry.ZigVar) bool {
                 const b = v.c_var.type.base;
@@ -2198,7 +2254,7 @@ const render = struct {
             name: CommandTypeName,
 
             pub const void_ret: @This() = .{ .base = .{ .v = .{ .name = "void" } } };
-            pub fn parseZigVar(zig_var: Registry.ZigVar, r: Registry) @This() {
+            pub fn parseZigVar(zig_var: Registry.ZigVar, r: *const Registry) @This() {
                 return .{ .zig_type = .{
                     .v = .parse(zig_var),
                     .dispatchable = isDispatchableHandleByTypeName(zig_var.c_var.type.base.name, r),
@@ -2334,7 +2390,7 @@ const render = struct {
             .switch_prongs = switch_prongs,
         });
     }
-    fn printVulkanContext(registry: Registry, writer: *Writer) Writer.Error!void {
+    fn printVulkanContext(registry: *const Registry, writer: *Writer) Writer.Error!void {
         try writer.writeAll(
             \\pub const VulkanContextConfig = struct{
             \\  pub const Globals = enum{
@@ -2698,7 +2754,7 @@ const render = struct {
     //    try writer.writeAll("};}");
     //}
 
-    fn printExtensions(registry: Registry, writer: *Writer) Writer.Error!void {
+    fn printExtensions(registry: *const Registry, writer: *Writer) Writer.Error!void {
         const ExtensionList = struct {
             list: []const Registry.Extension,
 
@@ -2874,7 +2930,7 @@ const render = struct {
         return false;
     }
 
-    pub fn printCommands(registry: Registry, writer: *Writer) Writer.Error!void {
+    pub fn printCommands(registry: *const Registry, writer: *Writer) Writer.Error!void {
         try writer.writeAll(
             \\
             \\/// Any of these is sufficient to satisfy command requirements
@@ -2935,7 +2991,7 @@ const render = struct {
             try writer.writeAll(self.name);
         }
     };
-    fn printExternGlobalFunctions(registry: Registry, writer: *Writer) Writer.Error!void {
+    fn printExternGlobalFunctions(registry: *const Registry, writer: *Writer) Writer.Error!void {
         try writer.writeAll(
             \\
             \\/// Provides global commands as load-time loaded functions.
@@ -2965,7 +3021,7 @@ const render = struct {
         }
         try writer.writeAll("};");
     }
-    pub fn printCommandGroup(registry: Registry, writer: *Writer) Writer.Error!void {
+    pub fn printCommandGroup(registry: *const Registry, writer: *Writer) Writer.Error!void {
         const CommandReturnType = union(enum) {
             codes: CommandTypeName,
             base: CBaseType,
@@ -3380,7 +3436,7 @@ pub fn main(init: std.process.Init) !void {
     const source = blk: {
         var writer: Writer.Allocating = .init(allocator);
         const registry = Registry.parse(api, xml, allocator);
-        try render.render(registry, &writer.writer);
+        try render.render(&registry, &writer.writer);
         break :blk try writer.toOwnedSliceSentinel(0);
     };
 
