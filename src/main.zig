@@ -671,7 +671,10 @@ pub const Registry = struct {
 
     fn parseAuthorTags(self: *@This(), xml: XmlNode) void {
         if (self.authors.len != 0) @panic("Duplicate tags section");
-        var list: std.ArrayList([]const u8) = .empty;
+        var list: std.ArrayList([]const u8) = .{
+            .items = @constCast(self.authors),
+            .capacity = self.authors.len,
+        };
         for (xml.children) |child| {
             const node = if (child == .node) child.node else continue;
             const name = node.attr.get("name") orelse @panic("Nameless author");
@@ -866,8 +869,6 @@ pub const Registry = struct {
 
     pub fn parse(api: Api, xml: XmlNode, allocator: Allocator) @This() {
         var self: @This() = .{ .api = api, .allocator = allocator };
-        if (!std.mem.eql(u8, xml.tag, "registry")) @panic("Missing registry");
-
         for (xml.children) |child| {
             const node = if (child == .node) child.node else continue;
             const tag = enumFromName(enum { types, enums, commands, feature, extensions, tags }, node.tag) orelse continue;
@@ -910,7 +911,10 @@ pub const Registry = struct {
         }
     }
     fn parseConstants(self: *@This(), xml: XmlNode) void {
-        var constants: std.ArrayList(Constant) = .empty;
+        var constants: std.ArrayList(Constant) = .{
+            .items = @constCast(self.constants),
+            .capacity = self.constants.len,
+        };
         constants.ensureTotalCapacity(self.allocator, xml.children.len) catch @panic("oom");
         var it = xml.childrenIterator();
         while (it.nextNode("enum")) |node| {
@@ -1101,7 +1105,10 @@ pub const Registry = struct {
     }
     fn parseExtensions(self: *@This(), xml: XmlNode) void {
         var extension_it = xml.childrenIterator();
-        var extensions: std.ArrayList(Extension) = .empty;
+        var extensions: std.ArrayList(Extension) = .{
+            .items = @constCast(self.extensions),
+            .capacity = self.extensions.len,
+        };
         while (extension_it.nextNode("extension")) |node| {
             if (node.attr.get("supported")) |supported| {
                 if (std.mem.eql(u8, supported, "disabled")) continue;
