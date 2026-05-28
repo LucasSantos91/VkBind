@@ -10,6 +10,19 @@ else
 pub const Bool32 = enum(u32) {
     false,
     true,
+
+    pub fn fromBool(b: bool) @This() {
+        return switch (b) {
+            false => .false,
+            true => .true,
+        };
+    }
+    pub fn toBool(self: @This()) bool {
+        return switch (self) {
+            .false => false,
+            .true => true,
+        };
+    }
 };
 pub const ApiVersion = packed struct(u32) {
     patch: u11 = 0,
@@ -158,69 +171,11 @@ fn nullValue(comptime T: type) T {
     };
 }
 
-fn getFunctionVkName(func: anytype) []const u8 {
-    const t = @tagName(func);
-    return "vk" ++ std.ascii.toUpper(t[0]) ++ t[1..];
-}
-
-fn MakePtrGroup(comptime funcs: []const Command) type {
-    var types: [funcs.len]type = undefined;
-    var names: [funcs.len][]const u8 = undefined;
-    const attr: [funcs.len]std.builtin.Type.StructField.Attributes = @splat(.{});
-    for (funcs, &types, &names) |f, *t, *n| {
-        t.* = f.getPtrType();
-        n.* = @tagName(f);
-    }
-    return @Struct(.@"extern", null, &names, &types, attr);
-}
-
-const FilteredCommands = struct {
-    global: []const Command,
-    instance: []const Command,
-    device: []const Command,
-};
-fn filterCommands(comptime funcs: []const Command) FilteredCommands {
-    var result: FilteredCommands = .{
-        .global = &.{},
-        .instance = &.{},
-        .device = &.{},
-    };
-    for (funcs) |f| switch (f) {
-        .global => {
-            result.global = result.global ++ &.{f};
-        },
-        .instance => {
-            result.instance = result.instance ++ &.{f};
-        },
-        .device => {
-            result.device = result.device ++ &.{f};
-        },
-    };
-    return result;
-}
-fn getFunctionVkNames(comptime Functions: type, comptime funcs: []const Functions) []const []const u8 {
-    comptime {
-        var result: [funcs.len][]const u8 = undefined;
-        for (funcs, &result) |f, *r| {
-            r.* = getFunctionVkName(f);
-        }
-        const final = result;
-        return &final;
-    }
-}
 fn maybeUnused(_: anytype) void {}
 pub fn isDispatchableHandle(comptime T: type) bool {
     const info = @typeInfo(T);
     if (info != .@"enum") return false;
     return info.@"enum".tag_type == usize;
-}
-
-inline fn justFreakingCastTheThing(variable: anytype, comptime Target: type) Target {
-    const Variable = @TypeOf(variable);
-    comptime std.debug.assert(@sizeOf(Variable) == @sizeOf(Target) and @alignOf(Variable) == @alignOf(Target));
-    const ptr = &variable;
-    const casted: *const Target = @ptrCast(@alignCast(ptr));
-    return casted.*;
 }
 fn LockedEnum(comptime T: type, comptime value: T) type {
     return @Enum(std.meta.Tag(T), .exhaustive, &.{@tagName(value)}, &.{@intFromEnum(value)});
