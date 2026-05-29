@@ -2,9 +2,13 @@
     .name = .VkBindTest,
     .version = "0.0.1",
     .minimum_zig_version = "0.17.0-dev.389+f5a1968f6",
-    .paths = .{""},
-    .fingerprint = 0x8c736521fb1e96aa,
+    .paths = .{"src"},
+    .fingerprint = 0xfb65fc2fa0e660ae,
     .dependencies = .{
         .VkBind = .{ .path = ".." },
+        .VkDocs = .{
+            .url = "https://github.com/KhronosGroup/Vulkan-Docs/archive/e2843a23d3c5a2c5e93e27d3b0fcd2c1087b0b64.zip",
+            .hash = "N-V-__8AAAZquQEXic7B2h2BKcC6HF_LAJxiSolGIEvmP2JT",
+        },
     },
 }

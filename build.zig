@@ -3,8 +3,8 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const registry = b.option([]const u8, "registry", "Path to vk.xml");
-    const video = b.option([]const u8, "video", "Path to video.xml");
+    const registry = b.option(std.Build.LazyPath, "registry", "Path to vk.xml");
+    const video = b.option(std.Build.LazyPath, "video", "Path to video.xml");
     const slice_tools_dep = b.dependency("slice_tools", .{});
 
     const exe_mod = b.createModule(.{
@@ -26,9 +26,11 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run.step);
 
     if (registry) |reg| {
-        run.addArgs(&.{ "-registry", reg });
+        run.addArg("-registry");
+        run.addFileArg(reg);
         if (video) |vid| {
-            run.addArgs(&.{ "-registry", vid });
+            run.addArg("-registry");
+            run.addFileArg(vid);
         }
         const output_file = run.captureStdOut(.{});
         const module = b.addModule("VkBind", .{
