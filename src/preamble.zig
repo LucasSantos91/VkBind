@@ -89,10 +89,7 @@ fn LockedInt(comptime T: type, comptime value: T) type {
 inline fn justFreakingCastTheThing(value: anytype, comptime Target: type) Target {
     const V = @TypeOf(value);
     comptime std.debug.assert(@sizeOf(V) == @sizeOf(Target) and @alignOf(V) == @alignOf(Target));
-    const U = extern union {
-        value: @TypeOf(value),
-        Target: Target,
-    };
-    const u: U = .{ .value = value };
-    return u.target;
+    const ptr = &value;
+    const casted: *const Target = @ptrCast(ptr);
+    return casted.*;
 }
