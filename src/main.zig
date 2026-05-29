@@ -689,12 +689,6 @@ pub const Registry = struct {
     fn parseForeign(self: *@This(), xml: XmlNode) void {
         _ = self;
         _ = xml;
-        //const name = xml.attr.get("name") orelse @panic("Nameless foreign type");
-        //const gp = self.types.getOrPut(self.allocator, name) catch @panic("oom");
-        //if (gp.found_existing) return;
-        //gp.value_ptr.* = .{
-        //    .type = .{ .foreign = .{} },
-        //};
     }
     pub fn resolveAlias(self: *const @This(), name: []const u8) TypeCommon {
         var t = self.types.get(name) orelse panic("Failed to find name {s}", .{name});
@@ -1786,7 +1780,7 @@ const render = struct {
 
                 if (in_bitfield) {
                     try w.print(
-                        \\_reserved: LockedInt(u{[bits]},{[bits]}) = .@"{[bits]}",
+                        \\_reserved: LockedInt(u{[bits]},0) = .@"0",
                         \\}},
                     , .{ .bits = remaining_bitfield_bits });
                 }
