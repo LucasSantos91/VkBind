@@ -867,8 +867,13 @@ pub const Registry = struct {
         }
     }
 
-    pub fn parse(api: Api, xml: []const XmlNode.NodeOrText, allocator: Allocator) @This() {
-        var self: @This() = .{ .api = api, .allocator = allocator };
+    pub fn init(api: Api, allocator: Allocator) @This() {
+        return .{ .api = api, .allocator = allocator };
+    }
+    pub fn finishParse(self: *@This()) void {
+        self.sortBits();
+    }
+    pub fn parse(self: *@This(), xml: []const XmlNode.NodeOrText) void {
         for (xml) |registry_node| {
             if (registry_node == .text) continue;
             if (!std.mem.eql(u8, registry_node.node.tag, "registry")) continue;
@@ -885,10 +890,6 @@ pub const Registry = struct {
                 }
             }
         }
-
-        self.sortBits();
-
-        return self;
     }
 
     fn sortBits(self: *@This()) void {
@@ -3358,47 +3359,109 @@ const render = struct {
     }
 };
 
-pub fn main(init: std.process.Init) !void {
-    const allocator = init.arena.allocator();
-    const stdin = std.Io.File.stdin();
-    var stdin_buffer: [4096]u8 = undefined;
-    var stdin_reader = stdin.reader(init.io, &stdin_buffer);
-    const reader = &stdin_reader.interface;
+fn openFile(cwd: Io.Dir, io: Io, path: []const u8, options: Io.Dir.OpenFileOptions) Io.File {
+    if (cwd.openFile(io, path, options)) |file|
+        return file
+    else |e| switch (e) {
+        error.FileNotFound => if (std.Io.Dir.openFileAbsolute(io, path, options)) |file|
+            return file
+        else |er| switch (er) {
+            error.FileNotFound => panic("File not found: {s}", .{path}),
+            else => |err| panic("Error opening file: {s}. Error: {}", .{ path, err }),
+        },
+        else => |er| {
+            panic("Error opening file: {s}. Error: {}", .{ path, er });
+        },
+    }
+}
+fn parseFile(registry: *Registry, reader: *Reader, allocator: Allocator) void {
+    const xml = XmlNode.parseChildren(reader, allocator) catch |e| switch (e) {
+        error.OutOfMemory => @panic("oom"),
+        error.ReadFailed => @panic("Failed to parse inputs"),
+        error.EndOfStream => @panic("File ended unexpectedly"),
+    };
+    registry.parse(xml);
+}
 
-    const xml = try XmlNode.parseChildren(reader, allocator);
+pub fn main(init: std.process.Init) void {
+    const allocator = init.arena.allocator();
+    const io = init.io;
 
     var api: Registry.Api = .vulkan;
+    var registry_file: slice_tools.BoundedArray([]const u8, 2) = .empty;
+    var output: ?[]const u8 = null;
+
+    const usage =
+        \\Usage:
+        \\-api:         vulkan or vulkansc
+        \\-registry:    Path to registry file. Can be used between 0 and 2 times. Use for vk.xml and/or video.xml,
+        \\              order doesn't matter. Both xml files can also be concatenated into a single file.
+        \\              If this flag is not provided, registry is obtained from stdin.
+        \\-out:         Path to output file. If this flag is not provided, output is sent to stdout.
+    ;
 
     {
         var it = init.minimal.args.iterateAllocator(allocator) catch @panic("oom");
-        _ = it.next(); // program name
+        _ = it.skip(); // program name
         while (it.next()) |o| {
             const Options = enum {
                 @"-api",
+                @"-registry",
+                @"-out",
             };
-            const op = slice_tools.enums.fromName(Options, o) orelse std.debug.panic("Unknown option: {s}", .{o});
+            const op = slice_tools.enums.fromName(Options, o) orelse std.debug.panic(
+                \\Unknown option: {s}
+            ++ usage, .{o});
             switch (op) {
                 .@"-api" => {
                     const a = it.next() orelse @panic("Missing api type");
                     api = slice_tools.enums.fromName(Registry.Api, a) orelse std.debug.panic("Unknown api: {s}", .{a});
                 },
+                .@"-registry" => {
+                    const new = registry_file.addOne() catch @panic("Too many -registry flags");
+                    new.* = it.next() orelse @panic("Missing argument for -registry");
+                    new.* = allocator.dupe(u8, new.*) catch @panic("oom");
+                },
+                .@"-out" => {
+                    output = it.next() orelse @panic("Missing argument for -out");
+                    output = allocator.dupe(u8, output.?) catch @panic("oom");
+                },
             }
         }
     }
 
-    const source = blk: {
+    const cwd = std.Io.Dir.cwd();
+    var registry: Registry = .init(api, allocator);
+    var read_buffer: [4096]u8 = undefined;
+    var write_buffer: [4096]u8 = undefined;
+
+    if (registry_file.len == 0) {
+        const stdin = std.Io.File.stdin();
+        var reader = stdin.reader(init.io, &read_buffer);
+        parseFile(&registry, &reader.interface, allocator);
+    } else {
+        for (registry_file.constSlice()) |path| {
+            const file = openFile(cwd, io, path, .{ .allow_directory = false });
+            var reader = file.reader(io, &read_buffer);
+            parseFile(&registry, &reader.interface, allocator);
+        }
+    }
+    registry.finishParse();
+
+    const ast = blk: {
         var writer: Writer.Allocating = .init(allocator);
-        const registry = Registry.parse(api, xml, allocator);
-        try render.render(&registry, &writer.writer);
-        break :blk try writer.toOwnedSliceSentinel(0);
+        render.render(&registry, &writer.writer) catch @panic("oom");
+        const source = writer.toOwnedSliceSentinel(0) catch @panic("oom");
+        const ast = std.zig.Ast.parse(allocator, source, .zig) catch @panic("oom");
+        break :blk ast;
     };
 
-    const stdout = std.Io.File.stdout();
-    var stdout_buffer: [4096]u8 = undefined;
-    var stdout_writer = stdout.writer(init.io, &stdout_buffer);
-    const writer = &stdout_writer.interface;
-    //const ast = try std.zig.Ast.parse(allocator, source, .zig);
-    //try ast.render(allocator, writer, .{});
-    try writer.writeAll(source);
-    try writer.flush();
+    const out_file = if (output) |out|
+        cwd.createFile(io, out, .{}) catch @panic("Failed to create output file")
+    else
+        std.Io.File.stdout();
+
+    var writer = out_file.writer(io, &write_buffer);
+    ast.render(allocator, &writer.interface, .{}) catch |e| panic("Failed to write to output file. Error: {}", .{e});
+    writer.flush() catch |e| panic("Failed to write to output file. Error: {}", .{e});
 }

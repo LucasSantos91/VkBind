@@ -3,6 +3,8 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const registry = b.option([]const u8, "registry", "Path to vk.xml");
+    const video = b.option([]const u8, "video", "Path to video.xml");
     const slice_tools_dep = b.dependency("slice_tools", .{});
 
     const exe_mod = b.createModule(.{
@@ -14,15 +16,24 @@ pub fn build(b: *std.Build) void {
         },
     });
     const exe = b.addExecutable(.{
-        .name = "vkbind",
+        .name = "VkBind",
         .root_module = exe_mod,
     });
     b.installArtifact(exe);
+    const run = b.addRunArtifact(exe);
+    if (b.args) |args| for (args) |a| run.addArg(a);
+    const run_step = b.step("run", "runs the program");
+    run_step.dependOn(&run.step);
 
-    const tests = b.addTest(.{
-        .root_module = exe_mod,
-    });
-    const run_tests = b.addRunArtifact(tests);
-    const test_step = b.step("test", "run tests");
-    test_step.dependOn(&run_tests.step);
+    if (registry) |reg| {
+        run.addArgs(&.{ "-registry", reg });
+        if (video) |vid| {
+            run.addArgs(&.{ "-registry", vid });
+        }
+        const output_file = run.captureStdOut(.{});
+        const module = b.addModule("VkBind", .{
+            .root_source_file = output_file,
+        });
+        _ = module;
+    }
 }
