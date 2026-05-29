@@ -2179,7 +2179,12 @@ const render = struct {
     pub fn render(registry: *const Registry, writer: *Writer) Writer.Error!void {
         overrideTypes(registry);
 
-        try writer.print("{s}\n", .{@embedFile("preamble.zig")});
+        try writer.print(
+            \\{s}
+            \\pub const raw = struct {{
+            \\  {s}
+            \\
+        , .{ @embedFile("preamble.zig"), @embedFile("basetypes.zig") });
         try printConstants(registry.constants, writer);
         var it = registry.types.iterator();
         while (it.next()) |entry| {
@@ -2201,6 +2206,7 @@ const render = struct {
 
         try printCommands(registry, writer);
         try printExtensions(registry, writer);
+        try writer.writeAll("};");
         try printVulkanContext(registry, writer);
     }
     fn isGlobalCommand(command: Registry.Command, registry: *const Registry) bool {
@@ -2311,11 +2317,7 @@ const render = struct {
                 for (self.params) |p| {
                     if (isPAllocator(p)) continue;
                     const z: ZigVar = .parse(p);
-                    try w.print("{f}", .{z});
-                    if (isDispatchableHandleByTypeName(p.c_var.type.base.name, self.registry)) {
-                        try w.writeAll("Wrapper");
-                    }
-                    try w.writeByte(',');
+                    try w.print("{f},", .{z});
                 }
             }
         };
@@ -2328,24 +2330,17 @@ const render = struct {
             }
         };
         const Ret = union(enum) {
-            const RetZigType = struct {
-                v: ZigType,
-                dispatchable: bool,
-            };
-            zig_type: RetZigType,
+            zig_type: ZigType,
             base: CBaseType,
             name: CommandTypeName,
 
             pub const void_ret: @This() = .{ .base = .{ .v = .{ .name = "void" } } };
-            pub fn parseZigVar(zig_var: Registry.ZigVar, r: *const Registry) @This() {
-                return .{ .zig_type = .{
-                    .v = .parse(zig_var),
-                    .dispatchable = isDispatchableHandleByTypeName(zig_var.c_var.type.base.name, r),
-                } };
+            pub fn parseZigVar(zig_var: Registry.ZigVar) @This() {
+                return .{ .zig_type = .parse(zig_var) };
             }
             pub fn format(self: @This(), w: *Writer) Writer.Error!void {
                 switch (self) {
-                    .zig_type => |z| try w.print("{f}{s}", .{ z.v, if (z.dispatchable) "Wrapper" else "" }),
+                    .zig_type => |z| try w.print("{f}", .{z}),
                     .base => |b| try w.print("{f}", .{b}),
                     .name => |n| try w.print("{f}Result", .{n}),
                 }
@@ -2353,23 +2348,15 @@ const render = struct {
         };
         const ParamNames = struct {
             params: []const Registry.ZigVar,
-            r: *const Registry,
 
             pub fn format(self: @This(), w: *Writer) Writer.Error!void {
                 for (self.params) |p| {
                     if (VCParams.isPAllocator(p)) {
                         try w.writeAll("getAllocator(),");
                     } else {
-                        const base = p.c_var.type.base;
-                        const is_dispatchable = isDispatchableHandleByTypeName(base.name, self.r);
-                        if (is_dispatchable) {
-                            for (0..base.ptrs.len) |_| {
-                                try w.writeByte('&');
-                            }
-                        }
                         try w.print(
-                            \\@"{s}"{s},
-                        , .{ p.c_var.name, if (is_dispatchable) ".handle" else "" });
+                            \\justFreakingCastTheThing(@"{s}"),
+                        , .{p.c_var.name});
                     }
                 }
             }
@@ -2434,14 +2421,14 @@ const render = struct {
         const ret: Ret =
             if (is_create_command) blk: {
                 last_param.c_var.type.base.ptrs.len -= 1;
-                break :blk .parseZigVar(last_param, registry);
+                break :blk .parseZigVar(last_param);
             } else if (has_success_codes) blk: {
                 break :blk if (only_success_code)
                     Ret.void_ret
                 else
                     .{ .name = name.name };
             } else .{ .base = .{ .v = command.ret } };
-        const param_names: ParamNames = .{ .params = command.params, .r = registry };
+        const param_names: ParamNames = .{ .params = command.params };
         const switch_prongs: SwitchProngs = .{
             .enabled = has_success_codes,
             .success_codes = if (only_success_code) null else command.success_codes,
@@ -2488,38 +2475,38 @@ const render = struct {
             \\      run_time,
             \\  };
             \\  pub const AllocatorConfig = union(enum){
-            \\      compile_time: ?*const AllocationCallbacks,
+            \\      compile_time: ?*const raw.AllocationCallbacks,
             \\      run_time,
             \\  };
             \\ globals: Globals = .load_time,
-            \\ commands: []const Command,
-            \\ apiVersion: ApiVersion = .{ .minor = 0 },
-            \\ extensions: []const Extension = &.{},
+            \\ commands: []const raw.Command,
+            \\ apiVersion: raw.ApiVersion = .{ .minor = 0 },
+            \\ extensions: []const raw.Extension = &.{},
             \\ allocator: AllocatorConfig = .{ .compile_time = null },
             \\};
             \\pub fn VulkanContext(comptime config: VulkanContextConfig) type{
             \\  return struct{
             \\      comptime{ 
-            \\          if(Extension.missingDependenciesFor(config.extensions, config.apiVersion)) |e|
+            \\          if(raw.Extension.missingDependenciesFor(config.extensions, config.apiVersion)) |e|
             \\          @panic("Missing dependencies for extension " ++ e.name.name);
             \\      }
-            \\      pub const extensions = Extension.getFilteredVkNames(config.commands);
+            \\      pub const extensions = raw.Extension.getFilteredVkNames(config.commands);
             \\      var runtime_allocator: switch(config.allocator){
             \\          .compile_time => void,
-            \\          .run_time =>?*const AllocationCallbacks,
+            \\          .run_time =>?*const raw.AllocationCallbacks,
             \\      } = undefined;
             \\      pub fn initAllocator(pAllocator: ?*const AllocationCallbacks) void{
             \\          runtime_allocator = pAllocator;
             \\      }
             \\      pub fn getAllocator()?*const AllocationCallbacks{
             \\          return switch(comptime config.allocator){
-            \\              .comptime_time => |a| a,
+            \\              .comptime_time => |a| @ptrCast(a),
             \\              .run_time => runtime_allocator,
             \\          };
             \\      }
-            \\      pub const ThisLoader = Loader(switch(config.globals){
+            \\      pub const ThisLoader = raw.Loader(switch(config.globals){
             \\          .load_time => blk:{ 
-            \\               const filtered = filterCommands(config.commands);
+            \\               const filtered = raw.Command.filter(config.commands);
             \\              break :blk filtered.instance ++ filtered.device;
             \\          },
             \\          .run_time => config.commands,
@@ -2532,14 +2519,14 @@ const render = struct {
             \\              .run_time => loader.initGlobalCommands(load_function),
             \\          }
             \\      }
-            \\      pub fn initInstanceCommands(load_function: anytype, instance: InstanceWrapper) void{
-            \\          loader.initInstanceCommands(load_function, instance.handle);
+            \\      pub fn initInstanceCommands(load_function: anytype, instance: Instance) void{
+            \\          loader.initInstanceCommands(load_function, justFreakingCastTheThing(instance));
             \\      }
-            \\      pub fn initDeviceCommands(load_function: anytype, device: DeviceWrapper) void{
-            \\          loader.initDeviceCommands(load_function, device.handle);
+            \\      pub fn initDeviceCommands(load_function: anytype, device: Device) void{
+            \\          loader.initDeviceCommands(load_function, justFreakingCastTheThing(device));
             \\      }
-            \\      fn assertDependencies(comptime cmd: Command) void{
-            \\      const provided_extensions: CommandDependencyRequirements = .{
+            \\      fn assertDependencies(comptime cmd: raw.Command) void{
+            \\      const provided_extensions: raw.CommandDependencyRequirements = .{
             \\        .version = config.apiVersion,
             \\        .extensions = config.extensions,
             \\      };
@@ -2547,13 +2534,99 @@ const render = struct {
             \\                  @compileError("Requirements not met for command: " ++ @tagName(cmd));
             \\      }
         );
+        {
+            var it = registry.constants.iterator();
+            while (it.next()) |c| {
+                const n: ConstantName = .parse(c.key_ptr.*);
+                try writer.print("pub const {[name]f} = raw.{[name]f};", .{ .name = n });
+            }
+        }
+        {
+            const basetypes: []const []const u8 = &.{
+                "Bool32",
+                "ApiVersion",
+                "DeviceSize",
+                "DeviceAddress",
+                "SampleMask",
+                "VkRemoteAddressNV",
+                "Display",
+                "VisualID",
+                "Window",
+                "RROutput",
+                "wl_display",
+                "wl_surface",
+                "HINSTANCE",
+                "HWND",
+                "HMONITOR",
+                "HANDLE",
+                "SECURITY_ATTRIBUTES",
+                "DWORD",
+                "LPCWSTR",
+                "xcb_connection_t",
+                "xcb_visualid_t",
+                "xcb_window_t",
+                "zx_handle_t",
+                "_screen_context",
+                "_screen_window",
+                "_screen_buffer",
+                "IDirectFB",
+                "IDirectFBSurface",
+                "NvSciSyncAttrList",
+                "NvSciSyncObj",
+                "NvSciSyncFence",
+                "NvSciBufAttrList",
+                "NvSciBufObj",
+                "GgpStreamDescriptor",
+                "GgpFrameToken",
+                "StdVideoVP9Profile",
+                "StdVideoVP9Level",
+                "ANativeWindow",
+                "AHardwareBuffer",
+                "CAMetalLayer",
+                "MTLDevice_id",
+                "MTLCommandQueue_id",
+                "MTLBuffer_id",
+                "MTLTexture_id",
+                "MTLSharedEvent_id",
+                "IOSurfaceRef",
+                "OHNativeWindow",
+                "OHBufferHandle",
+                "OH_NativeBuffer",
+                "ubm_device",
+                "ubm_surface",
+            };
+            for (basetypes) |b| {
+                try writer.print("pub const {[name]s} = raw.{[name]s};", .{ .name = b });
+            }
+        }
+        {
+            var it = registry.types.iterator();
+            while (it.next()) |entry| {
+                const name = entry.key_ptr.*;
+                const v = entry.value_ptr.*;
+                switch (v.type) {
+                    .flags => try printFlags(registry, name, v, writer),
+                    .flag_bits => try printFlagBits(name, v, writer),
+                    .@"enum" => try printEnum(name, v, writer),
+                    .@"struct" => try printStruct(name, v, registry, writer),
+                    .@"union" => try printUnion(name, v, writer),
+                    .handle => |h| {
+                        if (!h.dispatchable) try printHandle(name, v, writer);
+                    },
+                    .basetype => try printBasetype(name, v, writer),
+                    .funcpointer => try printFuncpointer(name, v, writer),
+                    .foreign => try printForeign(name, v, writer),
+                    .alias => try printAlias(name, v, writer),
+                }
+            }
+        }
 
         var it = registry.commands.iterator();
         while (it.next()) |entry| {
             if (!isGlobalCommand(entry.value_ptr.*, registry)) continue;
             const global_loader =
                 \\switch(comptime config.globals){
-                \\  .load_time => extern_global_commands,
+                \\  .load_time => raw.extern_global_commands,
                 \\  .run_time => loader,
                 \\}
             ;
@@ -2571,8 +2644,8 @@ const render = struct {
             if (!isDispatchableHandle(t.value_ptr.*)) continue;
             const name: TypeName = .parse(t.key_ptr.*);
             try writer.print(
-                \\pub const {[name]f}Wrapper = extern struct{{
-                \\handle: {[name]f},
+                \\pub const {[name]f} = enum(usize){{
+                \\_,
                 \\
             , .{ .name = name });
             it = registry.commands.iterator();
