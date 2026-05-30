@@ -1,8 +1,15 @@
 const std = @import("std");
 const vk_bind = @import("VkBind");
-const debug_commands: []const vk_bind.raw.Command = &.{.destroyInstance};
+const debug_commands: []const vk_bind.raw.Command = &.{ .destroyInstance, .destroyDevice };
 const vk = vk_bind.VulkanContext(.{
-    .commands = [_]vk_bind.raw.Command{.createInstance} ++ debug_commands,
+    .commands = [_]vk_bind.raw.Command{
+        .createInstance,
+        .getInstanceProcAddr,
+        .createDevice,
+        .getPhysicalDeviceFeatures,
+        .enumeratePhysicalDevices,
+        .getPhysicalDeviceQueueFamilyProperties,
+    } ++ debug_commands,
     .extensions = &.{},
 });
 const builtin = @import("builtin");
@@ -37,9 +44,9 @@ const Context = struct {
         };
         const instance = vk.createInstance(&instance_create_info) catch |e| panic(e, "Failed to create instance");
         {
-            const get_inst_proc_raw = instance.getInstanceProcAddr(vk.Command.getInstanceProcAddr.getVkName()) orelse @panic("Failed to find getInstanceProcAddress");
+            const get_inst_proc_raw = vk.extern_commands.getInstanceProcAddr(instance, vk.Command.getInstanceProcAddr.getVkName()) orelse @panic("Failed to find getInstanceProcAddress");
             const get_inst_proc: vk.Command.getInstanceProcAddr.getPtrType() = @ptrCast(get_inst_proc_raw);
-            vk.initInstanceCommands(get_inst_proc, instance.?);
+            vk.initInstanceCommands(get_inst_proc.?, instance);
         }
         const phys_device, const family_index = selectPhysicalDevice(instance);
 

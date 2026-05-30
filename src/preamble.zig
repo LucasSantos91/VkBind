@@ -56,7 +56,10 @@ pub fn FlagBitsMixin(comptime Flags: type, comptime FlagBits: type) type {
 }
 
 fn nullValue(comptime T: type) T {
-    return std.mem.zeroes(T);
+    return switch (@typeInfo(T)) {
+        .pointer, .@"union" => undefined,
+        else => std.mem.zeroes(T),
+    };
 }
 
 inline fn maybeUnused(_: anytype) void {}

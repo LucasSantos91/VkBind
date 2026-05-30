@@ -1788,10 +1788,7 @@ const render = struct {
                             remaining_bitfield_bits = undefined;
                             in_bitfield = false;
                         }
-                        try w.print("{f}", .{v});
-                        if (v.v.v.extra[0].optional) {
-                            try w.print("= nullValue({f})", .{v.v});
-                        }
+                        try w.print("{f} = nullValue({f})", .{ v, v.v });
                     }
 
                     try w.writeByte(',');
@@ -2619,8 +2616,9 @@ const render = struct {
             \\ extensions: []const raw.Extension = &.{},
             \\ allocator: AllocatorConfig = .{ .compile_time = null },
             \\};
-            \\pub fn VulkanContext(comptime config: VulkanContextConfig) type{
+            \\pub fn VulkanContext(comptime config_: VulkanContextConfig) type{
             \\  return struct{
+            \\      pub const config = config_;
             \\      pub const Command = raw.Command;
             \\      pub const Extension = raw.Extension;
             \\      comptime{ 
@@ -3031,10 +3029,10 @@ const render = struct {
             const command_name: CommandFunctionName = .parseFromText(name);
             const params: Params = .{ .params = command.params };
             try writer.print(
-                \\{[provider]f}
                 \\extern "vulkan-1" fn {[raw_name]s}(
                 \\{[params]f}
                 \\) callconv(vulkan_api) Command.{[name]f}.getReturnType();
+                \\{[provider]f}
                 \\pub const {[name]f} = {[raw_name]s};
             , .{
                 .provider = provider,
@@ -3516,6 +3514,7 @@ pub fn main(init: std.process.Init) void {
     var registry_file: slice_tools.BoundedArray(Io.File, 2) = .empty;
     var output: ?Io.File = null;
     var dll: ?Io.File = null;
+    var debug = false;
 
     const usage =
         \\Usage:
@@ -3526,6 +3525,7 @@ pub fn main(init: std.process.Init) void {
         \\-out:         Path to output file. If this flag is not provided, output is sent to stdout.
         \\-dll:         (optional) Path to output dummy DLL. Useful for creating an import library without 
         \\              requiring the Vulkan SDK.
+        \\-debug:       Output unformatted code. Useful for debugging.    
     ;
     const cwd = std.Io.Dir.cwd();
 
@@ -3538,6 +3538,7 @@ pub fn main(init: std.process.Init) void {
                 @"-registry",
                 @"-out",
                 @"-dll",
+                @"-debug",
             };
             const op = slice_tools.enums.fromName(Options, o) orelse std.debug.panic(
                 \\Unknown option: {s}
@@ -3559,6 +3560,9 @@ pub fn main(init: std.process.Init) void {
                 .@"-dll" => {
                     const path = it.next() orelse @panic("Missing argument for -dll");
                     dll = cwd.createFile(io, path, .{}) catch @panic("Failed to create dll output file");
+                },
+                .@"-debug" => {
+                    debug = true;
                 },
             }
         }
@@ -3586,20 +3590,21 @@ pub fn main(init: std.process.Init) void {
         render.renderDll(&registry, &w.interface) catch @panic("Failed to write DLL file");
     }
 
-    const ast = blk: {
-        var writer: Writer.Allocating = .init(allocator);
-        render.render(&registry, &writer.writer) catch @panic("Failed to write output file");
-        const source = writer.toOwnedSliceSentinel(0) catch @panic("oom");
-        const ast = std.zig.Ast.parse(allocator, source, .zig) catch @panic("oom");
-        break :blk ast;
-    };
+    var temp_writer: Writer.Allocating = .init(allocator);
+    render.render(&registry, &temp_writer.writer) catch @panic("Failed to write output file");
+    const source = temp_writer.toOwnedSliceSentinel(0) catch @panic("oom");
 
     const out_file = if (output) |out|
         out
     else
         std.Io.File.stdout();
-
     var writer = out_file.writer(io, &write_buffer);
-    ast.render(allocator, &writer.interface, .{}) catch |e| panic("Failed to write to output file. Error: {}", .{e});
+
+    if (debug) {
+        writer.interface.writeAll(source) catch @panic("Failed to write to output file");
+    } else {
+        const ast = std.zig.Ast.parse(allocator, source, .zig) catch @panic("oom");
+        ast.render(allocator, &writer.interface, .{}) catch |e| panic("Failed to write to output file. Error: {}", .{e});
+    }
     writer.flush() catch |e| panic("Failed to write to output file. Error: {}", .{e});
 }
