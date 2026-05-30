@@ -18,9 +18,17 @@ const Context = struct {
         self.instance = try vk.createInstance(&info);
         return self;
     }
+    pub fn deinit(self: *@This()) void {
+        self.instance.destroyInstance();
+    }
+    pub fn run(self: *@This()) !void {
+        _ = self;
+        const v = try vk.enumerateInstanceVersion();
+        _ = v;
+    }
 };
 
 pub fn main() !void {
-    const context: Context = try Context.init();
-    _ = context;
+    var context: Context = try Context.init();
+    try context.run();
 }

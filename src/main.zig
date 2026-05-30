@@ -2664,12 +2664,27 @@ const render = struct {
             \\          loader.initDeviceCommands(load_function, justFreakingCastTheThing(device));
             \\      }
             \\      fn assertDependencies(comptime cmd: raw.Command) void{
-            \\      const provided_extensions: raw.CommandDependencyRequirements = .{
-            \\        .version = config.apiVersion,
-            \\        .extensions = config.extensions,
-            \\      };
-            \\          comptime if(!provided_extensions.satisfies(cmd.requirements()))
-            \\                  @compileError("Requirements not met for command: " ++ @tagName(cmd));
+            \\          comptime{
+            \\              const provided_extensions: raw.CommandDependencyRequirements = .{
+            \\                  .version = config.apiVersion,
+            \\                  .extensions = config.extensions,
+            \\              };
+            \\              const requirements = cmd.requirements();
+            \\              if(!provided_extensions.satisfies(requirements)){
+            \\              const text = std.fmt.comptimePrint(
+            \\                  \\
+            \\                  \\Requirements not met for command: {t}
+            \\                  \\Required:
+            \\                  \\{f}
+            \\                  \\
+            \\                  \\Provided:
+            \\                  \\{f}
+            \\                  \\
+            \\                  , .{cmd, requirements, provided_extensions});
+            \\                  
+            \\                  @compileError(text);
+            \\              }
+            \\          }
             \\      }
         );
         {
@@ -2927,13 +2942,25 @@ const render = struct {
             \\
             \\/// Any of these is sufficient to satisfy command requirements
             \\pub const CommandDependencyRequirements = struct{
-            \\version: ApiVersion,
-            \\extensions: []const Extension,
-            \\pub fn satisfies(self: @This(), requirements: @This()) bool{
-            \\if(self.version.ge(requirements.version)) return true;
-            \\for(requirements.extensions) |e| if(e.containedIn(self.extensions)) return true;
-            \\return false;
-            \\}
+            \\  version: ApiVersion,
+            \\  extensions: []const Extension,
+            \\  pub fn satisfies(self: @This(), requirements: @This()) bool{
+            \\      if(self.version.ge(requirements.version)) return true;
+            \\      for(requirements.extensions) |e| if(e.containedIn(self.extensions)) return true;
+            \\      return false;
+            \\  }
+            \\  pub fn format(self: @This(), writer: *std.Io.Writer) !void{
+            \\      try writer.print(
+            \\        \\version: {}.{}
+            \\        \\extensions:
+            \\        \\
+            \\    , .{self.version.major, self.version.minor});
+            \\      if(self.extensions.len == 0){
+            \\          try writer.writeAll("None");
+            \\      }else for(Extension.getVkNames(self.extensions)) |name|{
+            \\          try writer.print("{s}\n", .{name});
+            \\      }
+            \\  }
             \\};
         );
         try printExternGlobalFunctions(registry, writer);
