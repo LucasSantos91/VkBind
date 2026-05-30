@@ -1396,7 +1396,9 @@ const render = struct {
         name: []const u8,
 
         pub fn parse(entry_name: []const u8, enum_name: TypeName) @This() {
-            return .{ .name = stripEnumNameAndBitSuffix(entry_name, enum_name) };
+            return .{
+                .name = stripEnumName(entry_name, enum_name),
+            };
         }
         pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
             try writer.print("@\"{s}\"", .{self.name});
@@ -1656,22 +1658,24 @@ const render = struct {
             enum_name: TypeName,
 
             pub fn format(self: @This(), w: *Writer) Writer.Error!void {
-                for (self.aliases) |a| {
-                    const c: Comment = .parse(a.comment);
-                    const p: Provider = .{ .p = a.providers };
-                    const alias_name: EnumName = .parse(a.name, self.enum_name);
-                    const canonical_name: EnumName = .parse(a.canonical, self.enum_name);
-                    try w.print(
-                        \\{[comment]f}
-                        \\{[provider]f}
-                        \\pub const {[alias_name]f} = @This().{[canonical_name]f};
-                    , .{
-                        .comment = c,
-                        .provider = p,
-                        .alias_name = alias_name,
-                        .canonical_name = canonical_name,
-                    });
-                }
+                _ = self;
+                _ = w;
+                //for (self.aliases) |a| {
+                //    const c: Comment = .parse(a.comment);
+                //    const p: Provider = .{ .p = a.providers };
+                //    const alias_name: EnumName = .parse(a.name, self.enum_name);
+                //    const canonical_name: EnumName = .parse(a.canonical, self.enum_name);
+                //    try w.print(
+                //        \\{[comment]f}
+                //        \\{[provider]f}
+                //        \\pub const {[alias_name]f} = @This().{[canonical_name]f};
+                //    , .{
+                //        .comment = c,
+                //        .provider = p,
+                //        .alias_name = alias_name,
+                //        .canonical_name = canonical_name,
+                //    });
+                //}
             }
         };
         const Values = struct {
@@ -2351,14 +2355,20 @@ const render = struct {
             params: []const Registry.ZigVar,
 
             pub fn format(self: @This(), w: *Writer) Writer.Error!void {
-                for (self.params) |p| {
+                for (self.params, 0..) |p, index| {
+                    try w.writeAll(
+                        \\justFreakingCastTheThing(
+                    );
                     if (VCParams.isPAllocator(p)) {
-                        try w.writeAll("getAllocator(),");
+                        try w.writeAll("getAllocator()");
                     } else {
                         try w.print(
-                            \\justFreakingCastTheThing(@"{s}"),
+                            \\@"{s}"
                         , .{p.c_var.name});
                     }
+                    try w.print(
+                        \\, this.getParamType({})),
+                    , .{index});
                 }
             }
         };
@@ -2381,8 +2391,9 @@ const render = struct {
                 var it: CommaIterator = .{ .text = self.error_codes };
                 while (it.next()) |code| {
                     if (shouldErrorBeSkipped(code)) continue;
+                    const res: ConstantName = .parse(code);
                     const n: ErrorName = .parse(code);
-                    try w.print(".{[name]f} => error.{[name]f},", .{ .name = n });
+                    try w.print(".{[res]f} => error.{[name]f},", .{ .res = res, .name = n });
                 }
                 try w.writeByte('}');
             }
@@ -2445,7 +2456,8 @@ const render = struct {
             \\pub fn {[name]f}(
             \\{[params]f}
             \\) {[error_ret]f}{[ret]f} {{
-            \\assertDependencies(.{[name]f});
+            \\const this: Command = .{[name]f};
+            \\assertDependencies(this);
             \\var temp: {[ret]f} = undefined;
             \\maybeUnused(&temp);
             \\{[maybe_temp_ref]f}
@@ -2487,11 +2499,13 @@ const render = struct {
             \\};
             \\pub fn VulkanContext(comptime config: VulkanContextConfig) type{
             \\  return struct{
+            \\      pub const Command = raw.Command;
+            \\      pub const Extension = raw.Extension;
             \\      comptime{ 
-            \\          if(raw.Extension.missingDependenciesFor(config.extensions, config.apiVersion)) |e|
+            \\          if(Extension.missingDependenciesFor(config.extensions, config.apiVersion)) |e|
             \\          @panic("Missing dependencies for extension " ++ e.name.name);
             \\      }
-            \\      pub const extensions = raw.Extension.getFilteredVkNames(config.commands);
+            \\      pub const extensions = Extension.getFilteredVkNames(config.extensions);
             \\      var runtime_allocator: switch(config.allocator){
             \\          .compile_time => void,
             \\          .run_time =>?*const raw.AllocationCallbacks,
@@ -2501,7 +2515,7 @@ const render = struct {
             \\      }
             \\      pub fn getAllocator()?*const AllocationCallbacks{
             \\          return switch(comptime config.allocator){
-            \\              .comptime_time => |a| @ptrCast(a),
+            \\              .compile_time => |a| @ptrCast(a),
             \\              .run_time => runtime_allocator,
             \\          };
             \\      }
@@ -2549,7 +2563,7 @@ const render = struct {
                 "DeviceSize",
                 "DeviceAddress",
                 "SampleMask",
-                "VkRemoteAddressNV",
+                "RemoteAddressNV",
                 "Display",
                 "VisualID",
                 "Window",
@@ -2742,11 +2756,11 @@ const render = struct {
         const extension_types: ExtensionTypes = .{ .list = registry.extensions };
         const extension_dependencies: ExtensionDependencies = .{ .list = registry.extensions };
         const conv_funcs =
-            \\pub fn getVkName(comptime self: @This()) []const u8{
+            \\pub fn getVkName(comptime self: @This()) [*:0]const u8{
             \\return "VK_" ++ @tagName(self);
             \\}
-            \\pub fn getVkNames(comptime extensions: []const @This()) []const []const u8{
-            \\var result: [extensions.len][]const u8 = undefined;
+            \\pub fn getVkNames(comptime extensions: []const @This()) []const [*:0]const u8{
+            \\var result: [extensions.len][*:0]const u8 = undefined;
             \\for(&result, extensions) |*r, e| r.* = e.getVkName();
             \\const final = result;
             \\return &final;
@@ -2765,16 +2779,16 @@ const render = struct {
             \\/// Returns the first extension found for which there are missing dependencies.
             \\/// If all dependencies are satified, returns `null`
             \\pub fn missingDependenciesFor(ext: []const @This(), apiVersion: ApiVersion) ?@This(){
-            \\const bitmask = .initMany(ext);
+            \\const bitmask:Bitmask = .initMany(ext);
             \\for(ext) |e| if(!e.isSatisfied(apiVersion, bitmask)) return e;
-            \\return true;
+            \\return null;
             \\}
             \\/// Whether `self` is contained in `extensions`
             \\pub fn containedIn(self:@This(),extensions:[]const @This())bool{
             \\for(extensions)|e| if(e == self) return true;
             \\return false;
             \\}
-            \\pub const Names = struct{ device: []const []const u8, instance: []const [] const u8};
+            \\pub const Names = struct{ device: []const [*:0]const u8, instance: []const [*:0] const u8};
             \\pub fn getFilteredVkNames(comptime ext: []const @This()) Names{
             \\return .{ .device = getVkNames(filter(ext, .device)), .instance = getVkNames(filter(ext,.instance)),};
             \\}
@@ -2852,7 +2866,7 @@ const render = struct {
             \\version: ApiVersion,
             \\extensions: []const Extension,
             \\pub fn satisfies(self: @This(), requirements: @This()) bool{
-            \\if(self.version.gt(requirements.version)) return true;
+            \\if(self.version.ge(requirements.version)) return true;
             \\for(requirements.extensions) |e| if(e.containedIn(self.extensions)) return true;
             \\return false;
             \\}
@@ -3216,7 +3230,8 @@ const render = struct {
         const conv_functions =
             \\pub fn getType(comptime self: @This()) type{
             \\const t = @tagName(self);
-            \\return @field(@This(), std.ascii.toUpper(t[0]) ++ t[1..]);
+            \\const c: [1]u8 = .{std.ascii.toUpper(t[0])};
+            \\return @field(@This(), c ++ t[1..]);
             \\}
             \\pub fn getPtrType(comptime self: @This()) type{
             \\return ?*const self.getType();
@@ -3224,12 +3239,15 @@ const render = struct {
             \\pub fn getReturnType(comptime self: @This()) type{
             \\return @typeInfo(self.getType()).@"fn".return_type.?;
             \\}
+            \\pub fn getParamType(comptime self: @This(), comptime param_index: usize) type{
+            \\return @typeInfo(self.getType()).@"fn".params[param_index].type.?;
+            \\}
             \\pub fn getVkName(comptime self: @This()) []const u8{
             \\  const t = @tagName(self);
             \\  return "vk" ++ std.ascii.toUpper(t[0]) ++ t[1..];
             \\}
             \\pub fn getVkNames(comptime funcs: []const @This()) []const []const u8{
-            \\  var result: [funcs.len][]const u8 = undefined;
+            \\  var result: [funcs.len][*:0]const u8 = undefined;
             \\  for (funcs, &result) |f, *r| {
             \\      r.* = f.getVkName();
             \\  }

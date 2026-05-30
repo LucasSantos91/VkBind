@@ -32,7 +32,7 @@ pub fn build(b: *std.Build) void {
             run.addArg("-registry");
             run.addFileArg(vid);
         }
-        const output_file = run.captureStdOut(.{});
+        const output_file = run.captureStdOut(.{ .basename = "VkBind.zig" });
         const module = b.addModule("VkBind", .{
             .root_source_file = output_file,
         });

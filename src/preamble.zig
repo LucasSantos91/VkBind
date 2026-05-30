@@ -63,13 +63,7 @@ pub fn FlagBitsMixin(comptime Flags: type, comptime FlagBits: type) type {
 }
 
 fn nullValue(comptime T: type) T {
-    const info = @typeInfo(T);
-    return switch (info) {
-        .@"enum" => @enumFromInt(0),
-        .pointer => null,
-        .array => @splat(@bitCast(@as(T, 0))),
-        else => @bitCast(@as(T, 0)),
-    };
+    return std.mem.zeroes(T);
 }
 
 inline fn maybeUnused(_: anytype) void {}
@@ -79,7 +73,7 @@ pub fn isDispatchableHandle(comptime T: type) bool {
     return info.@"enum".tag_type == usize;
 }
 fn LockedEnum(comptime T: type, comptime value: T) type {
-    return @Enum(std.meta.Tag(@typeInfo(T).@"enum".tag_type), .exhaustive, &.{@tagName(value)}, &.{@intFromEnum(value)});
+    return @Enum(@typeInfo(T).@"enum".tag_type, .exhaustive, &.{@tagName(value)}, &.{@intFromEnum(value)});
 }
 
 fn LockedInt(comptime T: type, comptime value: T) type {

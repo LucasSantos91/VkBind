@@ -6,6 +6,7 @@ pub fn build(b: *std.Build) void {
     const vk_docs = b.dependency("VkDocs", .{});
     const vk_bind = b.dependency("VkBind", .{
         .registry = vk_docs.path("xml/vk.xml"),
+        .video = vk_docs.path("xml/video.xml"),
     });
     const exe = b.addExecutable(.{
         .name = "triangle",

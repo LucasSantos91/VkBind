@@ -19,7 +19,7 @@ pub const ApiVersion = packed struct(u32) {
     patch: u11 = 0,
     minor: u10,
     major: u7 = 1,
-    variant: u3 = 0,
+    variant: u4 = 0,
 
     pub fn toInt(self: @This()) u32 {
         return @bitCast(self);
@@ -50,7 +50,7 @@ pub const DeviceSize = u64;
 pub const DeviceAddress = u64;
 pub const SampleMask = u32;
 
-pub const VkRemoteAddressNV = *anyopaque;
+pub const RemoteAddressNV = *anyopaque;
 pub const Display = opaque {};
 pub const VisualID = c_uint;
 pub const Window = c_ulong;
