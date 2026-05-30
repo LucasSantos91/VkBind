@@ -23,7 +23,8 @@ const Context = struct {
     }
     pub fn run(self: *@This()) !void {
         _ = self;
-        const v = try vk.enumerateInstanceVersion();
+        var c: vk.CommandBuffer = undefined;
+        const v = try c.cmdSetViewportWithCountEXT(undefined, undefined);
         _ = v;
     }
 };

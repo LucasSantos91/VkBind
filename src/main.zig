@@ -1275,6 +1275,7 @@ pub const Registry = struct {
 const render = struct {
     const command_group_name = "Command";
     const loader_name = "Loader";
+    const no_version = "99";
     const Primitives = enum {
         void,
         char,
@@ -2950,11 +2951,19 @@ const render = struct {
             \\      return false;
             \\  }
             \\  pub fn format(self: @This(), writer: *std.Io.Writer) !void{
-            \\      try writer.print(
-            \\        \\version: {}.{}
-            \\        \\extensions:
-            \\        \\
-            \\    , .{self.version.major, self.version.minor});
+            \\      try writer.writeAll("version: ");
+            \\      if(self.version.minor == 
+        ++ no_version ++
+            \\){
+            \\          try writer.writeAll("No version");
+            \\      } else {
+            \\          try writer.print("version: {}.{}", .{self.version.major, self.version.minor});
+            \\      }
+            \\      try writer.writeAll(
+            \\          \\
+            \\          \\extensions:
+            \\          \\
+            \\      );
             \\      if(self.extensions.len == 0){
             \\          try writer.writeAll("None");
             \\      }else for(Extension.getVkNames(self.extensions)) |name|{
@@ -3194,7 +3203,7 @@ const render = struct {
                     .version = if (providers.version) |v|
                         stripPrefix(v.number, "1.")
                     else
-                        "99",
+                        no_version,
                     .extensions = .{ .extensions = providers.extensions },
                 };
             }
