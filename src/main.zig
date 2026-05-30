@@ -1273,8 +1273,6 @@ pub const Registry = struct {
 };
 
 const render = struct {
-    const command_group_name = "Command";
-    const loader_name = "Loader";
     const no_version = "99";
     const Primitives = enum {
         void,
@@ -2659,10 +2657,10 @@ const render = struct {
             \\          }
             \\      }
             \\      pub fn initInstanceCommands(load_function: anytype, instance: Instance) void{
-            \\          loader.initInstanceCommands(load_function, justFreakingCastTheThing(instance));
+            \\          loader.initInstanceCommands(load_function, justFreakingCastTheThing(instance, raw.Instance));
             \\      }
             \\      pub fn initDeviceCommands(load_function: anytype, device: Device) void{
-            \\          loader.initDeviceCommands(load_function, justFreakingCastTheThing(device));
+            \\          loader.initDeviceCommands(load_function, justFreakingCastTheThing(device, raw.Device));
             \\      }
             \\      fn assertDependencies(comptime cmd: raw.Command) void{
             \\          comptime{
@@ -3036,14 +3034,13 @@ const render = struct {
                 \\{[provider]f}
                 \\extern "vulkan-1" fn {[raw_name]s}(
                 \\{[params]f}
-                \\) callconv(vulkan_api) {[command_group]s}.{[name]f}.getReturnType();
+                \\) callconv(vulkan_api) Command.{[name]f}.getReturnType();
                 \\pub const {[name]f} = {[raw_name]s};
             , .{
                 .provider = provider,
                 .name = command_name,
                 .raw_name = name,
                 .params = params,
-                .command_group = command_group_name,
             });
         }
         try writer.writeAll("};");
@@ -3264,7 +3261,7 @@ const render = struct {
             pub fn format(self: @This(), w: *Writer) Writer.Error!void {
                 switch (self.base) {
                     .base => |b| try w.print("{f}", .{b}),
-                    .codes => |codes| try w.print(command_group_name ++ ".{f}Result", .{codes}),
+                    .codes => |codes| try w.print("Command.{f}Result", .{codes}),
                 }
             }
         };
@@ -3341,9 +3338,10 @@ const render = struct {
             \\pub fn getParamType(comptime self: @This(), comptime param_index: usize) type{
             \\return @typeInfo(self.getType()).@"fn".params[param_index].type.?;
             \\}
-            \\pub fn getVkName(comptime self: @This()) []const u8{
+            \\pub fn getVkName(comptime self: @This()) [*:0]const u8{
             \\  const t = @tagName(self);
-            \\  return "vk" ++ std.ascii.toUpper(t[0]) ++ t[1..];
+            \\  const c: [1]u8 = .{std.ascii.toUpper(t[0])};
+            \\  return "vk" ++ c ++ t[1..];
             \\}
             \\pub fn getVkNames(comptime funcs: []const @This()) []const []const u8{
             \\  var result: [funcs.len][*:0]const u8 = undefined;
@@ -3362,7 +3360,7 @@ const render = struct {
             \\    const info = @typeInfo(Type).@"fn";
             \\    if(info.params.len == 0) return .global;
             \\    const first = info.params[0];
-            \\    if(!isDispatchableHandle(first.type)) return .global;
+            \\    if(!isDispatchableHandle(first.type.?)) return .global;
             \\    if(first.type.? == Instance) return .instance;
             \\    return .device;
             \\}
@@ -3377,15 +3375,15 @@ const render = struct {
             \\        .instance = &.{},
             \\        .device = &.{},
             \\    };
-            \\    for (funcs) |f| switch (f) {
+            \\    for (funcs) |f| switch (f.loaderType()) {
             \\        .global => {
-            \\            result.global = result.global ++ &.{f};
+            \\            result.global = result.global ++ [1]Command{f};
             \\        },
             \\        .instance => {
-            \\            result.instance = result.instance ++ &.{f};
+            \\            result.instance = result.instance ++ [1]Command{f};
             \\        },
             \\        .device => {
-            \\            result.device = result.device ++ &.{f};
+            \\            result.device = result.device ++ [1]Command{f};
             \\        },
             \\    };
             \\    return result;
@@ -3401,15 +3399,11 @@ const render = struct {
             \\        t.* = f.getPtrType();
             \\        n.* = @tagName(f);
             \\    }
-            \\    return @Struct(.@"extern", null, &names, &types, attr);
+            \\    return @Struct(.@"extern", null, &names, &types, &attr);
             \\}
         ;
         const loader_preamble =
-            \\pub fn 
-        ++ loader_name ++
-            \\(commands: [] 
-        ++ command_group_name ++
-            \\) type{
+            \\pub fn Loader(commands: []const Command) type{
             \\return struct{
             \\      pub const filtered_commands = Command.filter(commands);
             \\      const global_count = filtered_commands.global.len;
@@ -3418,42 +3412,57 @@ const render = struct {
             \\      pub const Ptrs = Command.AsPointers(filtered_commands.global ++ filtered_commands.instance ++ filtered_commands.device);
             \\      ptrs: Ptrs,
             \\
-            \\      fn getNames(comptime start: usize, comptime len: usize) [len][]const u8{
-            \\          var names: [len][]const u8 = undefined;
-            \\          for(&names, commands[start..][0..len]) |*n, c|{
-            \\              n.* = c.getVkName();
-            \\          }
+            \\      fn getNames(comptime start: usize, comptime len: usize) [len][*:0]const u8 {
+            \\          const names =  comptime blk:{
+            \\              var names: [len][*:0]const u8 = undefined;
+            \\              for (&names, commands[start..][0..len]) |*n, c| {
+            \\                  const tag_name = @tagName(c);
+            \\                  const char: [1]u8 = .{std.ascii.toUpper(tag_name[0])};
+            \\                  n.* = "vk" ++ char ++ tag_name[1..];
+            \\              }
+            \\              break :blk names;
+            \\          };
             \\          return names;
             \\      }
-            \\      fn getPtrs(self: *@This(), comptime start: usize, comptime len: usize) [len]PfnVoidFunction{
-            \\          const ptrs: *[commands.len]PfnVoidFunction = @ptrCast(self.ptrs);
+            \\      fn getPtrs(self: *@This(), comptime start: usize, comptime len: usize) *[len]PfnVoidFunction{
+            \\          const ptrs: *[commands.len]PfnVoidFunction = @ptrCast(&self.ptrs);
             \\          return ptrs.*[start..][0..len];
+            \\      }
+            \\      fn FirstParam(comptime L: type) type{
+            \\          return sw: switch(@typeInfo(L)){
+            \\              .@"fn" => |f| f.params[0].type.?,
+            \\              .pointer => |p| continue :sw @typeInfo(p.child),
+            \\              else => @compileError("loader function is incompatible"),
+            \\          };
             \\      }
             \\      pub fn initGlobalCommands(self: *@This(), loader: anytype) void{
             \\          const ptrs = self.getPtrs(0, global_count);
-            \\          const names = getNames(0, global_count);
+            \\          const names = comptime getNames(0, global_count);
+            \\          const Param = FirstParam(@TypeOf(loader));
             \\          for(ptrs, names) |*p, name|{
-            \\              p.* = loader(.null_handle, name);
+            \\              p.* = loader(justFreakingCastTheThing(Instance.null_handle, Param), name);
             \\          }
             \\      }
             \\      pub fn initInstanceCommands(self: *@This(), loader: anytype, instance: Instance) void{
             \\          const ptrs = self.getPtrs(global_count, instance_count);
-            \\          const names = getNames(global_count, instance_count);
+            \\          const names = comptime getNames(global_count, instance_count);
+            \\          const Param = FirstParam(@TypeOf(loader));
             \\          for(ptrs, names) |*p, name|{
-            \\              p.* = loader(instance, name);
+            \\              p.* = loader(justFreakingCastTheThing(instance, Param), name);
             \\          }
             \\      }
             \\      pub fn initDeviceCommands(self: *@This(), loader: anytype, device: Device) void{
             \\          const ptrs = self.getPtrs(global_count + instance_count, device_count);
             \\          const names = getNames(global_count + instance_count, device_count);
+            \\          const Param = FirstParam(@TypeOf(loader));
             \\          for(ptrs, names) |*p, name|{
-            \\              p.* = loader(device, name);
+            \\              p.* = loader(justFreakingCastTheThing(device, Param), name);
             \\          }
             \\      }
         ;
 
         try writer.print(
-            \\pub const {[command_group_name]s}=enum{{
+            \\pub const Command = enum{{
             \\{[command_list]f}
             \\pub const all_commands = std.enums.values(@This());
             \\{[command_signatures]f}
@@ -3465,7 +3474,6 @@ const render = struct {
             \\}};
             \\}}
         , .{
-            .command_group_name = command_group_name,
             .command_list = command_list,
             .command_signatures = signature_group,
             .conv_functions = conv_functions,
