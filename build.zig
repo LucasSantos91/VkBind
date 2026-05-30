@@ -5,6 +5,8 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const registry = b.option(std.Build.LazyPath, "registry", "Path to vk.xml");
     const video = b.option(std.Build.LazyPath, "video", "Path to video.xml");
+    const implib = b.option(bool, "implib", "(Windows only) Whether to link the VkBind module with a generated import library") orelse
+        (target.result.os.tag == .windows);
     const slice_tools_dep = b.dependency("slice_tools", .{});
 
     const exe_mod = b.createModule(.{
@@ -36,6 +38,31 @@ pub fn build(b: *std.Build) void {
         const module = b.addModule("VkBind", .{
             .root_source_file = output_file,
         });
-        _ = module;
+        if (implib) {
+            run.addArg("-dll");
+            const generated_dll = run.addOutputFileArg("dll.zig");
+            const dummy_lib = b.addLibrary(.{
+                .name = "vulkan-1",
+                .linkage = .dynamic,
+                .root_module = b.createModule(.{
+                    .root_source_file = generated_dll,
+                    .target = target,
+                }),
+            });
+            b.installArtifact(dummy_lib);
+            const generated_implib = dummy_lib.getEmittedImplib();
+            module.addLibraryPath(generated_implib.dirname());
+            // Manual linkSystemLibrary because it has a useless restriction
+            module.link_objects.append(b.allocator, .{
+                .system_lib = .{
+                    .name = "vulkan-1",
+                    .needed = true,
+                    .weak = true,
+                    .preferred_link_mode = .dynamic,
+                    .use_pkg_config = .yes,
+                    .search_strategy = .paths_first,
+                },
+            }) catch @panic("OOM");
+        }
     }
 }

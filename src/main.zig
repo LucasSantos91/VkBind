@@ -555,7 +555,7 @@ pub const Registry = struct {
 
     const Funcpointer = struct {
         ret: CBaseType,
-        params: []const CVar,
+        params: []const ZigVar,
     };
     const Command = struct {
         ret: CBaseType,
@@ -795,10 +795,22 @@ pub const Registry = struct {
         var it = xml.childrenIterator();
         const proto = it.nextNode("proto") orelse @panic("Funcpointer missing prototype");
         const ret_and_name: CVar = .parse(proto);
-        var params: std.ArrayList(CVar) = .empty;
+        var params: std.ArrayList(ZigVar) = .empty;
         while (it.nextNode("param")) |param| {
             const new = params.addOne(self.allocator) catch @panic("oom");
-            new.* = .parse(param);
+            new.* = .{
+                .c_var = .parse(param),
+                .extra = @splat(.{ .optional = true, .len = .@"1" }),
+            };
+            if (new.c_var.type.base.ptrs.len != 0) {
+                //OVERRIDE
+
+                if (enumFromName(enum { char }, new.c_var.type.base.name)) |e| switch (e) {
+                    .char => {
+                        new.extra[0].len = .@"null-terminated";
+                    },
+                };
+            }
         }
         const fptr = self.addType(ret_and_name.name);
         fptr.* = .{
@@ -1460,13 +1472,14 @@ const render = struct {
                     });
                     last_bitpos = b.bitpos;
                 }
+                var remaining = flag_bits.bitwidth.bitSize();
                 if (flag_bits.bits.len != 0) {
-                    const remaining = flag_bits.bitwidth.bitSize() - flag_bits.bits[flag_bits.bits.len - 1].bitpos - 1;
-                    if (remaining != 0) {
-                        try w.print(
-                            \\_reserved_trailing: LockedInt(u{[bits]}, 0) = .@"0",
-                        , .{ .bits = remaining });
-                    }
+                    remaining = remaining - flag_bits.bits[flag_bits.bits.len - 1].bitpos - 1;
+                }
+                if (remaining != 0) {
+                    try w.print(
+                        \\_reserved_trailing: LockedInt(u{[bits]}, 0) = .@"0",
+                    , .{ .bits = remaining });
                 }
                 for (flag_bits.aggregates) |agg| {
                     const bit_comment: Comment = .parse(agg.comment);
@@ -1525,10 +1538,12 @@ const render = struct {
             }
         } else {
             try writer.print(
+                \\_reserved_trailing: LockedInt(u{[bits]}, 0) = .@"0",
                 \\{[mixins]f}
                 \\}};
             , .{
                 .mixins = mixins,
+                .bits = e.bitwidth.bitSize(),
             });
         }
     }
@@ -1857,12 +1872,16 @@ const render = struct {
                 return;
             }
             const ptr_len = self.v.c_var.type.base.ptrs.len;
+            const base_type = self.v.c_var.type.base;
+            const is_anyopaque = base_type.ptrs.len != 0 and std.mem.eql(u8, base_type.name, "void");
 
             for (self.v.extra[0..ptr_len], self.v.c_var.type.base.ptrs.buffer[0..ptr_len]) |extra, ptr| {
                 if (extra.optional) {
                     try w.writeByte('?');
                 }
-                switch (extra.len) {
+                if (is_anyopaque) {
+                    try w.writeByte('*');
+                } else switch (extra.len) {
                     .expression => {
                         try w.writeAll("[*]");
                     },
@@ -2002,14 +2021,21 @@ const render = struct {
 
         pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
             const base_type = self.v;
+            const is_anyopaque = base_type.ptrs.len != 0 and std.mem.eql(u8, base_type.name, "void");
+            var ptr_text: []const u8 = "[*c]";
+            if (is_anyopaque) {
+                try writer.writeByte('?');
+                ptr_text = "*";
+            }
+
             for (base_type.ptrs.constSlice()) |k| {
-                try writer.writeAll("[*c]");
+                try writer.writeAll(ptr_text);
                 switch (k) {
                     .@"const" => try writer.writeAll("const "),
                     .mutable => {},
                 }
             }
-            if (base_type.ptrs.len != 0 and std.mem.eql(u8, base_type.name, "void")) {
+            if (is_anyopaque) {
                 try writer.writeAll("anyopaque");
                 return;
             }
@@ -2091,12 +2117,12 @@ const render = struct {
         const provider: Provider = .{ .p = e_c.providers };
         const e = e_c.type.funcpointer;
         const n: FuncpointerName = .parse(name);
-        const params: CParams = .{ .params = e.params };
+        const params: Params = .{ .params = e.params };
         const ret: CBaseType = .{ .v = e.ret };
         try writer.print(
             \\{[comment]f}
             \\{[provider]f}
-            \\pub const {[name]f} = *const fn(
+            \\pub const {[name]f} = ?*const fn(
             \\{[params]f}
             \\) callconv(vulkan_api) {[ret]f};
         , .{
@@ -2181,16 +2207,7 @@ const render = struct {
             else => @panic("Expected PresentInfoKHR to be a struct"),
         }
     }
-    pub fn render(registry: *const Registry, writer: *Writer) Writer.Error!void {
-        overrideTypes(registry);
-
-        try writer.print(
-            \\{s}
-            \\pub const raw = struct {{
-            \\  {s}
-            \\
-        , .{ @embedFile("preamble.zig"), @embedFile("basetypes.zig") });
-        try printConstants(registry.constants, writer);
+    fn printTypes(registry: *const Registry, writer: *Writer) Writer.Error!void {
         var it = registry.types.iterator();
         while (it.next()) |entry| {
             const name = entry.key_ptr.*;
@@ -2208,11 +2225,61 @@ const render = struct {
                 .alias => try printAlias(name, v, writer),
             }
         }
+    }
+    fn printVulkanApiAndBaseTypes(writer: *Writer) Writer.Error!void {
+        try writer.print(
+            \\const builtin = @import("builtin");
+            \\pub const vulkan_api: std.builtin.CallingConvention = if (builtin.os.tag == .windows and builtin.cpu.arch == .x86)
+            \\    .winapi
+            \\else if (builtin.abi == .android and (builtin.cpu.arch.isArm() or builtin.cpu.arch.isThumb()) and std.Target.arm.featureSetHas(builtin.cpu.features, .has_v7) and builtin.cpu.arch.ptrBitWidth() == 32)
+            \\    .arm_aapcs_vfp
+            \\else
+            \\    .c;
+            \\  {s}
+            \\
+        , .{@embedFile("basetypes.zig")});
+    }
+    pub fn render(registry: *const Registry, writer: *Writer) Writer.Error!void {
+        overrideTypes(registry);
 
+        try writer.print(
+            \\{s}
+            \\pub const raw = struct{{
+            \\
+        , .{@embedFile("preamble.zig")});
+        try printVulkanApiAndBaseTypes(writer);
+        try printConstants(registry.constants, writer);
+        try printTypes(registry, writer);
         try printCommands(registry, writer);
         try printExtensions(registry, writer);
         try writer.writeAll("};");
         try printVulkanContext(registry, writer);
+    }
+    fn renderDll(registry: *const Registry, writer: *Writer) Writer.Error!void {
+        try writer.writeAll(@embedFile("preamble.zig"));
+        try printVulkanApiAndBaseTypes(writer);
+        try printConstants(registry.constants, writer);
+        try printTypes(registry, writer);
+        var it = registry.commands.iterator();
+        while (it.next()) |entry| {
+            const DllParams = struct {
+                params: []const Registry.ZigVar,
+
+                pub fn format(self: @This(), w: *Writer) Writer.Error!void {
+                    for (self.params) |p| {
+                        const v: ZigType = .parse(p);
+                        try w.print("_: {f},", .{v});
+                    }
+                }
+            };
+            const c = entry.value_ptr.*;
+            const params: DllParams = .{ .params = c.params };
+            const ret: CBaseType = .{ .v = c.ret };
+            try writer.print(
+                \\pub export fn {[name]s}({[params]f}) callconv(vulkan_api) {[ret]f}{{return undefined;}}
+                \\
+            , .{ .params = params, .ret = ret, .name = entry.key_ptr.* });
+        }
     }
     fn isGlobalCommand(command: Registry.Command, registry: *const Registry) bool {
         if (command.params.len == 0) return true;
@@ -2235,7 +2302,7 @@ const render = struct {
         return enumFromName(enum { QueueSignalReleaseImageOHOS }, name) != null;
     }
 
-    fn printVulkanContextCommand(command_name: []const u8, command: Registry.Command, loader: []const u8, registry: *const Registry, writer: *Writer) Writer.Error!void {
+    fn printVulkanContextCommand(command_name: []const u8, command: Registry.Command, loader: []const u8, writer: *Writer) Writer.Error!void {
         const has_success_codes = command.success_codes.len != 0;
         const only_success_code = std.mem.eql(u8, command.success_codes, "VK_SUCCESS");
         const has_error_codes = blk: {
@@ -2310,7 +2377,6 @@ const render = struct {
 
         const VCParams = struct {
             params: []const Registry.ZigVar,
-            registry: *const Registry,
 
             fn isPAllocator(v: Registry.ZigVar) bool {
                 const b = v.c_var.type.base;
@@ -2426,8 +2492,6 @@ const render = struct {
                 command.params[0 .. command.params.len - 1]
             else
                 command.params,
-
-            .registry = registry,
         };
         const error_ret: ErrorRet = .{ .name = if (has_error_codes) name.name else null };
         const ret: Ret =
@@ -2479,6 +2543,65 @@ const render = struct {
             .param_names = param_names,
             .switch_prongs = switch_prongs,
         });
+    }
+    fn referenceRawBasetypes(writer: *Writer) Writer.Error!void {
+        const basetypes: []const []const u8 = &.{
+            "vulkan_api",
+            "Bool32",
+            "ApiVersion",
+            "DeviceSize",
+            "DeviceAddress",
+            "SampleMask",
+            "RemoteAddressNV",
+            "Display",
+            "VisualID",
+            "Window",
+            "RROutput",
+            "wl_display",
+            "wl_surface",
+            "HINSTANCE",
+            "HWND",
+            "HMONITOR",
+            "HANDLE",
+            "SECURITY_ATTRIBUTES",
+            "DWORD",
+            "LPCWSTR",
+            "xcb_connection_t",
+            "xcb_visualid_t",
+            "xcb_window_t",
+            "zx_handle_t",
+            "_screen_context",
+            "_screen_window",
+            "_screen_buffer",
+            "IDirectFB",
+            "IDirectFBSurface",
+            "NvSciSyncAttrList",
+            "NvSciSyncObj",
+            "NvSciSyncFence",
+            "NvSciBufAttrList",
+            "NvSciBufObj",
+            "GgpStreamDescriptor",
+            "GgpFrameToken",
+            "StdVideoVP9Profile",
+            "StdVideoVP9Level",
+            "ANativeWindow",
+            "AHardwareBuffer",
+            "CAMetalLayer",
+            "MTLDevice_id",
+            "MTLCommandQueue_id",
+            "MTLBuffer_id",
+            "MTLTexture_id",
+            "MTLSharedEvent_id",
+            "IOSurfaceRef",
+            "OHNativeWindow",
+            "OHBufferHandle",
+            "OH_NativeBuffer",
+            "ubm_device",
+            "ubm_surface",
+        };
+        for (basetypes) |b| {
+            try writer.print("pub const {[name]s} = raw.{[name]s};", .{ .name = b });
+        }
     }
     fn printVulkanContext(registry: *const Registry, writer: *Writer) Writer.Error!void {
         try writer.writeAll(
@@ -2556,64 +2679,7 @@ const render = struct {
                 try writer.print("pub const {[name]f} = raw.{[name]f};", .{ .name = n });
             }
         }
-        {
-            const basetypes: []const []const u8 = &.{
-                "Bool32",
-                "ApiVersion",
-                "DeviceSize",
-                "DeviceAddress",
-                "SampleMask",
-                "RemoteAddressNV",
-                "Display",
-                "VisualID",
-                "Window",
-                "RROutput",
-                "wl_display",
-                "wl_surface",
-                "HINSTANCE",
-                "HWND",
-                "HMONITOR",
-                "HANDLE",
-                "SECURITY_ATTRIBUTES",
-                "DWORD",
-                "LPCWSTR",
-                "xcb_connection_t",
-                "xcb_visualid_t",
-                "xcb_window_t",
-                "zx_handle_t",
-                "_screen_context",
-                "_screen_window",
-                "_screen_buffer",
-                "IDirectFB",
-                "IDirectFBSurface",
-                "NvSciSyncAttrList",
-                "NvSciSyncObj",
-                "NvSciSyncFence",
-                "NvSciBufAttrList",
-                "NvSciBufObj",
-                "GgpStreamDescriptor",
-                "GgpFrameToken",
-                "StdVideoVP9Profile",
-                "StdVideoVP9Level",
-                "ANativeWindow",
-                "AHardwareBuffer",
-                "CAMetalLayer",
-                "MTLDevice_id",
-                "MTLCommandQueue_id",
-                "MTLBuffer_id",
-                "MTLTexture_id",
-                "MTLSharedEvent_id",
-                "IOSurfaceRef",
-                "OHNativeWindow",
-                "OHBufferHandle",
-                "OH_NativeBuffer",
-                "ubm_device",
-                "ubm_surface",
-            };
-            for (basetypes) |b| {
-                try writer.print("pub const {[name]s} = raw.{[name]s};", .{ .name = b });
-            }
-        }
+        try referenceRawBasetypes(writer);
         {
             var it = registry.types.iterator();
             while (it.next()) |entry| {
@@ -2641,7 +2707,7 @@ const render = struct {
             if (!isGlobalCommand(entry.value_ptr.*, registry)) continue;
             const global_loader =
                 \\switch(comptime config.globals){
-                \\  .load_time => raw.extern_global_commands,
+                \\  .load_time => raw.extern_commands,
                 \\  .run_time => loader,
                 \\}
             ;
@@ -2649,7 +2715,6 @@ const render = struct {
                 entry.key_ptr.*,
                 entry.value_ptr.*,
                 global_loader,
-                registry,
                 writer,
             );
         }
@@ -2673,7 +2738,6 @@ const render = struct {
                     command_entry.key_ptr.*,
                     command,
                     "loader",
-                    registry,
                     writer,
                 );
             }
@@ -2922,14 +2986,13 @@ const render = struct {
     fn printExternGlobalFunctions(registry: *const Registry, writer: *Writer) Writer.Error!void {
         try writer.writeAll(
             \\
-            \\/// Provides global commands as load-time loaded functions.
-            \\pub const extern_global_commands = struct{
+            \\/// Provides commands as load-time loaded functions.
+            \\pub const extern_commands = struct{
         );
         var it = registry.commands.iterator();
         while (it.next()) |entry| {
             const name = entry.key_ptr.*;
             const command = entry.value_ptr.*;
-            if (!isGlobalCommand(command, registry)) continue;
             const provider: Provider = .{ .p = command.providers };
             const command_name: CommandFunctionName = .parseFromText(name);
             const params: Params = .{ .params = command.params };
@@ -3406,8 +3469,9 @@ pub fn main(init: std.process.Init) void {
     const io = init.io;
 
     var api: Registry.Api = .vulkan;
-    var registry_file: slice_tools.BoundedArray([]const u8, 2) = .empty;
-    var output: ?[]const u8 = null;
+    var registry_file: slice_tools.BoundedArray(Io.File, 2) = .empty;
+    var output: ?Io.File = null;
+    var dll: ?Io.File = null;
 
     const usage =
         \\Usage:
@@ -3416,7 +3480,10 @@ pub fn main(init: std.process.Init) void {
         \\              order doesn't matter. Both xml files can also be concatenated into a single file.
         \\              If this flag is not provided, registry is obtained from stdin.
         \\-out:         Path to output file. If this flag is not provided, output is sent to stdout.
+        \\-dll:         (optional) Path to output dummy DLL. Useful for creating an import library without 
+        \\              requiring the Vulkan SDK.
     ;
+    const cwd = std.Io.Dir.cwd();
 
     {
         var it = init.minimal.args.iterateAllocator(allocator) catch @panic("oom");
@@ -3426,6 +3493,7 @@ pub fn main(init: std.process.Init) void {
                 @"-api",
                 @"-registry",
                 @"-out",
+                @"-dll",
             };
             const op = slice_tools.enums.fromName(Options, o) orelse std.debug.panic(
                 \\Unknown option: {s}
@@ -3436,19 +3504,22 @@ pub fn main(init: std.process.Init) void {
                     api = slice_tools.enums.fromName(Registry.Api, a) orelse std.debug.panic("Unknown api: {s}", .{a});
                 },
                 .@"-registry" => {
-                    const new = registry_file.addOne() catch @panic("Too many -registry flags");
-                    new.* = it.next() orelse @panic("Missing argument for -registry");
-                    new.* = allocator.dupe(u8, new.*) catch @panic("oom");
+                    const path = it.next() orelse @panic("Missing argument for -registry");
+                    registry_file.append(openFile(cwd, io, path, .{ .allow_directory = false })) catch
+                        @panic("Too many -registry flags");
                 },
                 .@"-out" => {
-                    output = it.next() orelse @panic("Missing argument for -out");
-                    output = allocator.dupe(u8, output.?) catch @panic("oom");
+                    const path = it.next() orelse @panic("Missing argument for -out");
+                    output = cwd.createFile(io, path, .{}) catch @panic("Failed to create output file");
+                },
+                .@"-dll" => {
+                    const path = it.next() orelse @panic("Missing argument for -dll");
+                    dll = cwd.createFile(io, path, .{}) catch @panic("Failed to create dll output file");
                 },
             }
         }
     }
 
-    const cwd = std.Io.Dir.cwd();
     var registry: Registry = .init(api, allocator);
     var read_buffer: [4096]u8 = undefined;
     var write_buffer: [4096]u8 = undefined;
@@ -3458,24 +3529,29 @@ pub fn main(init: std.process.Init) void {
         var reader = stdin.reader(init.io, &read_buffer);
         parseFile(&registry, &reader.interface, allocator);
     } else {
-        for (registry_file.constSlice()) |path| {
-            const file = openFile(cwd, io, path, .{ .allow_directory = false });
+        for (registry_file.constSlice()) |file| {
             var reader = file.reader(io, &read_buffer);
             parseFile(&registry, &reader.interface, allocator);
         }
     }
     registry.finishParse();
 
+    if (dll) |file| {
+        var w = file.writer(io, &write_buffer);
+        defer w.flush() catch @panic("Failed to write DLL file");
+        render.renderDll(&registry, &w.interface) catch @panic("Failed to write DLL file");
+    }
+
     const ast = blk: {
         var writer: Writer.Allocating = .init(allocator);
-        render.render(&registry, &writer.writer) catch @panic("oom");
+        render.render(&registry, &writer.writer) catch @panic("Failed to write output file");
         const source = writer.toOwnedSliceSentinel(0) catch @panic("oom");
         const ast = std.zig.Ast.parse(allocator, source, .zig) catch @panic("oom");
         break :blk ast;
     };
 
     const out_file = if (output) |out|
-        cwd.createFile(io, out, .{}) catch @panic("Failed to create output file")
+        out
     else
         std.Io.File.stdout();
 
