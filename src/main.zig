@@ -408,8 +408,8 @@ pub const Registry = struct {
             @"const",
             mutable,
         };
-        const Ptrs = slice_tools.BoundedArray(PtrKind, max_ptr);
-        ptrs: Ptrs = .empty,
+        ptrs: [max_ptr]PtrKind = undefined,
+        ptrs_len: u2 = 0,
         name: []const u8,
     };
     const CType = struct {
@@ -438,19 +438,20 @@ pub const Registry = struct {
                     .amount = .single,
                     .base = .{
                         .name = undefined,
-                        .ptrs = .empty,
                     },
                 },
                 .name = undefined,
                 .comment = null,
             };
+            const ptrs_len = &result.type.base.ptrs_len;
             const ptrs = &result.type.base.ptrs;
 
             var it = xml.childrenIterator();
             const type_node = switch (it.nextNodeOrText(enum { type }) orelse @panic("Failed to find variable type")) {
                 .text => |t| blk: {
                     if (std.mem.find(u8, t, "const ")) |_| {
-                        result.type.base.ptrs.appendAssumeCapacity(.@"const");
+                        ptrs.*[0] = .@"const";
+                        ptrs_len.* = 1;
                     }
                     break :blk it.nextNode("type") orelse @panic("Failed to find variable type");
                 },
@@ -462,14 +463,16 @@ pub const Registry = struct {
                 .text => |t| blk: {
                     var text = t;
                     if (std.mem.findScalar(u8, text, '*')) |i| {
-                        if (ptrs.len == 0) {
-                            ptrs.appendAssumeCapacity(.mutable);
+                        if (ptrs_len.* == 0) {
+                            ptrs.*[0] = .mutable;
+                            ptrs_len.* = 1;
                         }
                         text = text[i + 1 ..];
                     }
                     if (std.mem.findAny(u8, text, "*c")) |i| {
                         const c = text[i];
-                        ptrs.appendAssumeCapacity(if (c == '*') .mutable else .@"const");
+                        ptrs.*[ptrs_len.*] = (if (c == '*') .mutable else .@"const");
+                        ptrs_len.* += 1;
                     }
                     break :blk it.nextNode("name") orelse @panic("Failed to find variable name");
                 },
@@ -802,7 +805,7 @@ pub const Registry = struct {
                 .c_var = .parse(param),
                 .extra = @splat(.{ .optional = true, .len = .@"1" }),
             };
-            if (new.c_var.type.base.ptrs.len != 0) {
+            if (new.c_var.type.base.ptrs_len != 0) {
                 //OVERRIDE
 
                 if (enumFromName(enum { char }, new.c_var.type.base.name)) |e| switch (e) {
@@ -1845,7 +1848,7 @@ const render = struct {
             return .{ .v = .parse(zig_var) };
         }
         pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
-            const ptr_len = self.v.v.c_var.type.base.ptrs.len;
+            const ptr_len = self.v.v.c_var.type.base.ptrs_len;
             if (self.v.v.c_var.type.amount == .array and self.v.v.extra[0].len == .@"null-terminated") {
                 try writer.writeAll("\n/// Null-terminated\n");
             }
@@ -1885,11 +1888,11 @@ const render = struct {
                 try w.print("u{}", .{self.v.c_var.type.amount.bitfield});
                 return;
             }
-            const ptr_len = self.v.c_var.type.base.ptrs.len;
+            const ptr_len = self.v.c_var.type.base.ptrs_len;
             const base_type = self.v.c_var.type.base;
-            const is_anyopaque = base_type.ptrs.len != 0 and std.mem.eql(u8, base_type.name, "void");
+            const is_anyopaque = base_type.ptrs_len != 0 and std.mem.eql(u8, base_type.name, "void");
 
-            for (self.v.extra[0..ptr_len], self.v.c_var.type.base.ptrs.buffer[0..ptr_len]) |extra, ptr| {
+            for (self.v.extra[0..ptr_len], base_type.ptrs[0..ptr_len]) |extra, ptr| {
                 if (extra.optional) {
                     try w.writeByte('?');
                 }
@@ -1928,7 +1931,7 @@ const render = struct {
             //OVERRIDE: Overriding API versions from u32 to our own ApiVersion
             if (enumFromName(enum { apiVersion, pApiVersion }, self.v.c_var.name)) |_| {
                 try w.writeAll("ApiVersion");
-            } else if (self.v.c_var.type.base.ptrs.len != 0 and std.mem.eql(u8, self.v.c_var.type.base.name, "void")) {
+            } else if (self.v.c_var.type.base.ptrs_len != 0 and std.mem.eql(u8, self.v.c_var.type.base.name, "void")) {
                 try w.writeAll("anyopaque");
             } else {
                 const n: GenericTypeName = .parse(self.v.c_var.type.base.name);
@@ -2035,14 +2038,14 @@ const render = struct {
 
         pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
             const base_type = self.v;
-            const is_anyopaque = base_type.ptrs.len != 0 and std.mem.eql(u8, base_type.name, "void");
+            const is_anyopaque = base_type.ptrs_len != 0 and std.mem.eql(u8, base_type.name, "void");
             var ptr_text: []const u8 = "[*c]";
             if (is_anyopaque) {
                 try writer.writeByte('?');
                 ptr_text = "*";
             }
 
-            for (base_type.ptrs.constSlice()) |k| {
+            for (base_type.ptrs[0..base_type.ptrs_len]) |k| {
                 try writer.writeAll(ptr_text);
                 switch (k) {
                     .@"const" => try writer.writeAll("const "),
@@ -2333,8 +2336,8 @@ const render = struct {
                 std.mem.eql(u8, command.ret.name, "VkResult")))) break :blk false;
             if (command.params.len == 0) break :blk false;
             const last = command.params[command.params.len - 1];
-            if (last.c_var.type.base.ptrs.len == 0) break :blk false;
-            if (last.c_var.type.base.ptrs.buffer[0] != .mutable) break :blk false;
+            if (last.c_var.type.base.ptrs_len == 0) break :blk false;
+            if (last.c_var.type.base.ptrs[0] != .mutable) break :blk false;
             if (last.extra[0].optional) break :blk false;
             if (last.extra[0].len != .@"1") break :blk false;
             const n = name.name.name;
@@ -2394,7 +2397,7 @@ const render = struct {
 
             fn isPAllocator(v: Registry.ZigVar) bool {
                 const b = v.c_var.type.base;
-                if (b.ptrs.len != 1) return false;
+                if (b.ptrs_len != 1) return false;
                 return std.mem.eql(u8, b.name, "VkAllocationCallbacks");
             }
 
@@ -2505,7 +2508,7 @@ const render = struct {
         const error_ret: ErrorRet = .{ .name = if (has_error_codes) name.name else null };
         const ret: Ret =
             if (is_create_command) blk: {
-                last_param.c_var.type.base.ptrs.len -= 1;
+                last_param.c_var.type.base.ptrs_len -= 1;
                 break :blk .parseZigVar(last_param);
             } else if (has_success_codes) blk: {
                 break :blk if (only_success_code)
@@ -3614,7 +3617,7 @@ pub fn main(init: std.process.Init) void {
         var reader = stdin.reader(init.io, &read_buffer);
         parseFile(&registry, &reader.interface, allocator);
     } else {
-        for (registry_file.constSlice()) |file| {
+        for (registry_file[0..registry_file_count]) |file| {
             var reader = file.reader(io, &read_buffer);
             parseFile(&registry, &reader.interface, allocator);
         }
