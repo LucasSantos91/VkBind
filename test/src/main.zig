@@ -87,7 +87,7 @@ const Context = struct {
             var len: u32 = props.len;
             p.getPhysicalDeviceQueueFamilyProperties(&len, &props);
             for (props[0..len], 0..) |prop, index| {
-                if (prop.queueFlags.GRAPHICS_BIT) {
+                if (prop.queueFlags.GRAPHICS) {
                     return .{ p, @intCast(index) };
                 }
             }

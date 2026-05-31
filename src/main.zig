@@ -2529,8 +2529,7 @@ const render = struct {
             \\pub fn {[name]f}(
             \\{[params]f}
             \\) {[error_ret]f}{[ret]f} {{
-            \\const this: Command = .{[name]f};
-            \\assertDependencies(this);
+            \\assertDependencies(.{[name]f});
             \\var temp: {[ret]f} = undefined;
             \\maybeUnused(&temp);
             \\{[maybe_temp_ref]f}
@@ -2679,13 +2678,6 @@ const render = struct {
             \\      }
             \\      pub fn initDeviceCommands(load_function: anytype, device: Device) void{
             \\          loader.initDeviceCommands(load_function, device);
-            \\      }
-            \\      pub inline fn justFreakingCastTheThing(value: anytype, comptime Target: type) Target {
-            \\          const V = @TypeOf(value);
-            \\          comptime std.debug.assert(@sizeOf(V) == @sizeOf(Target) and @alignOf(V) == @alignOf(Target));
-            \\          const ptr = &value;
-            \\          const casted: *const Target = @ptrCast(ptr);
-            \\          return casted.*;
             \\      }
             \\      pub fn initDeviceCommandsFromGetInstanceProcAddr(get_instance_proc_addr: anytype, instance: Instance, device: Device) void {
             \\          const com: Command = .getDeviceProcAddr;

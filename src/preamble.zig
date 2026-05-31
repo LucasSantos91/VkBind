@@ -78,3 +78,10 @@ fn LockedEnum(comptime T: type, comptime value: T) type {
 fn LockedInt(comptime T: type, comptime value: T) type {
     return @Enum(T, .exhaustive, &.{std.fmt.comptimePrint("{}", .{value})}, &.{value});
 }
+inline fn justFreakingCastTheThing(value: anytype, comptime Target: type) Target {
+    const V = @TypeOf(value);
+    comptime std.debug.assert(@sizeOf(V) == @sizeOf(Target) and @alignOf(V) == @alignOf(Target));
+    const ptr = &value;
+    const casted: *const Target = @ptrCast(ptr);
+    return casted.*;
+}
