@@ -1,6 +1,6 @@
 const std = @import("std");
 const vk_bind = @import("VkBind");
-const debug_commands: []const vk_bind.raw.Command = &.{ .destroyInstance, .destroyDevice };
+const debug_commands: []const vk_bind.raw.Command = &.{ .destroyInstance, .destroyDevice, .destroyCommandPool };
 const vk = vk_bind.VulkanContext(.{
     .commands = [_]vk_bind.raw.Command{
         .createInstance,
@@ -8,6 +8,7 @@ const vk = vk_bind.VulkanContext(.{
         .getPhysicalDeviceFeatures,
         .enumeratePhysicalDevices,
         .getPhysicalDeviceQueueFamilyProperties,
+        .createCommandPool,
     } ++ debug_commands,
     .extensions = &.{},
 });
@@ -24,11 +25,7 @@ const Context = struct {
     }
     const Temp = struct {
         instance: vk.Instance,
-
-        pub fn deinit(self: *@This()) void {
-            self.instance.destroyInstance();
-            self.* = undefined;
-        }
+        command_pool: vk.CommandPool,
     };
 
     temp: if (is_safe) Temp else void,
@@ -61,18 +58,24 @@ const Context = struct {
         self.device = phys_device.createDevice(&device_create_info) catch |e| panic(e, "Failed to create device");
         vk.initDeviceCommandsFromGetInstanceProcAddr(inst_proc_addr, instance, self.device);
 
+        const command_pool = self.device.createCommandPool(&.{
+            .queueFamilyIndex = family_index,
+            .flags = .{ .RESET_COMMAND_BUFFER = true },
+        }) catch |e| panic(e, "Failed to create command pool");
+
         if (comptime is_safe) {
             self.temp = .{
                 .instance = instance,
+                .command_pool = command_pool,
             };
         }
         return self;
     }
     pub fn deinit(self: *@This()) void {
+        if (comptime is_safe) self.device.destroyCommandPool(self.temp.command_pool);
         self.device.destroyDevice();
-        if (comptime is_safe) {
-            self.temp.deinit();
-        }
+        if (comptime is_safe) self.temp.instance.destroyInstance();
+
         self.* = undefined;
     }
     pub fn run(self: *@This()) !void {

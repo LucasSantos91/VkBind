@@ -3546,7 +3546,8 @@ pub fn main(init: std.process.Init) void {
     const io = init.io;
 
     var api: Registry.Api = .vulkan;
-    var registry_file: slice_tools.BoundedArray(Io.File, 2) = .empty;
+    var registry_file: [2]Io.File = undefined;
+    var registry_file_count: u2 = 0;
     var output: ?Io.File = null;
     var dll: ?Io.File = null;
     var debug = false;
@@ -3585,8 +3586,9 @@ pub fn main(init: std.process.Init) void {
                 },
                 .@"-registry" => {
                     const path = it.next() orelse @panic("Missing argument for -registry");
-                    registry_file.append(openFile(cwd, io, path, .{ .allow_directory = false })) catch
-                        @panic("Too many -registry flags");
+                    if (registry_file_count == 2) @panic("Too many -registry flags");
+                    registry_file[registry_file_count] = openFile(cwd, io, path, .{ .allow_directory = false });
+                    registry_file_count += 1;
                 },
                 .@"-out" => {
                     const path = it.next() orelse @panic("Missing argument for -out");
