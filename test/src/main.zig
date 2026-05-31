@@ -81,7 +81,7 @@ const Context = struct {
     fn selectPhysicalDevice(instance: vk.Instance) struct { vk.PhysicalDevice, u4 } {
         var physical_devices: [16]vk.PhysicalDevice = undefined;
         var count: u32 = physical_devices.len;
-        _ = instance.enumeratePhysicalDevices(&count, &physical_devices) catch @panic("Failed to enumerate physical devices");
+        _ = instance.enumeratePhysicalDevices(&count, &physical_devices) catch |e| panic(e, "Failed to enumerate physical devices");
         for (physical_devices[0..count]) |p| {
             var props: [16]vk.QueueFamilyProperties = undefined;
             var len: u32 = props.len;
@@ -99,6 +99,6 @@ const Context = struct {
 
 pub fn main() void {
     var context: Context = .init();
+    defer context.deinit();
     try context.run();
-    context.deinit();
 }

@@ -55,7 +55,7 @@ pub fn FlagBitsMixin(comptime Flags: type, comptime FlagBits: type) type {
     };
 }
 
-fn nullValue(comptime T: type) T {
+inline fn nullValue(comptime T: type) T {
     return switch (@typeInfo(T)) {
         .pointer, .@"union" => undefined,
         else => std.mem.zeroes(T),
@@ -64,9 +64,12 @@ fn nullValue(comptime T: type) T {
 
 inline fn maybeUnused(_: anytype) void {}
 pub fn isDispatchableHandle(comptime T: type) bool {
-    const info = @typeInfo(T);
-    if (info != .@"enum") return false;
-    return info.@"enum".tag_type == usize;
+    const result = comptime blk: {
+        const info = @typeInfo(T);
+        if (info != .@"enum") break :blk false;
+        break :blk info.@"enum".tag_type == usize;
+    };
+    return result;
 }
 fn LockedEnum(comptime T: type, comptime value: T) type {
     return @Enum(@typeInfo(T).@"enum".tag_type, .exhaustive, &.{@tagName(value)}, &.{@intFromEnum(value)});
@@ -74,12 +77,4 @@ fn LockedEnum(comptime T: type, comptime value: T) type {
 
 fn LockedInt(comptime T: type, comptime value: T) type {
     return @Enum(T, .exhaustive, &.{std.fmt.comptimePrint("{}", .{value})}, &.{value});
-}
-
-pub inline fn justFreakingCastTheThing(value: anytype, comptime Target: type) Target {
-    const V = @TypeOf(value);
-    comptime std.debug.assert(@sizeOf(V) == @sizeOf(Target) and @alignOf(V) == @alignOf(Target));
-    const ptr = &value;
-    const casted: *const Target = @ptrCast(ptr);
-    return casted.*;
 }

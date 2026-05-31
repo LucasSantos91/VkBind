@@ -1415,6 +1415,24 @@ const render = struct {
             try writer.print("@\"{s}\"", .{self.name});
         }
     };
+    const BitName = struct {
+        enum_name: EnumName,
+
+        pub fn parse(entry_name: []const u8, enum_name: TypeName) @This() {
+            return .{
+                .enum_name = .parse(entry_name, enum_name),
+            };
+        }
+        pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+            const bit_suffix = "_BIT";
+            const n = self.enum_name.name;
+            const first: []const u8, const second: []const u8 = if (std.mem.findLast(u8, n, bit_suffix)) |i|
+                .{ n[0..i], n[i + bit_suffix.len ..] }
+            else
+                .{ n, &.{} };
+            try writer.print("@\"{s}{s}\"", .{ first, second });
+        }
+    };
     fn printFlags(registry: *const Registry, name: []const u8, e_c: Registry.TypeCommon, writer: *Writer) Writer.Error!void {
         const mixins_funcs: []const []const u8 = &.{ "toInt", "fromInt", "merge", "intersection", "negation", "difference", "toBit", "fromBit", "set", "unset" };
 
@@ -1455,7 +1473,7 @@ const render = struct {
                 for (flag_bits.bits) |b| {
                     const bit_comment: Comment = .parse(b.comment);
                     const bit_provider: Provider = .{ .p = if (b.extension_bit) b.providers else .{} };
-                    const bit_name: EnumName = .parse(b.name, self.flags_name);
+                    const bit_name: BitName = .parse(b.name, self.flags_name);
                     const diff = b.bitpos - last_bitpos;
                     const reserved: Reserved = .{ .diff = diff, .bitpos = b.bitpos };
                     try w.print(
@@ -1483,7 +1501,7 @@ const render = struct {
                 for (flag_bits.aggregates) |agg| {
                     const bit_comment: Comment = .parse(agg.comment);
                     const bit_provider: Provider = .{ .p = agg.providers };
-                    const bit_name: EnumName = .parse(agg.name, self.flags_name);
+                    const bit_name: BitName = .parse(agg.name, self.flags_name);
                     try w.print(
                         \\{[comment]f}
                         \\{[provider]f}
@@ -1564,7 +1582,7 @@ const render = struct {
 
             pub fn format(self: @This(), w: *Writer) Writer.Error!void {
                 for (self.bits.bits) |b| {
-                    const name: EnumName = .parse(b.name, self.enum_name);
+                    const name: BitName = .parse(b.name, self.enum_name);
                     const c: Comment = .parse(b.comment);
                     const p: Provider = .{ .p = if (b.extension_bit) b.providers else .{} };
                     try w.print(
@@ -2661,6 +2679,13 @@ const render = struct {
             \\      }
             \\      pub fn initDeviceCommands(load_function: anytype, device: Device) void{
             \\          loader.initDeviceCommands(load_function, device);
+            \\      }
+            \\      pub inline fn justFreakingCastTheThing(value: anytype, comptime Target: type) Target {
+            \\          const V = @TypeOf(value);
+            \\          comptime std.debug.assert(@sizeOf(V) == @sizeOf(Target) and @alignOf(V) == @alignOf(Target));
+            \\          const ptr = &value;
+            \\          const casted: *const Target = @ptrCast(ptr);
+            \\          return casted.*;
             \\      }
             \\      pub fn initDeviceCommandsFromGetInstanceProcAddr(get_instance_proc_addr: anytype, instance: Instance, device: Device) void {
             \\          const com: Command = .getDeviceProcAddr;
