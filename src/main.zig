@@ -2417,10 +2417,7 @@ const render = struct {
             params: []const Registry.ZigVar,
 
             pub fn format(self: @This(), w: *Writer) Writer.Error!void {
-                for (self.params, 0..) |p, index| {
-                    try w.writeAll(
-                        \\justFreakingCastTheThing(
-                    );
+                for (self.params) |p| {
                     if (VCParams.isPAllocator(p)) {
                         try w.writeAll("getAllocator()");
                     } else {
@@ -2428,9 +2425,7 @@ const render = struct {
                             \\@"{s}"
                         , .{p.c_var.name});
                     }
-                    try w.print(
-                        \\, this.GetParamType({})),
-                    , .{index});
+                    try w.writeByte(',');
                 }
             }
         };
@@ -2619,16 +2614,20 @@ const render = struct {
             \\pub fn VulkanContext(comptime config_: VulkanContextConfig) type{
             \\  return struct{
             \\      pub const config = config_;
-            \\      pub const Command = raw.Command;
             \\      pub const Extension = raw.Extension;
             \\      comptime{ 
             \\          if(Extension.missingDependenciesFor(config.extensions, config.apiVersion)) |e|
             \\          @panic("Missing dependencies for extension " ++ e.name.name);
             \\      }
             \\      pub const extensions = Extension.getFilteredVkNames(config.extensions);
+            \\      pub const loaded_commands = blk:{
+            \\          var res: [config.commands.len]Command = undefined;
+            \\          for(&res, config.commands) |*d, s| d.* = @enumFromInt(@intFromEnum(s));
+            \\          break :blk res;
+            \\      };
             \\      var runtime_allocator: switch(config.allocator){
             \\          .compile_time => void,
-            \\          .run_time =>?*const raw.AllocationCallbacks,
+            \\          .run_time =>?*const AllocationCallbacks,
             \\      } = undefined;
             \\      pub fn initAllocator(pAllocator: ?*const AllocationCallbacks) void{
             \\          runtime_allocator = pAllocator;
@@ -2639,12 +2638,12 @@ const render = struct {
             \\              .run_time => runtime_allocator,
             \\          };
             \\      }
-            \\      pub const ThisLoader = raw.Loader(switch(config.globals){
+            \\      pub const ThisLoader = Loader(switch(config.globals){
             \\          .load_time => blk:{ 
-            \\               const filtered = raw.Command.filter(config.commands);
+            \\              const filtered = Command.filter(&loaded_commands);
             \\              break :blk filtered.instance ++ filtered.device;
             \\          },
-            \\          .run_time => config.commands,
+            \\          .run_time => &loaded_commands,
             \\      });
             \\      pub var loader: ThisLoader = undefined;
             \\      
@@ -2655,23 +2654,23 @@ const render = struct {
             \\          }
             \\      }
             \\      pub fn getSpecializedGetInstanceProcAddr(instance: Instance) ?*const fn(Instance, [*:0]const u8) callconv(vulkan_api) PfnVoidFunction{
-            \\          return @ptrCast(raw.extern_commands.getInstanceProcAddr(justFreakingCastTheThing(instance, raw.Instance),Command.getInstanceProcAddr.getVkName()));
+            \\          return @ptrCast(extern_commands.getInstanceProcAddr(instance,Command.getInstanceProcAddr.getVkName()));
             \\      }
             \\      pub fn initInstanceCommands(load_function: anytype, instance: Instance) void{
-            \\          loader.initInstanceCommands(load_function, justFreakingCastTheThing(instance, raw.Instance));
+            \\          loader.initInstanceCommands(load_function, instance);
             \\      }
             \\      pub fn initDeviceCommands(load_function: anytype, device: Device) void{
-            \\          loader.initDeviceCommands(load_function, justFreakingCastTheThing(device, raw.Device));
+            \\          loader.initDeviceCommands(load_function, device);
             \\      }
             \\      pub fn initDeviceCommandsFromGetInstanceProcAddr(get_instance_proc_addr: anytype, instance: Instance, device: Device) void {
             \\          const com: Command = .getDeviceProcAddr;
             \\          const raw_get_device_proc_addr: com.GetPtrType() = @ptrCast(get_instance_proc_addr(instance, com.getVkName()));
-            \\          const get_device_proc_addr: com.GetPtrType() = @ptrCast(raw_get_device_proc_addr.?(justFreakingCastTheThing(device, raw.Device), com.getVkName()));
-            \\          loader.initDeviceCommands(get_device_proc_addr.?, justFreakingCastTheThing(device, raw.Device));
+            \\          const get_device_proc_addr: com.GetPtrType() = @ptrCast(raw_get_device_proc_addr.?(device, com.getVkName()));
+            \\          loader.initDeviceCommands(get_device_proc_addr.?, justFreakingCastTheThing(device, Device));
             \\      }
-            \\      fn assertDependencies(comptime cmd: raw.Command) void{
+            \\      fn assertDependencies(comptime cmd: Command) void{
             \\          comptime{
-            \\              const provided_extensions: raw.CommandDependencyRequirements = .{
+            \\              const provided_extensions: CommandDependencyRequirements = .{
             \\                  .version = config.apiVersion,
             \\                  .extensions = config.extensions,
             \\              };
@@ -2723,12 +2722,13 @@ const render = struct {
             }
         }
 
+        try writer.writeAll("pub const globals = struct{");
         var it = registry.commands.iterator();
         while (it.next()) |entry| {
             if (!isGlobalCommand(entry.value_ptr.*, registry)) continue;
             const global_loader =
                 \\switch(comptime config.globals){
-                \\  .load_time => raw.extern_commands,
+                \\  .load_time => extern_commands,
                 \\  .run_time => loader,
                 \\}
             ;
@@ -2739,6 +2739,7 @@ const render = struct {
                 writer,
             );
         }
+        try writer.writeAll("};");
 
         var types_it = registry.types.iterator();
         while (types_it.next()) |t| {
@@ -2764,6 +2765,8 @@ const render = struct {
             }
             try writer.writeAll("};");
         }
+
+        try printCommands(registry, writer);
         try writer.writeAll("};}");
     }
 
@@ -2980,7 +2983,7 @@ const render = struct {
             \\  }
             \\};
         );
-        try printExternGlobalFunctions(registry, writer);
+        try printExternFunctions(registry, writer);
         try printCommandGroup(registry, writer);
     }
 
@@ -3027,7 +3030,7 @@ const render = struct {
             try writer.writeAll(self.name);
         }
     };
-    fn printExternGlobalFunctions(registry: *const Registry, writer: *Writer) Writer.Error!void {
+    fn printExternFunctions(registry: *const Registry, writer: *Writer) Writer.Error!void {
         try writer.writeAll(
             \\
             \\/// Provides commands as load-time loaded functions.
@@ -3298,10 +3301,10 @@ const render = struct {
                 try w.print(
                     \\{[provider]f}
                     \\pub fn {[command_name]f}(
-                    \\  loader: *const @This(),
+                    \\  self: *const @This(),
                     \\  {[params]f}
                     \\) {[ret]f}{{
-                    \\return loader.ptrs.{[command_name]f}.?(
+                    \\return self.ptrs.{[command_name]f}.?(
                     \\{[param_names]f}
                     \\);
                     \\}}
@@ -3448,28 +3451,28 @@ const render = struct {
             \\              else => @compileError("loader function is incompatible"),
             \\          };
             \\      }
-            \\      pub fn initGlobalCommands(self: *@This(), loader: anytype) void{
+            \\      pub fn initGlobalCommands(self: *@This(), load_function: anytype) void{
             \\          const ptrs = self.getPtrs(0, global_count);
             \\          const names = comptime getNames(0, global_count);
-            \\          const Param = FirstParam(@TypeOf(loader));
+            \\          const Param = FirstParam(@TypeOf(load_function));
             \\          for(ptrs, names) |*p, name|{
-            \\              p.* = loader(justFreakingCastTheThing(Instance.null_handle, Param), name);
+            \\              p.* = load_function(justFreakingCastTheThing(Instance.null_handle, Param), name);
             \\          }
             \\      }
-            \\      pub fn initInstanceCommands(self: *@This(), loader: anytype, instance: Instance) void{
+            \\      pub fn initInstanceCommands(self: *@This(), load_function: anytype, instance: Instance) void{
             \\          const ptrs = self.getPtrs(global_count, instance_count);
             \\          const names = comptime getNames(global_count, instance_count);
-            \\          const Param = FirstParam(@TypeOf(loader));
+            \\          const Param = FirstParam(@TypeOf(load_function));
             \\          for(ptrs, names) |*p, name|{
-            \\              p.* = loader(justFreakingCastTheThing(instance, Param), name);
+            \\              p.* = load_function(justFreakingCastTheThing(instance, Param), name);
             \\          }
             \\      }
-            \\      pub fn initDeviceCommands(self: *@This(), loader: anytype, device: Device) void{
+            \\      pub fn initDeviceCommands(self: *@This(), load_function: anytype, device: Device) void{
             \\          const ptrs = self.getPtrs(global_count + instance_count, device_count);
             \\          const names = getNames(global_count + instance_count, device_count);
-            \\          const Param = FirstParam(@TypeOf(loader));
+            \\          const Param = FirstParam(@TypeOf(load_function));
             \\          for(ptrs, names) |*p, name|{
-            \\              p.* = loader(justFreakingCastTheThing(device, Param), name);
+            \\              p.* = load_function(justFreakingCastTheThing(device, Param), name);
             \\          }
             \\      }
         ;

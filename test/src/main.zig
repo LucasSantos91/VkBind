@@ -40,7 +40,7 @@ const Context = struct {
             .enabledExtensionCount = vk.extensions.device.len,
             .ppEnabledExtensionNames = vk.extensions.device.ptr,
         };
-        const instance = vk.createInstance(&instance_create_info) catch |e| panic(e, "Failed to create instance");
+        const instance = vk.globals.createInstance(&instance_create_info) catch |e| panic(e, "Failed to create instance");
         const inst_proc_addr = vk.getSpecializedGetInstanceProcAddr(instance).?;
         vk.initInstanceCommands(inst_proc_addr, instance);
         const phys_device, const family_index = selectPhysicalDevice(instance);

@@ -5,7 +5,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const registry = b.option(std.Build.LazyPath, "registry", "Path to vk.xml");
     const video = b.option(std.Build.LazyPath, "video", "Path to video.xml");
-    const implib = b.option(bool, "implib", "(Windows only) Whether to link the VkBind module with a generated import library") orelse
+    const implib = b.option(bool, "implib", "(default true)(Windows only) Whether to link the VkBind module with a generated import library") orelse
         (target.result.os.tag == .windows);
     const slice_tools_dep = b.dependency("slice_tools", .{});
 
