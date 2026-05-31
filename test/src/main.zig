@@ -43,7 +43,7 @@ const Context = struct {
         const instance = vk.globals.createInstance(&instance_create_info) catch |e| panic(e, "Failed to create instance");
         const inst_proc_addr = vk.getSpecializedGetInstanceProcAddr(instance).?;
         vk.initInstanceCommands(inst_proc_addr, instance);
-        const phys_device, const family_index = selectPhysicalDevice(instance);
+        const phys_device, const family_index = selectPhysicalDeviceAndQueueFamily(instance);
 
         const queue_create_info: [1]vk.DeviceQueueCreateInfo = .{vk.DeviceQueueCreateInfo{
             .queueFamilyIndex = family_index,
@@ -78,7 +78,7 @@ const Context = struct {
     pub fn run(self: *@This()) !void {
         _ = self;
     }
-    fn selectPhysicalDevice(instance: vk.Instance) struct { vk.PhysicalDevice, u4 } {
+    fn selectPhysicalDeviceAndQueueFamily(instance: vk.Instance) struct { vk.PhysicalDevice, u4 } {
         var physical_devices: [16]vk.PhysicalDevice = undefined;
         var count: u32 = physical_devices.len;
         _ = instance.enumeratePhysicalDevices(&count, &physical_devices) catch |e| panic(e, "Failed to enumerate physical devices");
