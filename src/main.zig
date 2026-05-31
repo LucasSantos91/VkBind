@@ -2833,13 +2833,16 @@ const render = struct {
         const extension_dependencies: ExtensionDependencies = .{ .list = registry.extensions };
         const conv_funcs =
             \\pub fn getVkName(comptime self: @This()) [*:0]const u8{
-            \\return "VK_" ++ @tagName(self);
+            \\  const result = comptime "VK_" ++ @tagName(self);
+            \\  return result;
             \\}
             \\pub fn getVkNames(comptime extensions: []const @This()) []const [*:0]const u8{
-            \\var result: [extensions.len][*:0]const u8 = undefined;
-            \\for(&result, extensions) |*r, e| r.* = e.getVkName();
-            \\const final = result;
-            \\return &final;
+            \\  const result = comptime blk: {
+            \\      var result: [extensions.len][*:0]const u8 = undefined;
+            \\      for(&result, extensions) |*r, e| r.* = e.getVkName();
+            \\      break :blk result;
+            \\  };
+            \\  return &result;
             \\}
             \\pub fn filter(comptime extensions: []const @This(), comptime @"type": Type) []const @This(){
             \\var result: [extensions.len]@This() = undefined;
@@ -3337,17 +3340,20 @@ const render = struct {
             \\return @typeInfo(self.getType()).@"fn".params[param_index].type.?;
             \\}
             \\pub fn getVkName(comptime self: @This()) [*:0]const u8{
-            \\  const t = @tagName(self);
-            \\  const c: [1]u8 = .{std.ascii.toUpper(t[0])};
-            \\  return "vk" ++ c ++ t[1..];
+            \\  const result = comptime blk:{
+            \\      const t = @tagName(self);
+            \\      const c: [1]u8 = .{std.ascii.toUpper(t[0])};
+            \\      break :blk "vk" ++ c ++ t[1..];
+            \\  };
+            \\  return result;
             \\}
             \\pub fn getVkNames(comptime funcs: []const @This()) []const []const u8{
-            \\  var result: [funcs.len][*:0]const u8 = undefined;
-            \\  for (funcs, &result) |f, *r| {
-            \\      r.* = f.getVkName();
-            \\  }
-            \\  const final = result;
-            \\  return &final;
+            \\  const result = comptime blk: {
+            \\      var result: [funcs.len][*:0]const u8 = undefined;
+            \\      for (funcs, &result) |f, *r| r.* = f.getVkName();
+            \\      break :blk result;
+            \\  };
+            \\  return &result;
             \\}
             \\pub fn isSatisfied(command: @This(), provided: CommandDependencyRequirements) bool{
             \\    return provided.satifies(command.requirements());

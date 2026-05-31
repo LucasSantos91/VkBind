@@ -67,7 +67,7 @@ const Context = struct {
 
         {
             const com: vk.Command = .getDeviceProcAddr;
-            const name = comptime com.getVkName();
+            const name = com.getVkName();
             const first: com.getPtrType() = @ptrCast(instance.getInstanceProcAddr(name));
             const load: com.getPtrType() = @ptrCast(first.?(@enumFromInt(@intFromEnum(self.device)), name));
             vk.initDeviceCommands(load.?, self.device);
