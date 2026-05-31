@@ -23,7 +23,7 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
     const run = b.addRunArtifact(exe);
-    if (b.args) |args| for (args) |a| run.addArg(a);
+    run.addPassthruArgs();
     const run_step = b.step("run", "runs the program");
     run_step.dependOn(&run.step);
 

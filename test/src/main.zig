@@ -64,8 +64,14 @@ const Context = struct {
             .pEnabledFeatures = &features,
         };
         self.device = phys_device.createDevice(&device_create_info) catch |e| panic(e, "Failed to create device");
-        const load = self.device.getDeviceProcAddr(vk.Command.getDeviceProcAddr.getVkName());
-        vk.initDeviceCommands(load, self.device);
+
+        {
+            const com: vk.Command = .getDeviceProcAddr;
+            const name = comptime com.getVkName();
+            const first: com.getPtrType() = @ptrCast(instance.getInstanceProcAddr(name));
+            const load: com.getPtrType() = @ptrCast(first.?(@enumFromInt(@intFromEnum(self.device)), name));
+            vk.initDeviceCommands(load.?, self.device);
+        }
 
         if (comptime is_safe) {
             self.temp = .{
