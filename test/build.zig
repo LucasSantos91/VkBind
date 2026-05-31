@@ -8,13 +8,18 @@ pub fn build(b: *std.Build) void {
         .registry = vk_docs.path("xml/vk.xml"),
         .video = vk_docs.path("xml/video.xml"),
     });
+    const rgfw_dep = b.dependency("RGFW", .{});
+
     const exe = b.addExecutable(.{
         .name = "triangle",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .optimize = optimize,
             .target = target,
-            .imports = &.{.{ .name = "VkBind", .module = vk_bind.module("VkBind") }},
+            .imports = &.{
+                .{ .name = "VkBind", .module = vk_bind.module("VkBind") },
+                .{ .name = "RGFW", .module = rgfw_dep.module("RGFW") },
+            },
         }),
     });
     b.installArtifact(exe);

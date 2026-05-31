@@ -9,6 +9,7 @@ const vk = vk_bind.VulkanContext(.{
         .enumeratePhysicalDevices,
         .getPhysicalDeviceQueueFamilyProperties,
         .createCommandPool,
+        .allocateCommandBuffers,
     } ++ debug_commands,
     .extensions = &.{},
 });
@@ -27,9 +28,19 @@ const Context = struct {
         instance: vk.Instance,
         command_pool: vk.CommandPool,
     };
+    const command_buffer_count = 64;
+    const CommandBuffer = struct {};
+    const CommandBuffers = struct {
+        command_buffers: [command_buffer_count]vk.CommandBuffer,
+
+        pub fn populate_buffers(self: *@This(), buffers: [command_buffer_count]vk.CommandBuffer) void {
+            self.command_buffers = buffers;
+        }
+    };
 
     temp: if (is_safe) Temp else void,
     device: vk.Device,
+    command_buffers: CommandBuffers,
 
     pub fn init() @This() {
         var self: @This() = undefined;
@@ -62,6 +73,14 @@ const Context = struct {
             .queueFamilyIndex = family_index,
             .flags = .{ .RESET_COMMAND_BUFFER = true },
         }) catch |e| panic(e, "Failed to create command pool");
+
+        var buffer: [command_buffer_count]vk.CommandBuffer = undefined;
+        self.device.allocateCommandBuffers(&.{
+            .commandPool = command_pool,
+            .level = .PRIMARY,
+            .commandBufferCount = command_buffer_count,
+        }, &buffer) catch |e| panic(e, "Failed to allocate command buffers");
+        self.command_buffers.populate_buffers(buffer);
 
         if (comptime is_safe) {
             self.temp = .{

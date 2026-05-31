@@ -10,5 +10,9 @@
             .url = "https://github.com/KhronosGroup/Vulkan-Docs/archive/e2843a23d3c5a2c5e93e27d3b0fcd2c1087b0b64.zip",
             .hash = "N-V-__8AAAZquQEXic7B2h2BKcC6HF_LAJxiSolGIEvmP2JT",
         },
+        .RGFW = .{
+            .url = "https://github.com/LucasSantos91/RGFW/archive/ddd597ea6e3c477bd468f31ff778036f3991d3ed.zip",
+            .hash = "RGFW-0.0.1-Ai0pkzwIAABcI0mEGK_lLQNrae9h95PCa3Npz7Vyr1fN",
+        },
     },
 }
