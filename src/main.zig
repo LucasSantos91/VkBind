@@ -2429,7 +2429,7 @@ const render = struct {
                         , .{p.c_var.name});
                     }
                     try w.print(
-                        \\, this.getParamType({})),
+                        \\, this.GetParamType({})),
                     , .{index});
                 }
             }
@@ -3034,7 +3034,7 @@ const render = struct {
             try writer.print(
                 \\extern "vulkan-1" fn {[raw_name]s}(
                 \\{[params]f}
-                \\) callconv(vulkan_api) Command.{[name]f}.getReturnType();
+                \\) callconv(vulkan_api) Command.{[name]f}.GetReturnType();
                 \\{[provider]f}
                 \\pub const {[name]f} = {[raw_name]s};
             , .{
@@ -3325,19 +3325,19 @@ const render = struct {
         const requirements: Requirements = .{ .commands = it };
         const declaration_group: CommandLoaderDeclarationGroup = .{ .commands = it };
         const conv_functions =
-            \\pub fn getType(comptime self: @This()) type{
+            \\pub fn GetType(comptime self: @This()) type{
             \\const t = @tagName(self);
             \\const c: [1]u8 = .{std.ascii.toUpper(t[0])};
             \\return @field(@This(), c ++ t[1..]);
             \\}
             \\pub fn GetPtrType(comptime self: @This()) type{
-            \\return ?*const self.getType();
+            \\return ?*const self.GetType();
             \\}
-            \\pub fn getReturnType(comptime self: @This()) type{
-            \\return @typeInfo(self.getType()).@"fn".return_type.?;
+            \\pub fn GetReturnType(comptime self: @This()) type{
+            \\return @typeInfo(self.GetType()).@"fn".return_type.?;
             \\}
-            \\pub fn getParamType(comptime self: @This(), comptime param_index: usize) type{
-            \\return @typeInfo(self.getType()).@"fn".params[param_index].type.?;
+            \\pub fn GetParamType(comptime self: @This(), comptime param_index: usize) type{
+            \\return @typeInfo(self.GetType()).@"fn".params[param_index].type.?;
             \\}
             \\pub fn getVkName(comptime self: @This()) [*:0]const u8{
             \\  const result = comptime blk:{
@@ -3360,7 +3360,7 @@ const render = struct {
             \\}
             \\pub const LoaderType = enum{ global, instance, device };
             \\pub fn loaderType(self: @This()) LoaderType{
-            \\    const Type = self.getType();
+            \\    const Type = self.GetType();
             \\    const info = @typeInfo(Type).@"fn";
             \\    if(info.params.len == 0) return .global;
             \\    const first = info.params[0];

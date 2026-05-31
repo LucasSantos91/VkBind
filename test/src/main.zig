@@ -44,7 +44,10 @@ const Context = struct {
         const inst_proc_addr = blk: {
             const com = vk.Command.getInstanceProcAddr;
             const name = com.getVkName();
-            const inst_proc_addr: com.GetPtrType() = @ptrCast(vk_bind.raw.extern_commands.getInstanceProcAddr(@enumFromInt(@intFromEnum(instance)), name));
+            const inst_proc_addr: com.GetPtrType() = @ptrCast(vk_bind.raw.extern_commands.getInstanceProcAddr(
+                vk_bind.justFreakingCastTheThing(instance, vk_bind.raw.Instance),
+                name,
+            ));
             vk.initInstanceCommands(inst_proc_addr.?, instance);
             break :blk inst_proc_addr.?;
         };
@@ -68,8 +71,8 @@ const Context = struct {
         {
             const com: vk.Command = .getDeviceProcAddr;
             const name = com.getVkName();
-            const first: com.GetPtrType() = @ptrCast(inst_proc_addr(@enumFromInt(@intFromEnum(instance)), name));
-            const load: com.GetPtrType() = @ptrCast(first.?(@enumFromInt(@intFromEnum(self.device)), name));
+            const first: com.GetPtrType() = @ptrCast(inst_proc_addr(vk_bind.justFreakingCastTheThing(instance, vk_bind.raw.Instance), name) orelse @panic("Failed to find getDeviceProcAddr"));
+            const load: com.GetPtrType() = @ptrCast(first.?(vk_bind.justFreakingCastTheThing(self.device, vk_bind.raw.Device), name) orelse @panic("Failed to find getDeviceProcAddr"));
             vk.initDeviceCommands(load.?, self.device);
         }
 
