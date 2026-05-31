@@ -7,15 +7,11 @@ pub fn build(b: *std.Build) void {
     const video = b.option(std.Build.LazyPath, "video", "Path to video.xml");
     const implib = b.option(bool, "implib", "(default true)(Windows only) Whether to link the VkBind module with a generated import library") orelse
         (target.result.os.tag == .windows);
-    const slice_tools_dep = b.dependency("slice_tools", .{});
 
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{
-            .{ .name = "slice_tools", .module = slice_tools_dep.module("slice_tools") },
-        },
     });
     const exe = b.addExecutable(.{
         .name = "VkBind",

@@ -6,7 +6,5 @@
         "src/",
     },
     .fingerprint = 0x424d8f64a649bfc6,
-    .dependencies = .{
-        .slice_tools = .{ .path = "dependencies/slice_tools" },
-    },
+    .dependencies = .{},
 }

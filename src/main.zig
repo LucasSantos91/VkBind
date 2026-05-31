@@ -5,8 +5,8 @@ const Reader = Io.Reader;
 const Writer = Io.Writer;
 const assert = std.debug.assert;
 const panic = std.debug.panic;
-const slice_tools = @import("slice_tools");
-const enumFromName = slice_tools.enums.fromName;
+const enumFromName = std.meta.stringToEnum;
+const concat = std.mem.concat;
 
 fn ShortMap(comptime Key: type, comptime Value: type, comptime Eql: type) type {
     return struct {
@@ -18,7 +18,7 @@ fn ShortMap(comptime Key: type, comptime Value: type, comptime Eql: type) type {
         eql: Eql,
 
         pub fn add(self: *@This(), kv: KeyValuePair, allocator: Allocator) Allocator.Error!void {
-            self.kv = try slice_tools.allocated.concat(KeyValuePair, self.kv, &.{kv}, allocator);
+            self.kv = try concat(allocator, KeyValuePair, &.{ self.kv, &.{kv} });
         }
         pub fn get(self: @This(), key: Key) ?Value {
             for (self.kv) |*this| {
@@ -605,7 +605,7 @@ pub const Registry = struct {
             self.version = version;
         }
         pub fn addExtension(self: *@This(), extension: ExtensionName, allocator: Allocator) void {
-            self.extensions = slice_tools.allocated.concat(ExtensionName, @constCast(self.extensions), &.{extension}, allocator) catch @panic("oom");
+            self.extensions = concat(allocator, ExtensionName, &.{ @constCast(self.extensions), &.{extension} }) catch @panic("oom");
         }
         pub const Provider = union(enum) {
             version: VkVersionName,
@@ -1085,7 +1085,7 @@ pub const Registry = struct {
             const new: VkVersion = .{
                 .name = version,
             };
-            self.versions = slice_tools.allocated.concat(VkVersion, @constCast(self.versions), &.{new}, self.allocator) catch @panic("oom");
+            self.versions = concat(self.allocator, VkVersion, &.{ @constCast(self.versions), &.{new} }) catch @panic("oom");
         }
         self.parseVkRequires(xml, .parseVersion(version), null);
     }
@@ -1184,7 +1184,7 @@ pub const Registry = struct {
                             .comment = comment,
                             .providers = provider.toProviders(self.allocator),
                         };
-                        en.aliases = slice_tools.allocated.concat(Enum.Alias, @constCast(en.aliases), &.{new_alias}, self.allocator) catch @panic("oom");
+                        en.aliases = concat(self.allocator, Enum.Alias, &.{ @constCast(en.aliases), &.{new_alias} }) catch @panic("oom");
                     }
                     return;
                 }
@@ -1211,7 +1211,7 @@ pub const Registry = struct {
                     .providers = provider.toProviders(self.allocator),
                     .extension_value = true,
                 };
-                en.values = slice_tools.allocated.concat(Enum.Value, @constCast(en.values), &.{new}, self.allocator) catch @panic("oom");
+                en.values = concat(self.allocator, Enum.Value, &.{ @constCast(en.values), &.{new} }) catch @panic("oom");
             },
             .flag_bits => |*b| {
                 if (xml.attr.get("alias")) |alias| {
@@ -1227,7 +1227,7 @@ pub const Registry = struct {
                             .comment = comment,
                             .providers = provider.toProviders(self.allocator),
                         };
-                        b.bit_aliases = slice_tools.allocated.concat(FlagBits.BitAlias, @constCast(b.bit_aliases), &.{new_alias}, self.allocator) catch @panic("oom");
+                        b.bit_aliases = concat(self.allocator, FlagBits.BitAlias, &.{ @constCast(b.bit_aliases), &.{new_alias} }) catch @panic("oom");
                     }
                     inner: for (b.bits) |*a| {
                         if (std.mem.eql(u8, a.name, alias)) {
@@ -1253,7 +1253,7 @@ pub const Registry = struct {
                         .extension_bit = true,
                     };
 
-                    b.bits = slice_tools.allocated.concat(FlagBits.Bit, @constCast(b.bits), &.{new_bit}, self.allocator) catch @panic("oom");
+                    b.bits = concat(self.allocator, FlagBits.Bit, &.{ @constCast(b.bits), &.{new_bit} }) catch @panic("oom");
                 } else if (xml.attr.get("value")) |value_text| {
                     for (b.aggregates) |*a| {
                         if (std.mem.eql(u8, a.name, name)) {
@@ -1267,7 +1267,7 @@ pub const Registry = struct {
                         .value = value_text,
                         .providers = provider.toProviders(self.allocator),
                     };
-                    b.aggregates = slice_tools.allocated.concat(FlagBits.Aggregate, @constCast(b.aggregates), &.{agg}, self.allocator) catch @panic("oom");
+                    b.aggregates = concat(self.allocator, FlagBits.Aggregate, &.{ @constCast(b.aggregates), &.{agg} }) catch @panic("oom");
                 } else panic("Missing value of bitpos for enum: {s}", .{name});
             },
             else => |t| panic("Unexpected type for enum extension: {t}", .{t}),
@@ -3579,13 +3579,13 @@ pub fn main(init: std.process.Init) void {
                 @"-dll",
                 @"-debug",
             };
-            const op = slice_tools.enums.fromName(Options, o) orelse std.debug.panic(
+            const op = enumFromName(Options, o) orelse std.debug.panic(
                 \\Unknown option: {s}
             ++ usage, .{o});
             switch (op) {
                 .@"-api" => {
                     const a = it.next() orelse @panic("Missing api type");
-                    api = slice_tools.enums.fromName(Registry.Api, a) orelse std.debug.panic("Unknown api: {s}", .{a});
+                    api = enumFromName(Registry.Api, a) orelse std.debug.panic("Unknown api: {s}", .{a});
                 },
                 .@"-registry" => {
                     const path = it.next() orelse @panic("Missing argument for -registry");
