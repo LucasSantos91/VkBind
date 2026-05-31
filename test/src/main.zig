@@ -44,7 +44,7 @@ const Context = struct {
         };
         const instance = vk.createInstance(&instance_create_info) catch |e| panic(e, "Failed to create instance");
         {
-            const get_inst_proc_raw = vk.extern_commands.getInstanceProcAddr(instance, vk.Command.getInstanceProcAddr.getVkName()) orelse @panic("Failed to find getInstanceProcAddress");
+            const get_inst_proc_raw = vk_bind.raw.extern_commands.getInstanceProcAddr(@enumFromInt(@intFromEnum(instance)), vk.Command.getInstanceProcAddr.getVkName()) orelse @panic("Failed to find getInstanceProcAddress");
             const get_inst_proc: vk.Command.getInstanceProcAddr.getPtrType() = @ptrCast(get_inst_proc_raw);
             vk.initInstanceCommands(get_inst_proc.?, instance);
         }
@@ -64,6 +64,8 @@ const Context = struct {
             .pEnabledFeatures = &features,
         };
         self.device = phys_device.createDevice(&device_create_info) catch |e| panic(e, "Failed to create device");
+        const load = self.device.getDeviceProcAddr(vk.Command.getDeviceProcAddr.getVkName());
+        vk.initDeviceCommands(load, self.device);
 
         if (comptime is_safe) {
             self.temp = .{

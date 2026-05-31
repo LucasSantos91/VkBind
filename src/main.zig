@@ -3359,7 +3359,7 @@ const render = struct {
             \\    if(info.params.len == 0) return .global;
             \\    const first = info.params[0];
             \\    if(!isDispatchableHandle(first.type.?)) return .global;
-            \\    if(first.type.? == Instance) return .instance;
+            \\    if(first.type.? == Instance or first.type.? == PhysicalDevice) return .instance;
             \\    return .device;
             \\}
             \\pub const Filtered = struct {
