@@ -41,16 +41,8 @@ const Context = struct {
             .ppEnabledExtensionNames = vk.extensions.device.ptr,
         };
         const instance = vk.createInstance(&instance_create_info) catch |e| panic(e, "Failed to create instance");
-        const inst_proc_addr = blk: {
-            const com = vk.Command.getInstanceProcAddr;
-            const name = com.getVkName();
-            const inst_proc_addr: com.GetPtrType() = @ptrCast(vk_bind.raw.extern_commands.getInstanceProcAddr(
-                vk_bind.justFreakingCastTheThing(instance, vk_bind.raw.Instance),
-                name,
-            ));
-            vk.initInstanceCommands(inst_proc_addr.?, instance);
-            break :blk inst_proc_addr.?;
-        };
+        const inst_proc_addr = vk.getSpecializedGetInstanceProcAddr(instance).?;
+        vk.initInstanceCommands(inst_proc_addr, instance);
         const phys_device, const family_index = selectPhysicalDevice(instance);
 
         const queue_create_info: [1]vk.DeviceQueueCreateInfo = .{vk.DeviceQueueCreateInfo{
@@ -67,14 +59,7 @@ const Context = struct {
             .pEnabledFeatures = &features,
         };
         self.device = phys_device.createDevice(&device_create_info) catch |e| panic(e, "Failed to create device");
-
-        {
-            const com: vk.Command = .getDeviceProcAddr;
-            const name = com.getVkName();
-            const first: com.GetPtrType() = @ptrCast(inst_proc_addr(vk_bind.justFreakingCastTheThing(instance, vk_bind.raw.Instance), name) orelse @panic("Failed to find getDeviceProcAddr"));
-            const load: com.GetPtrType() = @ptrCast(first.?(vk_bind.justFreakingCastTheThing(self.device, vk_bind.raw.Device), name) orelse @panic("Failed to find getDeviceProcAddr"));
-            vk.initDeviceCommands(load.?, self.device);
-        }
+        vk.initDeviceCommandsFromGetInstanceProcAddr(inst_proc_addr, instance, self.device);
 
         if (comptime is_safe) {
             self.temp = .{

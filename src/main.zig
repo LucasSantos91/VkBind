@@ -2654,11 +2654,20 @@ const render = struct {
             \\              .run_time => loader.initGlobalCommands(load_function),
             \\          }
             \\      }
+            \\      pub fn getSpecializedGetInstanceProcAddr(instance: Instance) ?*const fn(Instance, [*:0]const u8) callconv(vulkan_api) PfnVoidFunction{
+            \\          return @ptrCast(raw.extern_commands.getInstanceProcAddr(justFreakingCastTheThing(instance, raw.Instance),Command.getInstanceProcAddr.getVkName()));
+            \\      }
             \\      pub fn initInstanceCommands(load_function: anytype, instance: Instance) void{
             \\          loader.initInstanceCommands(load_function, justFreakingCastTheThing(instance, raw.Instance));
             \\      }
             \\      pub fn initDeviceCommands(load_function: anytype, device: Device) void{
             \\          loader.initDeviceCommands(load_function, justFreakingCastTheThing(device, raw.Device));
+            \\      }
+            \\      pub fn initDeviceCommandsFromGetInstanceProcAddr(get_instance_proc_addr: anytype, instance: Instance, device: Device) void {
+            \\          const com: Command = .getDeviceProcAddr;
+            \\          const raw_get_device_proc_addr: com.GetPtrType() = @ptrCast(get_instance_proc_addr(instance, com.getVkName()));
+            \\          const get_device_proc_addr: com.GetPtrType() = @ptrCast(raw_get_device_proc_addr.?(justFreakingCastTheThing(device, raw.Device), com.getVkName()));
+            \\          loader.initDeviceCommands(get_device_proc_addr.?, justFreakingCastTheThing(device, raw.Device));
             \\      }
             \\      fn assertDependencies(comptime cmd: raw.Command) void{
             \\          comptime{
