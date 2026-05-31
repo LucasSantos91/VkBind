@@ -3330,7 +3330,7 @@ const render = struct {
             \\const c: [1]u8 = .{std.ascii.toUpper(t[0])};
             \\return @field(@This(), c ++ t[1..]);
             \\}
-            \\pub fn getPtrType(comptime self: @This()) type{
+            \\pub fn GetPtrType(comptime self: @This()) type{
             \\return ?*const self.getType();
             \\}
             \\pub fn getReturnType(comptime self: @This()) type{
@@ -3400,7 +3400,7 @@ const render = struct {
             \\    var names: [funcs.len][]const u8 = undefined;
             \\    const attr: [funcs.len]std.builtin.Type.StructField.Attributes = @splat(.{});
             \\    for (funcs, &types, &names) |f, *t, *n| {
-            \\        t.* = f.getPtrType();
+            \\        t.* = f.GetPtrType();
             \\        n.* = @tagName(f);
             \\    }
             \\    return @Struct(.@"extern", null, &names, &types, &attr);
