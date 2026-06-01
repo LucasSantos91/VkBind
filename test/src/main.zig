@@ -41,9 +41,11 @@ const Context = struct {
     temp: if (is_safe) Temp else void,
     device: vk.Device,
     command_buffers: CommandBuffers,
+    surface: vk.SurfaceKHR,
 
     pub fn init() @This() {
         var self: @This() = undefined;
+
         const instance_create_info: vk.InstanceCreateInfo = .{
             .enabledExtensionCount = vk.extensions.device.len,
             .ppEnabledExtensionNames = vk.extensions.device.ptr,

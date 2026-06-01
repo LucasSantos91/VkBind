@@ -2955,7 +2955,7 @@ const render = struct {
                         const last = std.mem.findScalarLast(u8, word, '_') orelse panic("Missing last `_` for: {s}", .{word});
                         try writer.print("apiVersion.ge(.{{.minor={s}}})", .{word[last + 1 ..]});
                     } else {
-                        try writer.print("bitmask.isSet(.{s})", .{stripPrefix(word, "VK_")});
+                        try writer.print("bitmask.contains(.{s})", .{stripPrefix(word, "VK_")});
                     }
                     d = d[end..];
                 },
