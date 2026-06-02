@@ -1,6 +1,10 @@
 const std = @import("std");
 const vk_bind = @import("VkBind");
 const debug_commands: []const vk_bind.raw.Command = &.{ .destroyInstance, .destroyDevice, .destroyCommandPool };
+const surface_ext: vk_bind.raw.Extension = switch (builtin.target.os.tag) {
+    .windows => .KHR_win32_surface,
+    else => @compileError("Not implemented yet"),
+};
 const vk = vk_bind.VulkanContext(.{
     .commands = [_]vk_bind.raw.Command{
         .createInstance,
@@ -11,7 +15,7 @@ const vk = vk_bind.VulkanContext(.{
         .createCommandPool,
         .allocateCommandBuffers,
     } ++ debug_commands,
-    .extensions = &.{},
+    .extensions = &.{ .KHR_surface, surface_ext },
 });
 const builtin = @import("builtin");
 const is_safe = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
@@ -46,17 +50,18 @@ const Context = struct {
     window: *glfw.GLFWwindow,
 
     fn initWindow(self: *@This(), instance: vk.Instance, instance_proc_address: vk.Command.getInstanceProcAddr.GetPtrType()) void {
-        _ = instance;
         std.debug.assert(glfw.glfwInit() == glfw.GLFW_TRUE);
+        glfw.glfwWindowHint(glfw.GLFW_CLIENT_API, glfw.GLFW_NO_API);
         self.window = glfw.glfwCreateWindow(640, 480, "Triangle", null, null).?;
         glfw.glfwInitVulkanLoader(@ptrCast(instance_proc_address));
+        std.debug.assert(glfw.glfwCreateWindowSurface(@ptrFromInt(@intFromEnum(instance)), self.window, null, @ptrCast(&self.surface)) == @intFromEnum(vk.Result.SUCCESS));
     }
     pub fn init() @This() {
         var self: @This() = undefined;
 
         const instance_create_info: vk.InstanceCreateInfo = .{
-            .enabledExtensionCount = vk.extensions.device.len,
-            .ppEnabledExtensionNames = vk.extensions.device.ptr,
+            .enabledExtensionCount = vk.extensions.instance.len,
+            .ppEnabledExtensionNames = vk.extensions.instance.ptr,
         };
         const instance = vk.globals.createInstance(&instance_create_info) catch |e| panic(e, "Failed to create instance");
         const inst_proc_addr = vk.getSpecializedGetInstanceProcAddr(instance).?;
