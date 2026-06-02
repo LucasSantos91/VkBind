@@ -8,6 +8,10 @@ pub fn build(b: *std.Build) void {
         .registry = vk_docs.path("xml/vk.xml"),
         .video = vk_docs.path("xml/video.xml"),
     });
+    const glfw_zig = b.dependency("glfw-zig", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     const exe = b.addExecutable(.{
         .name = "triangle",
@@ -17,6 +21,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .imports = &.{
                 .{ .name = "VkBind", .module = vk_bind.module("VkBind") },
+                .{ .name = "glfw-zig", .module = glfw_zig.module("glfw-zig") },
             },
         }),
     });

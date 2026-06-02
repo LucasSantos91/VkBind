@@ -10,5 +10,9 @@
             .url = "https://github.com/KhronosGroup/Vulkan-Docs/archive/e2843a23d3c5a2c5e93e27d3b0fcd2c1087b0b64.zip",
             .hash = "N-V-__8AAAZquQEXic7B2h2BKcC6HF_LAJxiSolGIEvmP2JT",
         },
+        .@"glfw-zig" = .{
+            .url = "https://github.com/LucasSantos91/glfw-zig/archive/eef63b96a658bceb2219623fecc5a9997a115897.zip",
+            .hash = "glfw_zig-0.0.1-o6Bmm_IRAAA29IXBrkI3oPeCLrqI3J_nbXl5Rg92x7AQ",
+        },
     },
 }

@@ -15,6 +15,7 @@ const vk = vk_bind.VulkanContext(.{
 });
 const builtin = @import("builtin");
 const is_safe = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
+const glfw = @import("glfw-zig");
 
 const Context = struct {
     fn panic(err: anyerror, motive: []const u8) noreturn {
@@ -42,7 +43,14 @@ const Context = struct {
     device: vk.Device,
     command_buffers: CommandBuffers,
     surface: vk.SurfaceKHR,
+    window: *glfw.GLFWwindow,
 
+    fn initWindow(self: *@This(), instance: vk.Instance, instance_proc_address: vk.Command.getInstanceProcAddr.GetPtrType()) void {
+        _ = instance;
+        std.debug.assert(glfw.glfwInit() == glfw.GLFW_TRUE);
+        self.window = glfw.glfwCreateWindow(640, 480, "Triangle", null, null).?;
+        glfw.glfwInitVulkanLoader(@ptrCast(instance_proc_address));
+    }
     pub fn init() @This() {
         var self: @This() = undefined;
 
@@ -53,6 +61,7 @@ const Context = struct {
         const instance = vk.globals.createInstance(&instance_create_info) catch |e| panic(e, "Failed to create instance");
         const inst_proc_addr = vk.getSpecializedGetInstanceProcAddr(instance).?;
         vk.initInstanceCommands(inst_proc_addr, instance);
+        self.initWindow(instance, inst_proc_addr);
         const phys_device, const family_index = selectPhysicalDeviceAndQueueFamily(instance);
 
         const queue_create_info: [1]vk.DeviceQueueCreateInfo = .{vk.DeviceQueueCreateInfo{
@@ -96,7 +105,7 @@ const Context = struct {
         if (comptime is_safe) self.device.destroyCommandPool(self.temp.command_pool);
         self.device.destroyDevice();
         if (comptime is_safe) self.temp.instance.destroyInstance();
-
+        glfw.glfwTerminate();
         self.* = undefined;
     }
     pub fn run(self: *@This()) !void {
