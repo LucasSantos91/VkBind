@@ -31,7 +31,12 @@ const vk = vk_bind.VulkanContext(.{
         .createGraphicsPipelines,
         .enumerateDeviceExtensionProperties,
     } ++ debug_commands,
-    .extensions = &([_]vk_bind.raw.Extension{ .KHR_surface, surface_ext, .KHR_swapchain, .KHR_get_physical_device_properties2 } ++
+    .extensions = &([_]vk_bind.raw.Extension{
+        .KHR_surface,
+        surface_ext,
+        .KHR_swapchain,
+        .KHR_get_physical_device_properties2,
+    } ++
         [_]vk_bind.raw.Extension{ .KHR_portability_enumeration, .KHR_portability_subset }) // Must be the last ones
     ,
 });

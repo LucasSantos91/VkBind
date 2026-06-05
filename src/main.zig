@@ -2643,6 +2643,7 @@ const render = struct {
             \\                  \\Missing dependencies for extension: {t}
             \\                  \\Required:
             \\                  \\{s}
+            \\                  \\
             \\                  \\Provided:
             \\                  \\{f}
             \\                  \\
@@ -2878,11 +2879,8 @@ const render = struct {
                 depends: ?[]const u8,
 
                 pub fn format(self: @This(), w: *Writer) Writer.Error!void {
-                    if (self.depends) |dep| {
-                        try printDependencies(dep, w);
-                    } else {
-                        try w.writeAll("None");
-                    }
+                    const text = self.depends orelse "None";
+                    try w.writeAll(text);
                 }
             };
 
