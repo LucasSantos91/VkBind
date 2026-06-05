@@ -81,7 +81,7 @@ const Context = struct {
         var self: @This() = undefined;
 
         const enumerate_portability = blk: {
-            var buffer: [128]vk.ExtensionProperties = undefined;
+            var buffer: [512]vk.ExtensionProperties = undefined;
             var count: u32 = buffer.len;
             assert(vk.globals.enumerateInstanceExtensionProperties(null, &count, &buffer) catch |e| panic(e, "Failed to enumerate instance extension properties") == .SUCCESS);
             break :blk isExtensionInList(buffer[0..count], .KHR_portability_enumeration);
@@ -98,7 +98,7 @@ const Context = struct {
         self.initWindow(instance, inst_proc_addr);
         const phys_device, const family_index = selectPhysicalDeviceAndQueueFamily(instance);
         const portability_subset = blk: {
-            var buffer: [256]vk.ExtensionProperties = undefined;
+            var buffer: [512]vk.ExtensionProperties = undefined;
             var count: u32 = buffer.len;
             assert(phys_device.enumerateDeviceExtensionProperties(null, &count, &buffer) catch |e| panic(e, "Failed to enumerate instance extension properties") == .SUCCESS);
             break :blk isExtensionInList(buffer[0..count], .KHR_portability_subset);
