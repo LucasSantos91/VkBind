@@ -77,7 +77,7 @@ const Context = struct {
     }
     fn isExtensionInList(haystack: []const vk.ExtensionProperties, needle: vk.Extension) bool {
         for (haystack) |p| {
-            if (std.mem.orderZ(u8, @ptrCast(&p.extensionName["VK_".len..]), @tagName(needle)) == .eq)
+            if (std.mem.orderZ(u8, @ptrCast(p.extensionName["VK_".len..]), @tagName(needle)) == .eq)
                 return true;
         }
         return false;
