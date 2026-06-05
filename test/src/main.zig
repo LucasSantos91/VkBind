@@ -29,8 +29,11 @@ const vk = vk_bind.VulkanContext(.{
         .destroyShaderModule,
         .createRenderPass,
         .createGraphicsPipelines,
+        .enumerateDeviceExtensionProperties,
     } ++ debug_commands,
-    .extensions = &.{ .KHR_surface, surface_ext, .KHR_swapchain },
+    .extensions = &([_]vk_bind.raw.Extension{ .KHR_surface, surface_ext, .KHR_swapchain, .KHR_get_physical_device_properties2 } ++
+        [_]vk_bind.raw.Extension{ .KHR_portability_enumeration, .KHR_portability_subset }) // Must be the last ones
+    ,
 });
 const builtin = @import("builtin");
 const is_safe = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
@@ -67,19 +70,39 @@ const Context = struct {
         glfw.glfwInitVulkanLoader(@ptrCast(instance_proc_address));
         std.debug.assert(glfw.glfwCreateWindowSurface(@ptrFromInt(@intFromEnum(instance)), self.window, null, @ptrCast(&self.surface)) == @intFromEnum(vk.Result.SUCCESS));
     }
+    fn isExtensionInList(haystack: []const vk.ExtensionProperties, needle: vk.Extension) bool {
+        for (haystack) |p| {
+            if (std.mem.orderZ(u8, @ptrCast(&p.extensionName["VK_".len..]), @tagName(needle)) == .eq)
+                return true;
+        }
+        return false;
+    }
     pub fn init() @This() {
         var self: @This() = undefined;
 
+        const enumerate_portability = blk: {
+            var buffer: [128]vk.ExtensionProperties = undefined;
+            var count: u32 = buffer.len;
+            assert(vk.globals.enumerateInstanceExtensionProperties(null, &count, &buffer) catch |e| panic(e, "Failed to enumerate instance extension properties") == .SUCCESS);
+            break :blk isExtensionInList(buffer[0..count], .KHR_portability_enumeration);
+        };
+
         const instance_create_info: vk.InstanceCreateInfo = .{
-            .enabledExtensionCount = vk.extensions.instance.len,
+            .enabledExtensionCount = if (enumerate_portability) vk.extensions.instance.len else vk.extensions.instance.len - 1,
             .ppEnabledExtensionNames = vk.extensions.instance.ptr,
+            .flags = .{ .ENUMERATE_PORTABILITY_KHR = true },
         };
         const instance = vk.globals.createInstance(&instance_create_info) catch |e| panic(e, "Failed to create instance");
         const inst_proc_addr = vk.getSpecializedGetInstanceProcAddr(instance).?;
         vk.initInstanceCommands(inst_proc_addr, instance);
         self.initWindow(instance, inst_proc_addr);
         const phys_device, const family_index = selectPhysicalDeviceAndQueueFamily(instance);
-
+        const portability_subset = blk: {
+            var buffer: [256]vk.ExtensionProperties = undefined;
+            var count: u32 = buffer.len;
+            assert(phys_device.enumerateDeviceExtensionProperties(null, &count, &buffer) catch |e| panic(e, "Failed to enumerate instance extension properties") == .SUCCESS);
+            break :blk isExtensionInList(buffer[0..count], .KHR_portability_subset);
+        };
         const queue_create_info: [1]vk.DeviceQueueCreateInfo = .{vk.DeviceQueueCreateInfo{
             .queueFamilyIndex = family_index,
             .queueCount = 1,
@@ -87,7 +110,7 @@ const Context = struct {
         }};
         const features: vk.PhysicalDeviceFeatures = .{};
         const device_create_info: vk.DeviceCreateInfo = .{
-            .enabledExtensionCount = vk.extensions.device.len,
+            .enabledExtensionCount = if (portability_subset) vk.extensions.device.len else vk.extensions.device.len - 1,
             .ppEnabledExtensionNames = vk.extensions.device.ptr,
             .queueCreateInfoCount = queue_create_info.len,
             .pQueueCreateInfos = &queue_create_info,

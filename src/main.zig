@@ -2638,8 +2638,17 @@ const render = struct {
             \\      pub const config = config_;
             \\      pub const Extension = raw.Extension;
             \\      comptime{ 
-            \\          if(Extension.missingDependenciesFor(config.extensions, config.apiVersion)) |e|
-            \\          @panic("Missing dependencies for extension " ++ e.name.name);
+            \\          if(Extension.missingDependenciesFor(config.extensions, config.apiVersion)) |e|{
+            \\              const text = std.fmt.comptimePrint(
+            \\                  \\Missing dependencies for extension: {t}
+            \\                  \\Required:
+            \\                  \\{s}
+            \\                  \\Provided:
+            \\                  \\{f}
+            \\                  \\
+            \\          ,.{e, e.getDependenciesText(), provided_extensions});
+            \\              @compileError(text);
+            \\          }
             \\      }
             \\      pub const extensions = Extension.getFilteredVkNames(config.extensions);
             \\      pub const loaded_commands = blk:{
@@ -2690,12 +2699,12 @@ const render = struct {
             \\          const get_device_proc_addr: com.GetPtrType() = @ptrCast(raw_get_device_proc_addr.?(device, com.getVkName()));
             \\          loader.initDeviceCommands(get_device_proc_addr.?, justFreakingCastTheThing(device, Device));
             \\      }
-            \\      fn assertDependencies(comptime cmd: Command) void{
-            \\          comptime{
             \\              const provided_extensions: CommandDependencyRequirements = .{
             \\                  .version = config.apiVersion,
             \\                  .extensions = config.extensions,
             \\              };
+            \\      fn assertDependencies(comptime cmd: Command) void{
+            \\          comptime{
             \\              const requirements = cmd.requirements();
             \\              if(!provided_extensions.satisfies(requirements)){
             \\              const text = std.fmt.comptimePrint(
@@ -2862,9 +2871,38 @@ const render = struct {
                 }
             }
         };
+        const ExtensionDependenciesText = struct {
+            list: []const Registry.Extension,
+
+            const Depends = struct {
+                depends: ?[]const u8,
+
+                pub fn format(self: @This(), w: *Writer) Writer.Error!void {
+                    if (self.depends) |dep| {
+                        try printDependencies(dep, w);
+                    } else {
+                        try w.writeAll("None");
+                    }
+                }
+            };
+
+            pub fn format(self: @This(), w: *Writer) Writer.Error!void {
+                for (self.list) |e| {
+                    const n: ExtensionName = .parse(e.name);
+                    const dependencies: Depends = .{ .depends = e.depends };
+                    try w.print(
+                        \\.{[name]f} => "{[dependencies]f}",
+                    , .{
+                        .name = n,
+                        .dependencies = dependencies,
+                    });
+                }
+            }
+        };
         const extension_list: ExtensionList = .{ .list = registry.extensions };
         const extension_types: ExtensionTypes = .{ .list = registry.extensions };
         const extension_dependencies: ExtensionDependencies = .{ .list = registry.extensions };
+        const extension_dependencies_text: ExtensionDependenciesText = .{ .list = registry.extensions };
         const conv_funcs =
             \\pub fn getVkName(comptime self: @This()) [*:0]const u8{
             \\  const result = comptime "VK_" ++ @tagName(self);
@@ -2879,31 +2917,31 @@ const render = struct {
             \\  return &result;
             \\}
             \\pub fn filter(comptime extensions: []const @This(), comptime @"type": Type) []const @This(){
-            \\var result: [extensions.len]@This() = undefined;
-            \\var count = 0;
-            \\for(extensions) |e| if(e.getType() == @"type") {
-            \\result[count] = e;
-            \\count += 1;
-            \\};
-            \\const final = result[0..count].*;
-            \\return &final;
+            \\  var result: [extensions.len]@This() = undefined;
+            \\  var count = 0;
+            \\  for(extensions) |e| if(e.getType() == @"type") {
+            \\      result[count] = e;
+            \\      count += 1;
+            \\  };
+            \\  const final = result[0..count].*;
+            \\  return &final;
             \\}
             \\
             \\/// Returns the first extension found for which there are missing dependencies.
             \\/// If all dependencies are satified, returns `null`
             \\pub fn missingDependenciesFor(ext: []const @This(), apiVersion: ApiVersion) ?@This(){
-            \\const bitmask:Bitmask = .initMany(ext);
-            \\for(ext) |e| if(!e.isSatisfied(apiVersion, bitmask)) return e;
-            \\return null;
+            \\  const bitmask:Bitmask = .initMany(ext);
+            \\  for(ext) |e| if(!e.isSatisfied(apiVersion, bitmask)) return e;
+            \\  return null;
             \\}
             \\/// Whether `self` is contained in `extensions`
             \\pub fn containedIn(self:@This(),extensions:[]const @This())bool{
-            \\for(extensions)|e| if(e == self) return true;
-            \\return false;
+            \\  for(extensions)|e| if(e == self) return true;
+            \\  return false;
             \\}
             \\pub const Names = struct{ device: []const [*:0]const u8, instance: []const [*:0] const u8};
             \\pub fn getFilteredVkNames(comptime ext: []const @This()) Names{
-            \\return .{ .device = getVkNames(filter(ext, .device)), .instance = getVkNames(filter(ext,.instance)),};
+            \\  return .{ .device = getVkNames(filter(ext, .device)), .instance = getVkNames(filter(ext,.instance)),};
             \\}
         ;
         try writer.print(
@@ -2922,12 +2960,18 @@ const render = struct {
             \\  {[extension_dependencies]f}
             \\  }};
             \\}}
+            \\fn getDependenciesText(self: @This()) []const u8{{
+            \\  return switch(self) {{
+            \\  {[dependencies_text]f}
+            \\  }};
+            \\}}
             \\{[conv_funcs]s}
             \\}};
         , .{
             .extension_list = extension_list,
             .extension_types = extension_types,
             .extension_dependencies = extension_dependencies,
+            .dependencies_text = extension_dependencies_text,
             .conv_funcs = conv_funcs,
         });
     }
@@ -3381,7 +3425,7 @@ const render = struct {
             \\  };
             \\  return result;
             \\}
-            \\pub fn getVkNames(comptime funcs: []const @This()) []const []const u8{
+            \\pub fn getVkNames(comptime funcs: []const @This()) []const [*:0]const u8{
             \\  const result = comptime blk: {
             \\      var result: [funcs.len][*:0]const u8 = undefined;
             \\      for (funcs, &result) |f, *r| r.* = f.getVkName();
