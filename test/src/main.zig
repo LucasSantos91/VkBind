@@ -30,7 +30,7 @@ const vk = vk_bind.VulkanContext(.{
         .createRenderPass,
         .createGraphicsPipelines,
     } ++ debug_commands,
-    .extensions = &.{ .KHR_surface, surface_ext, .KHR_shader_draw_parameters, .KHR_swapchain },
+    .extensions = &.{ .KHR_surface, surface_ext, .KHR_swapchain },
 });
 const builtin = @import("builtin");
 const is_safe = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
