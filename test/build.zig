@@ -12,6 +12,12 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const compile_shaders = b.addSystemCommand(&.{ "slangc", "-target", "spirv", "-profile", "glsl_330", "-o" });
+    const shaders = compile_shaders.addOutputFileArg("shaders.spirv");
+    compile_shaders.addFileArg(b.path("src/shaders.slang"));
+    const shaders_module = b.createModule(.{
+        .root_source_file = shaders,
+    });
 
     const exe = b.addExecutable(.{
         .name = "triangle",
@@ -22,10 +28,12 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "VkBind", .module = vk_bind.module("VkBind") },
                 .{ .name = "glfw-zig", .module = glfw_zig.module("glfw-zig") },
+                .{ .name = "shaders", .module = shaders_module },
             },
         }),
     });
     b.installArtifact(exe);
+
     const run = b.addRunArtifact(exe);
     const run_step = b.step("run", "runs the program");
     run_step.dependOn(&run.step);

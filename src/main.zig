@@ -1414,6 +1414,9 @@ const render = struct {
                 .name = stripEnumName(entry_name, enum_name),
             };
         }
+        pub fn eql(lhs: @This(), rhs: @This()) bool {
+            return std.mem.eql(u8, lhs.name, rhs.name);
+        }
         pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
             try writer.print("@\"{s}\"", .{self.name});
         }
@@ -1693,24 +1696,23 @@ const render = struct {
             enum_name: TypeName,
 
             pub fn format(self: @This(), w: *Writer) Writer.Error!void {
-                _ = self;
-                _ = w;
-                //for (self.aliases) |a| {
-                //    const c: Comment = .parse(a.comment);
-                //    const p: Provider = .{ .p = a.providers };
-                //    const alias_name: EnumName = .parse(a.name, self.enum_name);
-                //    const canonical_name: EnumName = .parse(a.canonical, self.enum_name);
-                //    try w.print(
-                //        \\{[comment]f}
-                //        \\{[provider]f}
-                //        \\pub const {[alias_name]f} = @This().{[canonical_name]f};
-                //    , .{
-                //        .comment = c,
-                //        .provider = p,
-                //        .alias_name = alias_name,
-                //        .canonical_name = canonical_name,
-                //    });
-                //}
+                for (self.aliases) |a| {
+                    const alias_name: EnumName = .parse(a.name, self.enum_name);
+                    const canonical_name: EnumName = .parse(a.canonical, self.enum_name);
+                    if (alias_name.eql(canonical_name)) continue; // SRGB_NONLINEAR_KHR
+                    const c: Comment = .parse(a.comment);
+                    const p: Provider = .{ .p = a.providers };
+                    try w.print(
+                        \\{[comment]f}
+                        \\{[provider]f}
+                        \\pub const {[alias_name]f} = @This().{[canonical_name]f};
+                    , .{
+                        .comment = c,
+                        .provider = p,
+                        .alias_name = alias_name,
+                        .canonical_name = canonical_name,
+                    });
+                }
             }
         };
         const Values = struct {
@@ -3394,10 +3396,10 @@ const render = struct {
             \\pub fn loaderType(self: @This()) LoaderType{
             \\    const Type = self.GetType();
             \\    const info = @typeInfo(Type).@"fn";
-            \\    if(info.params.len == 0) return .global;
-            \\    const first = info.params[0];
-            \\    if(!isDispatchableHandle(first.type.?)) return .global;
-            \\    if(first.type.? == Instance or first.type.? == PhysicalDevice) return .instance;
+            \\    if(info.param_types.len == 0) return .global;
+            \\    const first = info.param_types[0].?;
+            \\    if(!isDispatchableHandle(first)) return .global;
+            \\    if(first == Instance or first == PhysicalDevice) return .instance;
             \\    return .device;
             \\}
             \\pub const Filtered = struct {
@@ -3430,7 +3432,7 @@ const render = struct {
             \\pub fn AsPointers(comptime funcs: []const Command) type {
             \\    var types: [funcs.len]type = undefined;
             \\    var names: [funcs.len][]const u8 = undefined;
-            \\    const attr: [funcs.len]std.builtin.Type.StructField.Attributes = @splat(.{});
+            \\    const attr: [funcs.len]std.builtin.Type.Struct.FieldAttributes = @splat(.{});
             \\    for (funcs, &types, &names) |f, *t, *n| {
             \\        t.* = f.GetPtrType();
             \\        n.* = @tagName(f);
@@ -3466,7 +3468,7 @@ const render = struct {
             \\      }
             \\      fn FirstParam(comptime L: type) type{
             \\          return sw: switch(@typeInfo(L)){
-            \\              .@"fn" => |f| f.params[0].type.?,
+            \\              .@"fn" => |f| f.param_types[0].?,
             \\              .pointer => |p| continue :sw @typeInfo(p.child),
             \\              else => @compileError("loader function is incompatible"),
             \\          };

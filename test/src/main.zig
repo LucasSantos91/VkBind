@@ -1,6 +1,15 @@
 const std = @import("std");
 const vk_bind = @import("VkBind");
-const debug_commands: []const vk_bind.raw.Command = &.{ .destroyInstance, .destroyDevice, .destroyCommandPool };
+const debug_commands: []const vk_bind.raw.Command = &.{
+    .destroyInstance,
+    .destroyDevice,
+    .destroyCommandPool,
+    .destroyPipeline,
+    .destroySurfaceKHR,
+    .destroyPipelineLayout,
+    .destroyDescriptorSetLayout,
+    .destroyRenderPass,
+};
 const surface_ext: vk_bind.raw.Extension = switch (builtin.target.os.tag) {
     .windows => .KHR_win32_surface,
     else => @compileError("Not implemented yet"),
@@ -14,12 +23,19 @@ const vk = vk_bind.VulkanContext(.{
         .getPhysicalDeviceQueueFamilyProperties,
         .createCommandPool,
         .allocateCommandBuffers,
+        .createDescriptorSetLayout,
+        .createPipelineLayout,
+        .createShaderModule,
+        .destroyShaderModule,
+        .createRenderPass,
+        .createGraphicsPipelines,
     } ++ debug_commands,
-    .extensions = &.{ .KHR_surface, surface_ext },
+    .extensions = &.{ .KHR_surface, surface_ext, .KHR_shader_draw_parameters, .KHR_swapchain },
 });
 const builtin = @import("builtin");
 const is_safe = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
 const glfw = @import("glfw-zig");
+const assert = std.debug.assert;
 
 const Context = struct {
     fn panic(err: anyerror, motive: []const u8) noreturn {
@@ -32,22 +48,17 @@ const Context = struct {
     const Temp = struct {
         instance: vk.Instance,
         command_pool: vk.CommandPool,
-    };
-    const command_buffer_count = 64;
-    const CommandBuffer = struct {};
-    const CommandBuffers = struct {
-        command_buffers: [command_buffer_count]vk.CommandBuffer,
-
-        pub fn populate_buffers(self: *@This(), buffers: [command_buffer_count]vk.CommandBuffer) void {
-            self.command_buffers = buffers;
-        }
+        set_layout: vk.DescriptorSetLayout,
+        pipeline_layout: vk.PipelineLayout,
     };
 
     temp: if (is_safe) Temp else void,
     device: vk.Device,
-    command_buffers: CommandBuffers,
+    command_buffer: vk.CommandBuffer,
     surface: vk.SurfaceKHR,
+    pipeline: vk.Pipeline,
     window: *glfw.GLFWwindow,
+    render_pass: vk.RenderPass,
 
     fn initWindow(self: *@This(), instance: vk.Instance, instance_proc_address: vk.Command.getInstanceProcAddr.GetPtrType()) void {
         std.debug.assert(glfw.glfwInit() == glfw.GLFW_TRUE);
@@ -90,28 +101,161 @@ const Context = struct {
             .flags = .{ .RESET_COMMAND_BUFFER = true },
         }) catch |e| panic(e, "Failed to create command pool");
 
-        var buffer: [command_buffer_count]vk.CommandBuffer = undefined;
         self.device.allocateCommandBuffers(&.{
             .commandPool = command_pool,
             .level = .PRIMARY,
-            .commandBufferCount = command_buffer_count,
-        }, &buffer) catch |e| panic(e, "Failed to allocate command buffers");
-        self.command_buffers.populate_buffers(buffer);
+            .commandBufferCount = 1,
+        }, @as(*[1]vk.CommandBuffer, &self.command_buffer)) catch |e| panic(e, "Failed to allocate command buffers");
+
+        const set_bindings: vk.DescriptorSetLayoutBinding = .{
+            .binding = 0,
+            .descriptorCount = 1,
+            .descriptorType = .STORAGE_BUFFER,
+            .stageFlags = .{ .VERTEX = true },
+        };
+        const set_layout_create_info: vk.DescriptorSetLayoutCreateInfo = .{
+            .bindingCount = 1,
+            .pBindings = &.{set_bindings},
+        };
+        const set_layout = self.device.createDescriptorSetLayout(&set_layout_create_info) catch |e| panic(e, "Failed to create descriptor set layout");
+        const pipeline_layout_create_info: vk.PipelineLayoutCreateInfo = .{
+            .setLayoutCount = 1,
+            .pSetLayouts = &.{set_layout},
+        };
+        const pipeline_layout = self.device.createPipelineLayout(&pipeline_layout_create_info) catch |e| panic(e, "Failed to create pipeline layout");
+        const color_attachment_reference: vk.AttachmentReference = .{
+            .attachment = 0,
+            .layout = .COLOR_ATTACHMENT_OPTIMAL,
+        };
+        const subpass_description: vk.SubpassDescription = .{
+            .inputAttachmentCount = 0,
+            .pInputAttachments = undefined,
+            .preserveAttachmentCount = 0,
+            .pPreserveAttachments = undefined,
+            .colorAttachmentCount = 1,
+            .pColorAttachments = &.{color_attachment_reference},
+            .pResolveAttachments = undefined,
+            .pDepthStencilAttachment = undefined,
+            .pipelineBindPoint = .GRAPHICS,
+        };
+        const color_attachment: vk.AttachmentDescription = .{
+            .initialLayout = .UNDEFINED,
+            .finalLayout = .PRESENT_SRC_KHR,
+            .samples = .@"1",
+            .loadOp = .DONT_CARE,
+            .storeOp = .STORE,
+            .stencilLoadOp = .DONT_CARE,
+            .stencilStoreOp = .DONT_CARE,
+            .format = .R8G8B8A8_SRGB,
+        };
+        const subpass_dependency: vk.SubpassDependency = .{
+            .srcSubpass = vk.SUBPASS_EXTERNAL,
+            .srcStageMask = .{ .TOP_OF_PIPE = true },
+            .srcAccessMask = .{},
+            .dstSubpass = 0,
+            .dstStageMask = .{ .COLOR_ATTACHMENT_OUTPUT = true },
+            .dstAccessMask = .{ .COLOR_ATTACHMENT_WRITE = true },
+            .dependencyFlags = .{ .BY_REGION = true },
+        };
+        const render_pass_create_info: vk.RenderPassCreateInfo = .{
+            .subpassCount = 1,
+            .pSubpasses = &.{subpass_description},
+            .attachmentCount = 1,
+            .pAttachments = &.{color_attachment},
+            .dependencyCount = 1,
+            .pDependencies = &.{subpass_dependency},
+        };
+        self.render_pass = self.device.createRenderPass(&render_pass_create_info) catch |e| panic(e, "Failed to create render pass");
+        const shaders_code align(@alignOf(u32)) = comptime @embedFile("shaders").*;
+        const shaders_module_create_info: vk.ShaderModuleCreateInfo = .{
+            .pCode = @ptrCast(&shaders_code),
+            .codeSize = comptime shaders_code.len,
+        };
+        const shaders_module = self.device.createShaderModule(&shaders_module_create_info) catch |e| panic(e, "Failed to create shader module");
+        defer self.device.destroyShaderModule(shaders_module);
+        const pipeline_create_info: vk.GraphicsPipelineCreateInfo = .{
+            .layout = pipeline_layout,
+            .flags = .{},
+            .pColorBlendState = &vk.PipelineColorBlendStateCreateInfo{
+                .logicOpEnable = .false,
+                .attachmentCount = 1,
+                .pAttachments = &.{vk.PipelineColorBlendAttachmentState{
+                    .blendEnable = .false,
+                }},
+            },
+            .pDepthStencilState = &vk.PipelineDepthStencilStateCreateInfo{
+                .depthBoundsTestEnable = .false,
+            },
+            .pDynamicState = &vk.PipelineDynamicStateCreateInfo{
+                .dynamicStateCount = 1,
+                .pDynamicStates = &.{.VIEWPORT},
+            },
+            .pMultisampleState = &vk.PipelineMultisampleStateCreateInfo{
+                .sampleShadingEnable = .false,
+                .rasterizationSamples = .@"1",
+            },
+            .pInputAssemblyState = &vk.PipelineInputAssemblyStateCreateInfo{
+                .topology = .TRIANGLE_LIST,
+            },
+            .pRasterizationState = &vk.PipelineRasterizationStateCreateInfo{
+                .lineWidth = 1,
+            },
+            .stageCount = 2,
+            .pStages = &.{
+                vk.PipelineShaderStageCreateInfo{
+                    .stage = .VERTEX,
+                    .pName = "vertexMain",
+                    .module = shaders_module,
+                },
+                vk.PipelineShaderStageCreateInfo{
+                    .stage = .FRAGMENT,
+                    .pName = "fragmentMain",
+                    .module = shaders_module,
+                },
+            },
+            .pTessellationState = &vk.PipelineTessellationStateCreateInfo{},
+            .pVertexInputState = &vk.PipelineVertexInputStateCreateInfo{},
+            .pViewportState = &vk.PipelineViewportStateCreateInfo{
+                .scissorCount = 1,
+                .pScissors = &.{vk.Rect2D{ .offset = .{
+                    .x = 0,
+                    .y = 0,
+                }, .extent = .{
+                    .width = std.math.maxInt(i32),
+                    .height = std.math.maxInt(i32),
+                } }},
+                .viewportCount = 1,
+            },
+            .subpass = 0,
+            .renderPass = self.render_pass,
+        };
+        assert(self.device.createGraphicsPipelines(.null_handle, 1, &.{pipeline_create_info}, @ptrCast(
+            &self.pipeline,
+        )) catch |e| panic(e, "Failed to create pipeline") == .SUCCESS);
 
         if (comptime is_safe) {
             self.temp = .{
                 .instance = instance,
                 .command_pool = command_pool,
+                .set_layout = set_layout,
+                .pipeline_layout = pipeline_layout,
             };
         }
         return self;
     }
     pub fn deinit(self: *@This()) void {
-        if (comptime is_safe) self.device.destroyCommandPool(self.temp.command_pool);
-        self.device.destroyDevice();
-        if (comptime is_safe) self.temp.instance.destroyInstance();
-        glfw.glfwTerminate();
-        self.* = undefined;
+        if (comptime is_safe) {
+            self.device.destroyPipeline(self.pipeline);
+            self.device.destroyPipelineLayout(self.temp.pipeline_layout);
+            self.device.destroyDescriptorSetLayout(self.temp.set_layout);
+            self.device.destroyRenderPass(self.render_pass);
+            self.device.destroyCommandPool(self.temp.command_pool);
+            self.temp.instance.destroySurfaceKHR(self.surface);
+            self.device.destroyDevice();
+            self.temp.instance.destroyInstance();
+            glfw.glfwTerminate();
+            self.* = undefined;
+        }
     }
     pub fn run(self: *@This()) !void {
         _ = self;

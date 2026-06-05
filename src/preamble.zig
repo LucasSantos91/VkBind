@@ -58,6 +58,14 @@ pub fn FlagBitsMixin(comptime Flags: type, comptime FlagBits: type) type {
 inline fn nullValue(comptime T: type) T {
     return switch (@typeInfo(T)) {
         .pointer, .@"union" => undefined,
+        .@"enum" => |i| {
+            if (i.mode == .nonexhaustive) return @enumFromInt(0);
+            if (i.field_values.len == 0) return undefined;
+            for (i.field_values) |v| {
+                if (v == 0) return @enumFromInt(0);
+            }
+            return undefined;
+        },
         else => std.mem.zeroes(T),
     };
 }
