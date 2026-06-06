@@ -30,6 +30,13 @@ const vk = vk_bind.VulkanContext(.{
         .createRenderPass,
         .createGraphicsPipelines,
         .enumerateDeviceExtensionProperties,
+        .getPhysicalDeviceSurfaceSupportKHR,
+        .createImageView,
+        .getDeviceQueue,
+        .createSwapchainKHR,
+        .getPhysicalDeviceSurfaceCapabilitiesKHR,
+        .getPhysicalDeviceSurfaceFormatsKHR,
+        .getSwapchainImagesKHR,
     } ++ debug_commands,
     .extensions = &([_]vk_bind.raw.Extension{
         .KHR_surface,
@@ -59,6 +66,10 @@ const Context = struct {
         set_layout: vk.DescriptorSetLayout,
         pipeline_layout: vk.PipelineLayout,
     };
+    const Image = struct {
+        image: vk.Image,
+        view: vk.ImageView,
+    };
 
     temp: if (is_safe) Temp else void,
     device: vk.Device,
@@ -67,6 +78,12 @@ const Context = struct {
     pipeline: vk.Pipeline,
     window: *glfw.GLFWwindow,
     render_pass: vk.RenderPass,
+    queue: vk.Queue,
+    swapchain: vk.SwapchainKHR,
+    swapchain_images: [max_swapchain_images]Image,
+    swapchain_images_len: u32,
+
+    const max_swapchain_images = 16;
 
     fn initWindow(self: *@This(), instance: vk.Instance, instance_proc_address: vk.Command.getInstanceProcAddr.GetPtrType()) void {
         std.debug.assert(glfw.glfwInit() == glfw.GLFW_TRUE);
@@ -75,9 +92,9 @@ const Context = struct {
         glfw.glfwInitVulkanLoader(@ptrCast(instance_proc_address));
         std.debug.assert(glfw.glfwCreateWindowSurface(@ptrFromInt(@intFromEnum(instance)), self.window, null, @ptrCast(&self.surface)) == @intFromEnum(vk.Result.SUCCESS));
     }
-    fn isExtensionInList(haystack: []const vk.ExtensionProperties, needle: vk.Extension) bool {
+    fn isExtensionInList(haystack: []const vk.ExtensionProperties, needle: [*:0]const u8) bool {
         for (haystack) |p| {
-            if (std.mem.orderZ(u8, @ptrCast(p.extensionName["VK_".len..]), @tagName(needle)) == .eq)
+            if (std.mem.orderZ(u8, @ptrCast(&p.extensionName), needle) == .eq)
                 return true;
         }
         return false;
@@ -89,7 +106,7 @@ const Context = struct {
             var buffer: [512]vk.ExtensionProperties = undefined;
             var count: u32 = buffer.len;
             assert(vk.globals.enumerateInstanceExtensionProperties(null, &count, &buffer) catch |e| panic(e, "Failed to enumerate instance extension properties") == .SUCCESS);
-            break :blk isExtensionInList(buffer[0..count], .KHR_portability_enumeration);
+            break :blk isExtensionInList(buffer[0..count], vk.Extension.KHR_portability_enumeration.getVkName());
         };
 
         const instance_create_info: vk.InstanceCreateInfo = .{
@@ -101,13 +118,7 @@ const Context = struct {
         const inst_proc_addr = vk.getSpecializedGetInstanceProcAddr(instance).?;
         vk.initInstanceCommands(inst_proc_addr, instance);
         self.initWindow(instance, inst_proc_addr);
-        const phys_device, const family_index = selectPhysicalDeviceAndQueueFamily(instance);
-        const portability_subset = blk: {
-            var buffer: [512]vk.ExtensionProperties = undefined;
-            var count: u32 = buffer.len;
-            assert(phys_device.enumerateDeviceExtensionProperties(null, &count, &buffer) catch |e| panic(e, "Failed to enumerate instance extension properties") == .SUCCESS);
-            break :blk isExtensionInList(buffer[0..count], .KHR_portability_subset);
-        };
+        const phys_device, const family_index, const portability_subset = selectPhysicalDeviceAndQueueFamily(instance, self.surface);
         const queue_create_info: [1]vk.DeviceQueueCreateInfo = .{vk.DeviceQueueCreateInfo{
             .queueFamilyIndex = family_index,
             .queueCount = 1,
@@ -123,6 +134,72 @@ const Context = struct {
         };
         self.device = phys_device.createDevice(&device_create_info) catch |e| panic(e, "Failed to create device");
         vk.initDeviceCommandsFromGetInstanceProcAddr(inst_proc_addr, instance, self.device);
+        self.queue = self.device.getDeviceQueue(family_index, 0);
+        {
+            const surface_capabilities = phys_device.getPhysicalDeviceSurfaceCapabilitiesKHR(self.surface) catch |e| panic(e, "Failed to get surface capabilities");
+            var format_buffer: [1]vk.SurfaceFormatKHR = undefined;
+            var format_count: u32 = format_buffer.len;
+            _ = phys_device.getPhysicalDeviceSurfaceFormatsKHR(self.surface, &format_count, &format_buffer) catch |e| panic(e, "Failed to get physical device surface formats");
+            const format = format_buffer[0];
+            const extent: vk.Extent2D =
+                if (surface_capabilities.currentExtent.width != std.math.maxInt(u32)) surface_capabilities.currentExtent else .{
+                    .width = std.math.clamp(surface_capabilities.currentExtent.width, surface_capabilities.minImageExtent.width, surface_capabilities.maxImageExtent.width),
+                    .height = std.math.clamp(surface_capabilities.currentExtent.height, surface_capabilities.minImageExtent.height, surface_capabilities.maxImageExtent.height),
+                };
+            const desired_swapchain_images = 2;
+            const swapchain_create_info: vk.SwapchainCreateInfoKHR = .{
+                .clipped = .true,
+                .compositeAlpha = .OPAQUE_KHR,
+                .flags = .{},
+                .imageArrayLayers = 1,
+                .imageColorSpace = format.colorSpace,
+                .imageExtent = extent,
+                .imageFormat = format.format,
+                .imageSharingMode = .EXCLUSIVE,
+                .imageUsage = .{ .COLOR_ATTACHMENT = true },
+                .minImageCount = std.math.clamp(
+                    desired_swapchain_images,
+                    surface_capabilities.minImageCount,
+                    if (surface_capabilities.maxImageCount == 0) std.math.maxInt(u32) else surface_capabilities.maxImageCount,
+                ),
+                .queueFamilyIndexCount = 1,
+                .pQueueFamilyIndices = &.{family_index},
+                .preTransform = surface_capabilities.currentTransform,
+                .presentMode = .FIFO_KHR,
+                .surface = self.surface,
+                .oldSwapchain = .null_handle,
+            };
+            self.swapchain = self.device.createSwapchainKHR(&swapchain_create_info) catch |e| panic(e, "Failed to create swapchain");
+
+            self.swapchain_images_len = max_swapchain_images;
+            var buffer: [max_swapchain_images]vk.Image = undefined;
+            assert(self.device.getSwapchainImagesKHR(self.swapchain, &self.swapchain_images_len, &buffer) catch |e| panic(e, "Failed to get swapchain images") == .SUCCESS);
+            for (self.swapchain_images[0..self.swapchain_images_len], buffer[0..self.swapchain_images_len]) |*dst, src| {
+                const view_create_info: vk.ImageViewCreateInfo = .{
+                    .flags = .{},
+                    .format = format.format,
+                    .image = src,
+                    .viewType = .@"2D",
+                    .subresourceRange = .{
+                        .layerCount = 1,
+                        .baseArrayLayer = 0,
+                        .levelCount = 1,
+                        .baseMipLevel = 0,
+                        .aspectMask = .{ .COLOR = true },
+                    },
+                    .components = .{
+                        .a = .ONE,
+                        .r = .IDENTITY,
+                        .g = .IDENTITY,
+                        .b = .IDENTITY,
+                    },
+                };
+                dst.* = .{
+                    .image = src,
+                    .view = self.device.createImageView(&view_create_info) catch |e| panic(e, "Failed to create image view"),
+                };
+            }
+        }
 
         const command_pool = self.device.createCommandPool(&.{
             .queueFamilyIndex = family_index,
@@ -288,17 +365,30 @@ const Context = struct {
     pub fn run(self: *@This()) !void {
         _ = self;
     }
-    fn selectPhysicalDeviceAndQueueFamily(instance: vk.Instance) struct { vk.PhysicalDevice, u4 } {
+    fn selectPhysicalDeviceAndQueueFamily(instance: vk.Instance, surface: vk.SurfaceKHR) struct { vk.PhysicalDevice, u4, bool } {
         var physical_devices: [16]vk.PhysicalDevice = undefined;
         var count: u32 = physical_devices.len;
         _ = instance.enumeratePhysicalDevices(&count, &physical_devices) catch |e| panic(e, "Failed to enumerate physical devices");
-        for (physical_devices[0..count]) |p| {
+        outer: for (physical_devices[0..count]) |p| {
+            var buffer: [512]vk.ExtensionProperties = undefined;
+            var extension_count: u32 = buffer.len;
+            assert(p.enumerateDeviceExtensionProperties(null, &extension_count, &buffer) catch |e| panic(e, "Failed to enumerate device extension properties") == .SUCCESS);
+            const ext = buffer[0..extension_count];
+            for (vk.extensions.device[0 .. vk.extensions.device.len - 1]) |de| {
+                if (!isExtensionInList(ext, de)) continue :outer;
+            }
             var props: [16]vk.QueueFamilyProperties = undefined;
             var len: u32 = props.len;
             p.getPhysicalDeviceQueueFamilyProperties(&len, &props);
             for (props[0..len], 0..) |prop, index| {
+                const present = p.getPhysicalDeviceSurfaceSupportKHR(@intCast(index), surface) catch |e| panic(e, "Failed to get device surface support");
+                if (present == .false) continue;
                 if (prop.queueFlags.GRAPHICS) {
-                    return .{ p, @intCast(index) };
+                    return .{
+                        p,
+                        @intCast(index),
+                        isExtensionInList(ext, vk.Extension.KHR_portability_subset.getVkName()),
+                    };
                 }
             }
         } else {

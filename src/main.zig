@@ -2463,17 +2463,17 @@ const render = struct {
                     var it: CommaIterator = .{ .text = codes };
                     while (it.next()) |code| {
                         const n: ConstantName = .parse(code);
-                        try w.print(".{[name]f} => .{[name]f},", .{ .name = n });
+                        try w.print(".{[name]f} => return .{[name]f},", .{ .name = n });
                     }
                 } else {
-                    try w.writeAll(".SUCCESS => temp,");
+                    try w.writeAll(".SUCCESS => {},");
                 }
                 var it: CommaIterator = .{ .text = self.error_codes };
                 while (it.next()) |code| {
                     if (shouldErrorBeSkipped(code)) continue;
                     const res: ConstantName = .parse(code);
                     const n: ErrorName = .parse(code);
-                    try w.print(".{[res]f} => error.{[name]f},", .{ .res = res, .name = n });
+                    try w.print(".{[res]f} => return error.{[name]f},", .{ .res = res, .name = n });
                 }
                 try w.writeByte('}');
             }
@@ -2538,9 +2538,10 @@ const render = struct {
             \\var temp: {[ret]f} = undefined;
             \\maybeUnused(&temp);
             \\{[maybe_temp_ref]f}
-            \\return {[maybe_switch]s}{[loader]s}.{[name]f}(
+            \\{[maybe_switch]s}{[loader]s}.{[name]f}(
             \\  {[param_names]f}
-            \\){[switch_prongs]f};
+            \\){[switch_prongs]f} {[maybe_semicolon]s}
+            \\{[maybe_return_temp]s}
             \\}}
         , .{
             .result_decl = result_decl,
@@ -2551,10 +2552,12 @@ const render = struct {
             .error_ret = error_ret,
             .ret = ret,
             .maybe_temp_ref = maybe_temp_ref,
-            .maybe_switch = if (has_success_codes) "switch(" else "",
+            .maybe_switch = if (has_success_codes) "switch(" else "temp = ",
+            .maybe_semicolon = if (has_success_codes) "" else ";",
             .loader = loader,
             .param_names = param_names,
             .switch_prongs = switch_prongs,
+            .maybe_return_temp = if (is_create_command) "return temp;" else "",
         });
     }
     fn referenceRawBasetypes(writer: *Writer) Writer.Error!void {
