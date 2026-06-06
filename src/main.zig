@@ -2463,17 +2463,17 @@ const render = struct {
                     var it: CommaIterator = .{ .text = codes };
                     while (it.next()) |code| {
                         const n: ConstantName = .parse(code);
-                        try w.print(".{[name]f} => return .{[name]f},", .{ .name = n });
+                        try w.print(".{[name]f} => .{[name]f},", .{ .name = n });
                     }
                 } else {
-                    try w.writeAll(".SUCCESS => {},");
+                    try w.writeAll(".SUCCESS => temp,");
                 }
                 var it: CommaIterator = .{ .text = self.error_codes };
                 while (it.next()) |code| {
                     if (shouldErrorBeSkipped(code)) continue;
                     const res: ConstantName = .parse(code);
                     const n: ErrorName = .parse(code);
-                    try w.print(".{[res]f} => return error.{[name]f},", .{ .res = res, .name = n });
+                    try w.print(".{[res]f} => error.{[name]f},", .{ .res = res, .name = n });
                 }
                 try w.writeByte('}');
             }
@@ -2527,6 +2527,7 @@ const render = struct {
         const maybe_temp_ref: MaybeTempRef = .{
             .name = if (is_create_command) last_param.c_var.name else null,
         };
+        const return_temp_explicit = is_create_command and !has_success_codes and !has_error_codes;
         try writer.print(
             \\{[result_decl]f}
             \\{[error_decl]f}
@@ -2538,9 +2539,9 @@ const render = struct {
             \\var temp: {[ret]f} = undefined;
             \\maybeUnused(&temp);
             \\{[maybe_temp_ref]f}
-            \\{[maybe_switch]s}{[loader]s}.{[name]f}(
+            \\{[maybe_return]s} {[maybe_switch]s}{[loader]s}.{[name]f}(
             \\  {[param_names]f}
-            \\){[switch_prongs]f} {[maybe_semicolon]s}
+            \\){[switch_prongs]f};
             \\{[maybe_return_temp]s}
             \\}}
         , .{
@@ -2552,12 +2553,12 @@ const render = struct {
             .error_ret = error_ret,
             .ret = ret,
             .maybe_temp_ref = maybe_temp_ref,
-            .maybe_switch = if (has_success_codes) "switch(" else "temp = ",
-            .maybe_semicolon = if (has_success_codes) "" else ";",
+            .maybe_switch = if (has_success_codes) "switch(" else "",
+            .maybe_return = if (return_temp_explicit) "if(true)" else "return",
+            .maybe_return_temp = if (return_temp_explicit) "return temp;" else "",
             .loader = loader,
             .param_names = param_names,
             .switch_prongs = switch_prongs,
-            .maybe_return_temp = if (is_create_command) "return temp;" else "",
         });
     }
     fn referenceRawBasetypes(writer: *Writer) Writer.Error!void {

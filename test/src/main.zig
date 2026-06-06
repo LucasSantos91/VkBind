@@ -37,6 +37,8 @@ const vk = vk_bind.VulkanContext(.{
         .getPhysicalDeviceSurfaceCapabilitiesKHR,
         .getPhysicalDeviceSurfaceFormatsKHR,
         .getSwapchainImagesKHR,
+        .destroyImageView,
+        .destroySwapchainKHR,
     } ++ debug_commands,
     .extensions = &([_]vk_bind.raw.Extension{
         .KHR_surface,
@@ -350,6 +352,10 @@ const Context = struct {
     }
     pub fn deinit(self: *@This()) void {
         if (comptime is_safe) {
+            for (self.swapchain_images[0..self.swapchain_images_len]) |i| {
+                self.device.destroyImageView(i.view);
+            }
+            self.device.destroySwapchainKHR(self.swapchain);
             self.device.destroyPipeline(self.pipeline);
             self.device.destroyPipelineLayout(self.temp.pipeline_layout);
             self.device.destroyDescriptorSetLayout(self.temp.set_layout);
