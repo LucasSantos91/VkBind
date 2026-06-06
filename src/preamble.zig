@@ -80,11 +80,23 @@ pub fn isDispatchableHandle(comptime T: type) bool {
     return result;
 }
 fn LockedEnum(comptime T: type, comptime value: T) type {
-    return @Enum(@typeInfo(T).@"enum".tag_type, .exhaustive, &.{@tagName(value)}, &.{@intFromEnum(value)});
+    return enum(@typeInfo(T).@"enum".tag_type) {
+        locked = @intFromEnum(value),
+
+        pub fn unlock(self: @This()) T {
+            return @enumFromInt(@intFromEnum(self));
+        }
+    };
 }
 
 fn LockedInt(comptime T: type, comptime value: T) type {
-    return @Enum(T, .exhaustive, &.{std.fmt.comptimePrint("{}", .{value})}, &.{value});
+    return enum(T) {
+        locked = value,
+
+        pub fn unlock(self: @This()) T {
+            return @intFromEnum(self);
+        }
+    };
 }
 inline fn justFreakingCastTheThing(value: anytype, comptime Target: type) Target {
     const V = @TypeOf(value);
@@ -93,7 +105,25 @@ inline fn justFreakingCastTheThing(value: anytype, comptime Target: type) Target
     const casted: *const Target = @ptrCast(ptr);
     return casted.*;
 }
+pub fn isExtensibleStruct(comptime T: type) bool {
+    const result = comptime blk: {
+        const i = @typeInfo(T);
+        if (i != .@"struct") break :blk false;
+        const n = i.@"struct".field_names;
+        if (n.len < 2) break :blk false;
+        if (!std.mem.eql(u8, n[0], "sType")) break :blk false;
+        if (!std.mem.eql(u8, n[1], "pNext")) break :blk false;
+        break :blk true;
+    };
+    return result;
+}
 pub fn StructChain(comptime Base: type, comptime extension_types: []const type) type {
+    comptime {
+        if (!isExtensibleStruct(Base)) @compileError(@typeName(Base) ++ " is not an extensible struct");
+        for (extension_types) |T| {
+            if (!isExtensibleStruct(T)) @compileError(@typeName(T) ++ " is not an extensible struct");
+        }
+    }
     return struct {
         const Extensions = @Tuple(extension_types);
         base: Base = undefined,
@@ -104,15 +134,50 @@ pub fn StructChain(comptime Base: type, comptime extension_types: []const type) 
                 .base = base,
                 .extensions = extensions,
             };
+            self.initPtrs();
+        }
+
+        /// Sets up the pNext chain
+        pub fn initPtrs(self: *@This()) void {
+            self.base.sType = .locked;
             if (comptime extension_types.len == 0) {
                 self.base.pNext = null;
                 return;
             }
             self.base.pNext = &self.extensions[0];
-            inline for (self.extensions[0 .. self.extensions.len - 1], self.extensions[1..]) |*lhs, *rhs| {
+            self.extensions[0].sType = .locked;
+            inline for (0..self.extensions.len - 1, 1..) |lhs_index, rhs_index| {
+                const lhs = &self.extensions[lhs_index];
+                const rhs = &self.extensions[rhs_index];
                 lhs.pNext = rhs;
+                rhs.sType = .locked;
             }
             self.extensions[self.extensions.len - 1].pNext = null;
+        }
+
+        pub fn get(self: *@This(), comptime Field: type, comptime index: usize) *Field {
+            return @constCast(self.getC(Field, index));
+        }
+        pub fn getC(self: *@This(), comptime Field: type, comptime index: usize) *const Field {
+            if (comptime Field == Base and index == 0) return self.getBaseC();
+            const extension_index = comptime blk: {
+                var i = index;
+                for (extension_types, 0..) |T, final_index| {
+                    if (Field == T) {
+                        if (i == 0) break :blk final_index;
+                        i -= 1;
+                    }
+                }
+                const text = std.fmt.comptimePrint("There is no type {} with index {}", .{ Field, index });
+                @compileError(text);
+            };
+            return &self.extensions[extension_index];
+        }
+        pub fn getBase(self: *@This()) *Base {
+            return &self.base;
+        }
+        pub fn getBaseC(self: *const @This()) *const Base {
+            return &self.base;
         }
     };
 }

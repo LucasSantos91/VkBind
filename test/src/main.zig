@@ -39,6 +39,7 @@ const vk = vk_bind.VulkanContext(.{
         .getSwapchainImagesKHR,
         .destroyImageView,
         .destroySwapchainKHR,
+        .getPhysicalDeviceFeatures2,
     } ++ debug_commands,
     .extensions = &([_]vk_bind.raw.Extension{
         .KHR_surface,
@@ -48,6 +49,7 @@ const vk = vk_bind.VulkanContext(.{
     } ++
         [_]vk_bind.raw.Extension{ .KHR_portability_enumeration, .KHR_portability_subset }) // Must be the last ones
     ,
+    .apiVersion = .{ .minor = 3 }
 });
 const builtin = @import("builtin");
 const is_safe = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
@@ -115,7 +117,7 @@ const Context = struct {
             .enabledExtensionCount = if (enumerate_portability) vk.extensions.instance.len else vk.extensions.instance.len - 1,
             .ppEnabledExtensionNames = vk.extensions.instance.ptr,
             .flags = .{ .ENUMERATE_PORTABILITY_KHR = enumerate_portability },
-            .pApplicationInfo = &.{ .apiVersion = .{ .minor = 3 } },
+            .pApplicationInfo = &.{ .apiVersion = vk.apiVersion },
         };
         const instance = vk.globals.createInstance(&instance_create_info) catch |e| panic(e, "Failed to create instance");
         const inst_proc_addr = vk.getSpecializedGetInstanceProcAddr(instance).?;

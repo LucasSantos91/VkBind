@@ -1457,7 +1457,7 @@ const render = struct {
                 pub fn format(self: @This(), w: *Writer) Writer.Error!void {
                     if (self.diff > 1) {
                         try w.print(
-                            \\_reserved_{}: LockedInt(u{}, 0) = .@"0",
+                            \\_reserved_{}: LockedInt(u{}, 0) = .locked,
                         , .{ self.bitpos, self.diff - 1 });
                     }
                 }
@@ -1470,7 +1470,7 @@ const render = struct {
                     const first = flag_bits.bits[0];
                     if (first.bitpos != 0) {
                         try w.print(
-                            \\_reserved_leading: LockedInt(u{[bits]}, 0) = .@"0",
+                            \\_reserved_leading: LockedInt(u{[bits]}, 0) = .locked,
                         , .{ .bits = first.bitpos });
                     }
 
@@ -1501,7 +1501,7 @@ const render = struct {
                 }
                 if (remaining != 0) {
                     try w.print(
-                        \\_reserved_trailing: LockedInt(u{[bits]}, 0) = .@"0",
+                        \\_reserved_trailing: LockedInt(u{[bits]}, 0) = .locked,
                     , .{ .bits = remaining });
                 }
                 for (flag_bits.aggregates) |agg| {
@@ -1561,7 +1561,7 @@ const render = struct {
             }
         } else {
             try writer.print(
-                \\_reserved_trailing: LockedInt(u{[bits]}, 0) = .@"0",
+                \\_reserved_trailing: LockedInt(u{[bits]}, 0) = .locked,
                 \\{[mixins]f}
                 \\}};
             , .{
@@ -1769,7 +1769,7 @@ const render = struct {
                 const e = self.e;
                 var members = e.members;
                 if (e.s_type) |s_type| {
-                    try w.print("sType: LockedEnum(StructureType, .{[name]s}) =.{[name]s},", .{ .name = stripPrefix(s_type, "VK_STRUCTURE_TYPE_") });
+                    try w.print("sType: LockedEnum(StructureType, .{[name]s}) = .locked,", .{ .name = stripPrefix(s_type, "VK_STRUCTURE_TYPE_") });
                     members = members[1..];
                 }
 
@@ -2321,7 +2321,7 @@ const render = struct {
         return enumFromName(enum { QueueSignalReleaseImageOHOS }, name) != null;
     }
 
-    fn printVulkanContextCommand(command_name: []const u8, command: Registry.Command, loader: []const u8, writer: *Writer) Writer.Error!void {
+    fn printVulkanContextCommand(command_name: []const u8, command: Registry.Command, loader: []const u8, registry: *const Registry, writer: *Writer) Writer.Error!void {
         const has_success_codes = command.success_codes.len != 0;
         const only_success_code = std.mem.eql(u8, command.success_codes, "VK_SUCCESS");
         const has_error_codes = blk: {
@@ -2342,6 +2342,12 @@ const render = struct {
             if (last.c_var.type.base.ptrs[0] != .mutable) break :blk false;
             if (last.extra[0].optional) break :blk false;
             if (last.extra[0].len != .@"1") break :blk false;
+            if (registry.types.get(last.c_var.type.base.name)) |t| inner: {
+                if (t.type != .@"struct") break :inner;
+                const s = t.type.@"struct";
+                if (s.members.len < 2) break :inner;
+                if (std.mem.eql(u8, s.members[1].c_var.name, "pNext")) break :blk false;
+            }
             const n = name.name.name;
             break :blk !isExemptFromCreateCommand(n);
         };
@@ -2641,6 +2647,7 @@ const render = struct {
             \\  return struct{
             \\      pub const config = config_;
             \\      pub const Extension = raw.Extension;
+            \\      pub const apiVersion: ApiVersion = @bitCast(config.apiVersion);
             \\      comptime{ 
             \\          if(Extension.missingDependenciesFor(config.extensions, config.apiVersion)) |e|{
             \\              const text = std.fmt.comptimePrint(
@@ -2772,6 +2779,7 @@ const render = struct {
                 entry.key_ptr.*,
                 entry.value_ptr.*,
                 global_loader,
+                registry,
                 writer,
             );
         }
@@ -2796,6 +2804,7 @@ const render = struct {
                     command_entry.key_ptr.*,
                     command,
                     "loader",
+                    registry,
                     writer,
                 );
             }
