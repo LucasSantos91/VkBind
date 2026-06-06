@@ -2255,6 +2255,7 @@ const render = struct {
             \\else
             \\    .c;
             \\  {s}
+            \\  pub const StructChain = StructChain_;
             \\
         , .{@embedFile("basetypes.zig")});
     }
@@ -2570,6 +2571,7 @@ const render = struct {
     fn referenceRawBasetypes(writer: *Writer) Writer.Error!void {
         const basetypes: []const []const u8 = &.{
             "vulkan_api",
+            "StructChain",
             "Bool32",
             "ApiVersion",
             "DeviceSize",

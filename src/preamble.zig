@@ -117,7 +117,7 @@ pub fn isExtensibleStruct(comptime T: type) bool {
     };
     return result;
 }
-pub fn StructChain(comptime Base: type, comptime extension_types: []const type) type {
+fn StructChain_(comptime Base: type, comptime extension_types: []const type) type {
     comptime {
         if (!isExtensibleStruct(Base)) @compileError(@typeName(Base) ++ " is not an extensible struct");
         for (extension_types) |T| {
