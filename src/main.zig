@@ -1811,7 +1811,22 @@ const render = struct {
                             remaining_bitfield_bits = undefined;
                             in_bitfield = false;
                         }
-                        try w.print("{f} = nullValue({f})", .{ v, v.v });
+                        try w.print("{f} ", .{v});
+                        if (m.extra[0].optional) {
+                            try w.print(" = nullValue({f})", .{v.v});
+                        } else if (m.c_var.type.base.ptrs_len != 0 and m.extra[0].len == .expression) {
+                            outer: for (members) |m_2| {
+                                if (std.mem.eql(u8, m.extra[0].len.expression, m_2.c_var.name)) {
+                                    for (m_2.extra) |ex| {
+                                        if (ex.optional) {
+                                            try w.writeAll(" = undefined");
+                                            break :outer;
+                                        }
+                                    }
+                                    break :outer;
+                                }
+                            }
+                        }
                     }
 
                     try w.writeByte(',');
