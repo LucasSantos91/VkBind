@@ -115,6 +115,7 @@ const Context = struct {
             .enabledExtensionCount = if (enumerate_portability) vk.extensions.instance.len else vk.extensions.instance.len - 1,
             .ppEnabledExtensionNames = vk.extensions.instance.ptr,
             .flags = .{ .ENUMERATE_PORTABILITY_KHR = enumerate_portability },
+            .pApplicationInfo = &.{ .apiVersion = .{ .minor = 3 } },
         };
         const instance = vk.globals.createInstance(&instance_create_info) catch |e| panic(e, "Failed to create instance");
         const inst_proc_addr = vk.getSpecializedGetInstanceProcAddr(instance).?;

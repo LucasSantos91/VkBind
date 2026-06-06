@@ -16,10 +16,10 @@ pub const Bool32 = enum(u32) {
     }
 };
 pub const ApiVersion = packed struct(u32) {
-    patch: u11 = 0,
+    patch: u12 = 0,
     minor: u10,
     major: u7 = 1,
-    variant: u4 = 0,
+    variant: u3 = 0,
 
     pub fn toInt(self: @This()) u32 {
         return @bitCast(self);

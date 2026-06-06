@@ -93,3 +93,26 @@ inline fn justFreakingCastTheThing(value: anytype, comptime Target: type) Target
     const casted: *const Target = @ptrCast(ptr);
     return casted.*;
 }
+pub fn StructChain(comptime Base: type, comptime extension_types: []const type) type {
+    return struct {
+        const Extensions = @Tuple(extension_types);
+        base: Base = undefined,
+        extensions: Extensions = undefined,
+
+        pub fn init(self: *@This(), base: Base, extensions: Extensions) void {
+            self.* = .{
+                .base = base,
+                .extensions = extensions,
+            };
+            if (comptime extension_types.len == 0) {
+                self.base.pNext = null;
+                return;
+            }
+            self.base.pNext = &self.extensions[0];
+            inline for (self.extensions[0 .. self.extensions.len - 1], self.extensions[1..]) |*lhs, *rhs| {
+                lhs.pNext = rhs;
+            }
+            self.extensions[self.extensions.len - 1].pNext = null;
+        }
+    };
+}
