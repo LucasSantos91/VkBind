@@ -10,6 +10,8 @@ const debug_commands: []const vk_bind.raw.Command = &.{
     .destroyDescriptorSetLayout,
     .destroyRenderPass,
     .destroyFramebuffer,
+    .destroyFence,
+    .destroySemaphore,
 };
 const surface_ext: vk_bind.raw.Extension = switch (builtin.target.os.tag) {
     .windows => .KHR_win32_surface,
@@ -42,6 +44,20 @@ const vk = vk_bind.VulkanContext(.{
         .destroySwapchainKHR,
         .getPhysicalDeviceFeatures2,
         .createFramebuffer,
+        .createSemaphore,
+        .createFence,
+        .resetFences,
+        .waitForFences,
+        .acquireNextImageKHR,
+        .beginCommandBuffer,
+        .endCommandBuffer,
+        .resetCommandBuffer,
+        .cmdBeginRenderPass,
+        .cmdSetViewport,
+        .cmdDraw,
+        .queueSubmit,
+        .queuePresentKHR,
+        .cmdBindPipeline,
     } ++ debug_commands,
     .extensions = &([_]vk_bind.raw.Extension{
         .KHR_surface,
@@ -89,6 +105,10 @@ const Context = struct {
     swapchain: vk.SwapchainKHR,
     swapchain_images: [max_swapchain_images]Image,
     swapchain_images_len: u32,
+    swapchain_extent: vk.Extent2D,
+    image_available: vk.Semaphore,
+    render_finished: vk.Semaphore,
+    frame_in_flight: vk.Fence,
 
     const max_swapchain_images = 16;
 
@@ -106,6 +126,11 @@ const Context = struct {
         }
         return false;
     }
+    fn Ptr(comptime T: type) type {
+        const i = @typeInfo(T).pointer;
+        return @Pointer(.many, i.attrs, i.child, i.sentinel());
+    }
+
     pub fn init() @This() {
         var self: @This() = undefined;
 
@@ -207,7 +232,7 @@ const Context = struct {
             _ = phys_device.getPhysicalDeviceSurfaceFormatsKHR(self.surface, &format_count, &format_buffer) catch |e| panic(e, "Failed to get physical device surface formats");
             break :blk format_buffer[0];
         };
-        const extent: vk.Extent2D =
+        self.swapchain_extent =
             if (surface_capabilities.currentExtent.width != std.math.maxInt(u32)) surface_capabilities.currentExtent else .{
                 .width = std.math.clamp(surface_capabilities.currentExtent.width, surface_capabilities.minImageExtent.width, surface_capabilities.maxImageExtent.width),
                 .height = std.math.clamp(surface_capabilities.currentExtent.height, surface_capabilities.minImageExtent.height, surface_capabilities.maxImageExtent.height),
@@ -232,12 +257,12 @@ const Context = struct {
         };
         const set_layout_create_info: vk.DescriptorSetLayoutCreateInfo = .{
             .bindingCount = 1,
-            .pBindings = &.{set_bindings},
+            .pBindings = @ptrCast(&set_bindings),
         };
         const set_layout = self.device.createDescriptorSetLayout(&set_layout_create_info) catch |e| panic(e, "Failed to create descriptor set layout");
         const pipeline_layout_create_info: vk.PipelineLayoutCreateInfo = .{
             .setLayoutCount = 1,
-            .pSetLayouts = &.{set_layout},
+            .pSetLayouts = @ptrCast(&set_layout),
         };
         const pipeline_layout = self.device.createPipelineLayout(&pipeline_layout_create_info) catch |e| panic(e, "Failed to create pipeline layout");
         const color_attachment_reference: vk.AttachmentReference = .{
@@ -250,7 +275,7 @@ const Context = struct {
             .preserveAttachmentCount = 0,
             .pPreserveAttachments = undefined,
             .colorAttachmentCount = 1,
-            .pColorAttachments = &.{color_attachment_reference},
+            .pColorAttachments = @ptrCast(&color_attachment_reference),
             .pResolveAttachments = undefined,
             .pDepthStencilAttachment = undefined,
             .pipelineBindPoint = .GRAPHICS,
@@ -265,13 +290,21 @@ const Context = struct {
             .stencilStoreOp = .DONT_CARE,
             .format = format.format,
         };
+        const dependencies: vk.SubpassDependency = .{
+            .srcSubpass = vk.SUBPASS_EXTERNAL,
+            .dstSubpass = 0,
+            .srcStageMask = .{ .COLOR_ATTACHMENT_OUTPUT = true },
+            .srcAccessMask = .{ .COLOR_ATTACHMENT_READ = true },
+            .dstStageMask = .{ .COLOR_ATTACHMENT_OUTPUT = true },
+            .dstAccessMask = .{ .COLOR_ATTACHMENT_WRITE = true },
+        };
         const render_pass_create_info: vk.RenderPassCreateInfo = .{
             .subpassCount = 1,
-            .pSubpasses = &.{subpass_description},
+            .pSubpasses = @ptrCast(&subpass_description),
             .attachmentCount = 1,
-            .pAttachments = &.{color_attachment},
-            .dependencyCount = 0,
-            .pDependencies = undefined,
+            .pAttachments = @ptrCast(&color_attachment),
+            .dependencyCount = 1,
+            .pDependencies = @ptrCast(&dependencies),
         };
         self.render_pass = self.device.createRenderPass(&render_pass_create_info) catch |e| panic(e, "Failed to create render pass");
 
@@ -282,7 +315,7 @@ const Context = struct {
             .flags = .{},
             .imageArrayLayers = 1,
             .imageColorSpace = format.colorSpace,
-            .imageExtent = extent,
+            .imageExtent = self.swapchain_extent,
             .imageFormat = format.format,
             .imageSharingMode = .EXCLUSIVE,
             .imageUsage = .{ .COLOR_ATTACHMENT = true },
@@ -332,8 +365,8 @@ const Context = struct {
                 .renderPass = self.render_pass,
                 .attachmentCount = 1,
                 .pAttachments = &.{dst.view},
-                .width = extent.width,
-                .height = extent.height,
+                .width = self.swapchain_extent.width,
+                .height = self.swapchain_extent.height,
                 .layers = 1,
             };
             dst.framebuffer = self.device.createFramebuffer(&framebuffer_create_info) catch |e| panic(e, "Failed to create framebuffer");
@@ -436,6 +469,9 @@ const Context = struct {
         assert(self.device.createGraphicsPipelines(.null_handle, 1, &.{pipeline_create_info}, @ptrCast(
             &self.pipeline,
         )) catch |e| panic(e, "Failed to create pipeline") == .SUCCESS);
+        self.image_available = self.device.createSemaphore(&.{}) catch |e| panic(e, "Failed to create semaphore");
+        self.render_finished = self.device.createSemaphore(&.{}) catch |e| panic(e, "Failed to create semaphore");
+        self.frame_in_flight = self.device.createFence(&.{ .flags = .{ .SIGNALED = true } }) catch |e| panic(e, "Failed to create fence");
 
         if (comptime is_safe) {
             self.temp = .{
@@ -449,6 +485,9 @@ const Context = struct {
     }
     pub fn deinit(self: *@This()) void {
         if (comptime is_safe) {
+            self.device.destroyFence(self.frame_in_flight);
+            self.device.destroySemaphore(self.image_available);
+            self.device.destroySemaphore(self.render_finished);
             for (self.swapchain_images[0..self.swapchain_images_len]) |i| {
                 self.device.destroyFramebuffer(i.framebuffer);
                 self.device.destroyImageView(i.view);
@@ -467,7 +506,80 @@ const Context = struct {
         }
     }
     pub fn run(self: *@This()) !void {
+        while (glfw.glfwWindowShouldClose(self.window) == 0) {
+            glfw.glfwPollEvents();
+            self.draw();
+        }
+    }
+    fn handleOutOfDate(self: *@This()) void {
         _ = self;
+    }
+    fn draw(self: *@This()) void {
+        assert(self.device.waitForFences(1, &.{self.frame_in_flight}, .true, std.math.maxInt(u64)) catch |e| panic(e, "Failed to wait for fence") == .SUCCESS);
+        self.device.resetFences(1, &.{self.frame_in_flight}) catch |e| panic(e, "Failed to reset fence");
+
+        var swapchain_index: u32 = undefined;
+        const acquire_result = self.device.acquireNextImageKHR(self.swapchain, std.math.maxInt(u64), self.image_available, .null_handle, &swapchain_index) catch |e| switch (e) {
+            error.OUT_OF_HOST_MEMORY, error.OUT_OF_DEVICE_MEMORY, error.DEVICE_LOST, error.SURFACE_LOST_KHR => |err| panic(err, "Failed to acquire swapchain image"),
+            error.OUT_OF_DATE_KHR => {
+                self.handleOutOfDate();
+                @panic("Not implemented yet");
+            },
+            error.FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT => unreachable,
+        };
+        switch (acquire_result) {
+            .SUCCESS => {},
+            .TIMEOUT => unreachable,
+            .NOT_READY => {},
+            .SUBOPTIMAL_KHR => {},
+        }
+        self.command_buffer.resetCommandBuffer(.{}) catch |e| panic(e, "Failed to reset command buffer");
+        self.command_buffer.beginCommandBuffer(&.{}) catch |e| panic(e, "Failed to begin command buffer");
+        self.command_buffer.cmdBindPipeline(.GRAPHICS, self.pipeline);
+        const render_pass_begin: vk.RenderPassBeginInfo = .{
+            .renderPass = self.render_pass,
+            .framebuffer = self.swapchain_images[swapchain_index].framebuffer,
+            .renderArea = .{
+                .offset = .{ .x = 0, .y = 0 },
+                .extent = self.swapchain_extent,
+            },
+            .clearValueCount = 1,
+            .pClearValues = &.{.{ .color = .{ .float32 = .{ 0, 0, 0, 1 } } }},
+        };
+        self.command_buffer.cmdBeginRenderPass(&render_pass_begin, .INLINE);
+        const viewport: vk.Viewport = .{
+            .x = 0,
+            .y = 0,
+            .height = @floatFromInt(self.swapchain_extent.height),
+            .width = @floatFromInt(self.swapchain_extent.width),
+            .minDepth = 0,
+            .maxDepth = 1,
+        };
+        self.command_buffer.cmdSetViewport(0, 1, @ptrCast(&viewport));
+        self.command_buffer.cmdDraw(3, 1, 0, 0);
+        self.command_buffer.endCommandBuffer() catch |e| panic(e, "Failed to end command buffer");
+
+        const submit_info: vk.SubmitInfo = .{
+            .commandBufferCount = 1,
+            .pCommandBuffers = @ptrCast(&self.command_buffer),
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = @ptrCast(&self.image_available),
+            .pWaitDstStageMask = &.{.{ .COLOR_ATTACHMENT_OUTPUT = true }},
+            .signalSemaphoreCount = 1,
+            .pSignalSemaphores = @ptrCast(&self.render_finished),
+        };
+        self.queue.queueSubmit(1, @ptrCast(&submit_info), self.frame_in_flight) catch |e| panic(e, "Failed to submit to queue");
+        const present_info: vk.PresentInfoKHR = .{
+            .swapchainCount = 1,
+            .pSwapchains = @ptrCast(&self.swapchain),
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = @ptrCast(&self.render_finished),
+            .pImageIndices = @ptrCast(&swapchain_index),
+        };
+        switch (self.queue.queuePresentKHR(&present_info) catch |e| panic(e, "Failed to present")) {
+            .SUCCESS => {},
+            .SUBOPTIMAL_KHR => self.handleOutOfDate(),
+        }
     }
     fn selectPhysicalDeviceAndQueueFamily(instance: vk.Instance, surface: vk.SurfaceKHR) struct { vk.PhysicalDevice, u4, bool } {
         var physical_devices: [16]vk.PhysicalDevice = undefined;
