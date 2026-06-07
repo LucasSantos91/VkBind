@@ -335,6 +335,8 @@ pub const Registry = struct {
     const Struct = struct {
         members: []const ZigVar,
         s_type: ?[]const u8,
+        structextends: []const u8,
+        allowduplicate: bool,
     };
     const Union = struct {
         members: []const ZigVar,
@@ -751,6 +753,8 @@ pub const Registry = struct {
             .type = .{ .@"struct" = .{
                 .s_type = null,
                 .members = undefined,
+                .structextends = xml.attr.get("structextends") orelse &.{},
+                .allowduplicate = if (xml.attr.get("allowduplicate")) |text| std.mem.eql(u8, text, "true") else false,
             } },
         };
         const s = &new.type.@"struct";
@@ -1840,22 +1844,39 @@ const render = struct {
                 }
             }
         };
+        const StructExtends = struct {
+            raw: []const u8,
+            pub fn format(self: @This(), w: *Writer) Writer.Error!void {
+                try w.writeAll("pub const structextends: []const type = &.{");
+                var it: CommaIterator = .{ .text = self.raw };
+                while (it.next()) |next| {
+                    const n: TypeName = .parse(next);
+                    try w.print("{f},", .{n});
+                }
+                try w.writeAll("};");
+            }
+        };
         const comment: Comment = .parse(e_c.comment);
         const provider: Provider = .{ .p = e_c.providers };
         const e = e_c.type.@"struct";
         const members: Members = .{ .e = e, .r = registry };
         const struct_name: TypeName = .parse(name);
+        const structextends: StructExtends = .{ .raw = e.structextends };
         try writer.print(
             \\{[comment]f}
             \\{[provider]f}
             \\pub const {[struct_name]f}=extern struct{{
             \\{[members]f}
+            \\{[structextends]f}
+            \\pub const allowduplicate = {[allowduplicate]};
             \\}};
         , .{
             .comment = comment,
             .provider = provider,
             .struct_name = struct_name,
             .members = members,
+            .structextends = structextends,
+            .allowduplicate = e.allowduplicate,
         });
     }
     const ZigVar = struct {

@@ -117,7 +117,7 @@ const Context = struct {
             .enabledExtensionCount = if (enumerate_portability) vk.extensions.instance.len else vk.extensions.instance.len - 1,
             .ppEnabledExtensionNames = vk.extensions.instance.ptr,
             .flags = .{ .ENUMERATE_PORTABILITY_KHR = enumerate_portability },
-            .pApplicationInfo = null,
+            .pApplicationInfo = &.{ .apiVersion = vk.apiVersion, .applicationVersion = 0, .engineVersion = 0 },
         };
         const instance = vk.globals.createInstance(&instance_create_info) catch |e| panic(e, "Failed to create instance");
         const inst_proc_addr = vk.getSpecializedGetInstanceProcAddr(instance).?;
@@ -129,6 +129,7 @@ const Context = struct {
             .queueCount = 1,
             .pQueuePriorities = &.{1.0},
         }};
+
         const features: vk.PhysicalDeviceFeatures = .{
             .fullDrawIndexUint32 = .false,
             .imageCubeArray = .false,

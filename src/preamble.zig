@@ -119,9 +119,14 @@ pub fn isExtensibleStruct(comptime T: type) bool {
 }
 fn StructChain_(comptime Base: type, comptime extension_types: []const type) type {
     comptime {
-        if (!isExtensibleStruct(Base)) @compileError(@typeName(Base) ++ " is not an extensible struct");
-        for (extension_types) |T| {
-            if (!isExtensibleStruct(T)) @compileError(@typeName(T) ++ " is not an extensible struct");
+        if (!isExtensibleStruct(Base)) @compileError(std.fmt.comptimePrint("{} is not an extensible struct", .{Base}));
+        for (extension_types, 0..) |T, index| {
+            if (!isExtensibleStruct(T)) @compileError(std.fmt.comptimePrint("{} is not an extensible struct", .{T}));
+            if (std.mem.findScalar(type, T.structextends, Base) == null)
+                @compileError(std.fmt.comptimePrint("{} does not extend {}", .{ T, Base }));
+            if (!T.allowduplicate and std.mem.findScalar(type, extension_types[index + 1 ..], T) != null) {
+                @compileError(std.fmt.comptimePrint("{} does not allow duplicates in a pNext chain", .{T}));
+            }
         }
     }
     return struct {
@@ -134,11 +139,11 @@ fn StructChain_(comptime Base: type, comptime extension_types: []const type) typ
                 .base = base,
                 .extensions = extensions,
             };
-            self.initPtrs();
+            self.initChain();
         }
 
         /// Sets up the pNext chain
-        pub fn initPtrs(self: *@This()) void {
+        pub fn initChain(self: *@This()) void {
             self.base.sType = .locked;
             if (comptime extension_types.len == 0) {
                 self.base.pNext = null;
