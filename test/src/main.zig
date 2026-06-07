@@ -49,7 +49,7 @@ const vk = vk_bind.VulkanContext(.{
     } ++
         [_]vk_bind.raw.Extension{ .KHR_portability_enumeration, .KHR_portability_subset }) // Must be the last ones
     ,
-    .apiVersion = .{ .minor = 3 }
+    .apiVersion = .{ .minor = 0 }
 });
 const builtin = @import("builtin");
 const is_safe = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;

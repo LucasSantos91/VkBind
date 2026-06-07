@@ -124,7 +124,9 @@ fn StructChain_(comptime Base: type, comptime extension_types: []const type) typ
             if (!isExtensibleStruct(T)) @compileError(std.fmt.comptimePrint("{} is not an extensible struct", .{T}));
             if (std.mem.findScalar(type, T.structextends, Base) == null)
                 @compileError(std.fmt.comptimePrint("{} does not extend {}", .{ T, Base }));
-            if (!T.allowduplicate and std.mem.findScalar(type, extension_types[index + 1 ..], T) != null) {
+            if (!T.allowduplicate and
+                (T == Base or std.mem.findScalar(type, extension_types[index + 1 ..], T) != null))
+            {
                 @compileError(std.fmt.comptimePrint("{} does not allow duplicates in a pNext chain", .{T}));
             }
         }
