@@ -9,6 +9,7 @@ const debug_commands: []const vk_bind.raw.Command = &.{
     .destroyPipelineLayout,
     .destroyDescriptorSetLayout,
     .destroyRenderPass,
+    .destroyFramebuffer,
 };
 const surface_ext: vk_bind.raw.Extension = switch (builtin.target.os.tag) {
     .windows => .KHR_win32_surface,
@@ -40,6 +41,7 @@ const vk = vk_bind.VulkanContext(.{
         .destroyImageView,
         .destroySwapchainKHR,
         .getPhysicalDeviceFeatures2,
+        .createFramebuffer,
     } ++ debug_commands,
     .extensions = &([_]vk_bind.raw.Extension{
         .KHR_surface,
@@ -73,6 +75,7 @@ const Context = struct {
     const Image = struct {
         image: vk.Image,
         view: vk.ImageView,
+        framebuffer: vk.Framebuffer,
     };
 
     temp: if (is_safe) Temp else void,
@@ -197,71 +200,18 @@ const Context = struct {
         self.device = phys_device.createDevice(&device_create_info) catch |e| panic(e, "Failed to create device");
         vk.initDeviceCommandsFromGetInstanceProcAddr(inst_proc_addr, instance, self.device);
         self.queue = self.device.getDeviceQueue(family_index, 0);
-        {
-            const surface_capabilities = phys_device.getPhysicalDeviceSurfaceCapabilitiesKHR(self.surface) catch |e| panic(e, "Failed to get surface capabilities");
+        const surface_capabilities = phys_device.getPhysicalDeviceSurfaceCapabilitiesKHR(self.surface) catch |e| panic(e, "Failed to get surface capabilities");
+        const format = blk: {
             var format_buffer: [1]vk.SurfaceFormatKHR = undefined;
             var format_count: u32 = format_buffer.len;
             _ = phys_device.getPhysicalDeviceSurfaceFormatsKHR(self.surface, &format_count, &format_buffer) catch |e| panic(e, "Failed to get physical device surface formats");
-            const format = format_buffer[0];
-            const extent: vk.Extent2D =
-                if (surface_capabilities.currentExtent.width != std.math.maxInt(u32)) surface_capabilities.currentExtent else .{
-                    .width = std.math.clamp(surface_capabilities.currentExtent.width, surface_capabilities.minImageExtent.width, surface_capabilities.maxImageExtent.width),
-                    .height = std.math.clamp(surface_capabilities.currentExtent.height, surface_capabilities.minImageExtent.height, surface_capabilities.maxImageExtent.height),
-                };
-            const desired_swapchain_images = 2;
-            const swapchain_create_info: vk.SwapchainCreateInfoKHR = .{
-                .clipped = .true,
-                .compositeAlpha = .OPAQUE_KHR,
-                .flags = .{},
-                .imageArrayLayers = 1,
-                .imageColorSpace = format.colorSpace,
-                .imageExtent = extent,
-                .imageFormat = format.format,
-                .imageSharingMode = .EXCLUSIVE,
-                .imageUsage = .{ .COLOR_ATTACHMENT = true },
-                .minImageCount = std.math.clamp(
-                    desired_swapchain_images,
-                    surface_capabilities.minImageCount,
-                    if (surface_capabilities.maxImageCount == 0) std.math.maxInt(u32) else surface_capabilities.maxImageCount,
-                ),
-                .queueFamilyIndexCount = 1,
-                .pQueueFamilyIndices = &.{family_index},
-                .preTransform = surface_capabilities.currentTransform,
-                .presentMode = .FIFO_KHR,
-                .surface = self.surface,
-                .oldSwapchain = .null_handle,
+            break :blk format_buffer[0];
+        };
+        const extent: vk.Extent2D =
+            if (surface_capabilities.currentExtent.width != std.math.maxInt(u32)) surface_capabilities.currentExtent else .{
+                .width = std.math.clamp(surface_capabilities.currentExtent.width, surface_capabilities.minImageExtent.width, surface_capabilities.maxImageExtent.width),
+                .height = std.math.clamp(surface_capabilities.currentExtent.height, surface_capabilities.minImageExtent.height, surface_capabilities.maxImageExtent.height),
             };
-            self.swapchain = self.device.createSwapchainKHR(&swapchain_create_info) catch |e| panic(e, "Failed to create swapchain");
-
-            self.swapchain_images_len = max_swapchain_images;
-            var buffer: [max_swapchain_images]vk.Image = undefined;
-            assert(self.device.getSwapchainImagesKHR(self.swapchain, &self.swapchain_images_len, &buffer) catch |e| panic(e, "Failed to get swapchain images") == .SUCCESS);
-            for (self.swapchain_images[0..self.swapchain_images_len], buffer[0..self.swapchain_images_len]) |*dst, src| {
-                const view_create_info: vk.ImageViewCreateInfo = .{
-                    .flags = .{},
-                    .format = format.format,
-                    .image = src,
-                    .viewType = .@"2D",
-                    .subresourceRange = .{
-                        .layerCount = 1,
-                        .baseArrayLayer = 0,
-                        .levelCount = 1,
-                        .baseMipLevel = 0,
-                        .aspectMask = .{ .COLOR = true },
-                    },
-                    .components = .{
-                        .a = .ONE,
-                        .r = .IDENTITY,
-                        .g = .IDENTITY,
-                        .b = .IDENTITY,
-                    },
-                };
-                dst.* = .{
-                    .image = src,
-                    .view = self.device.createImageView(&view_create_info) catch |e| panic(e, "Failed to create image view"),
-                };
-            }
-        }
 
         const command_pool = self.device.createCommandPool(&.{
             .queueFamilyIndex = family_index,
@@ -309,30 +259,86 @@ const Context = struct {
             .initialLayout = .UNDEFINED,
             .finalLayout = .PRESENT_SRC_KHR,
             .samples = .@"1",
-            .loadOp = .DONT_CARE,
+            .loadOp = .CLEAR,
             .storeOp = .STORE,
             .stencilLoadOp = .DONT_CARE,
             .stencilStoreOp = .DONT_CARE,
-            .format = .R8G8B8A8_SRGB,
-        };
-        const subpass_dependency: vk.SubpassDependency = .{
-            .srcSubpass = vk.SUBPASS_EXTERNAL,
-            .srcStageMask = .{ .TOP_OF_PIPE = true },
-            .srcAccessMask = .{},
-            .dstSubpass = 0,
-            .dstStageMask = .{ .COLOR_ATTACHMENT_OUTPUT = true },
-            .dstAccessMask = .{ .COLOR_ATTACHMENT_WRITE = true },
-            .dependencyFlags = .{ .BY_REGION = true },
+            .format = format.format,
         };
         const render_pass_create_info: vk.RenderPassCreateInfo = .{
             .subpassCount = 1,
             .pSubpasses = &.{subpass_description},
             .attachmentCount = 1,
             .pAttachments = &.{color_attachment},
-            .dependencyCount = 1,
-            .pDependencies = &.{subpass_dependency},
+            .dependencyCount = 0,
+            .pDependencies = undefined,
         };
         self.render_pass = self.device.createRenderPass(&render_pass_create_info) catch |e| panic(e, "Failed to create render pass");
+
+        const desired_swapchain_images = 2;
+        const swapchain_create_info: vk.SwapchainCreateInfoKHR = .{
+            .clipped = .true,
+            .compositeAlpha = .OPAQUE_KHR,
+            .flags = .{},
+            .imageArrayLayers = 1,
+            .imageColorSpace = format.colorSpace,
+            .imageExtent = extent,
+            .imageFormat = format.format,
+            .imageSharingMode = .EXCLUSIVE,
+            .imageUsage = .{ .COLOR_ATTACHMENT = true },
+            .minImageCount = std.math.clamp(
+                desired_swapchain_images,
+                surface_capabilities.minImageCount,
+                if (surface_capabilities.maxImageCount == 0) std.math.maxInt(u32) else surface_capabilities.maxImageCount,
+            ),
+            .queueFamilyIndexCount = 1,
+            .pQueueFamilyIndices = &.{family_index},
+            .preTransform = surface_capabilities.currentTransform,
+            .presentMode = .FIFO_KHR,
+            .surface = self.surface,
+            .oldSwapchain = .null_handle,
+        };
+        self.swapchain = self.device.createSwapchainKHR(&swapchain_create_info) catch |e| panic(e, "Failed to create swapchain");
+
+        self.swapchain_images_len = max_swapchain_images;
+        var buffer: [max_swapchain_images]vk.Image = undefined;
+        assert(self.device.getSwapchainImagesKHR(self.swapchain, &self.swapchain_images_len, &buffer) catch |e| panic(e, "Failed to get swapchain images") == .SUCCESS);
+        for (self.swapchain_images[0..self.swapchain_images_len], buffer[0..self.swapchain_images_len]) |*dst, src| {
+            const view_create_info: vk.ImageViewCreateInfo = .{
+                .flags = .{},
+                .format = format.format,
+                .image = src,
+                .viewType = .@"2D",
+                .subresourceRange = .{
+                    .layerCount = 1,
+                    .baseArrayLayer = 0,
+                    .levelCount = 1,
+                    .baseMipLevel = 0,
+                    .aspectMask = .{ .COLOR = true },
+                },
+                .components = .{
+                    .a = .IDENTITY,
+                    .r = .IDENTITY,
+                    .g = .IDENTITY,
+                    .b = .IDENTITY,
+                },
+            };
+            dst.* = .{
+                .image = src,
+                .view = self.device.createImageView(&view_create_info) catch |e| panic(e, "Failed to create image view"),
+                .framebuffer = undefined,
+            };
+            const framebuffer_create_info: vk.FramebufferCreateInfo = .{
+                .renderPass = self.render_pass,
+                .attachmentCount = 1,
+                .pAttachments = &.{dst.view},
+                .width = extent.width,
+                .height = extent.height,
+                .layers = 1,
+            };
+            dst.framebuffer = self.device.createFramebuffer(&framebuffer_create_info) catch |e| panic(e, "Failed to create framebuffer");
+        }
+
         const shaders_code align(@alignOf(u32)) = comptime @embedFile("shaders").*;
         const shaders_module_create_info: vk.ShaderModuleCreateInfo = .{
             .pCode = @ptrCast(&shaders_code),
@@ -346,8 +352,8 @@ const Context = struct {
             .pColorBlendState = &vk.PipelineColorBlendStateCreateInfo{
                 .logicOpEnable = .false,
                 .logicOp = undefined,
-                .attachmentCount = 1,
                 .blendConstants = undefined,
+                .attachmentCount = 1,
                 .pAttachments = &.{vk.PipelineColorBlendAttachmentState{
                     .blendEnable = .false,
                     .colorBlendOp = undefined,
@@ -444,6 +450,7 @@ const Context = struct {
     pub fn deinit(self: *@This()) void {
         if (comptime is_safe) {
             for (self.swapchain_images[0..self.swapchain_images_len]) |i| {
+                self.device.destroyFramebuffer(i.framebuffer);
                 self.device.destroyImageView(i.view);
             }
             self.device.destroySwapchainKHR(self.swapchain);
@@ -496,6 +503,8 @@ const Context = struct {
 
 pub fn main() void {
     var context: Context = .init();
-    defer context.deinit();
     try context.run();
+    if (comptime is_safe) {
+        context.deinit();
+    }
 }
