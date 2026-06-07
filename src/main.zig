@@ -1374,7 +1374,7 @@ const render = struct {
             }
         }
     };
-    const Provider = struct {
+    const ProviderComment = struct {
         p: Registry.Providers = .{},
 
         pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
@@ -1447,7 +1447,7 @@ const render = struct {
         const mixins_funcs: []const []const u8 = &.{ "toInt", "fromInt", "merge", "intersection", "negation", "difference", "toBit", "fromBit", "set", "unset" };
 
         const comment: Comment = .parse(e_c.comment);
-        const provider: Provider = .{ .p = e_c.providers };
+        const provider_comment: ProviderComment = .{ .p = e_c.providers };
         const e = e_c.type.flags;
         const flags_name: TypeName = .parse(name);
         const Bits = struct {
@@ -1482,7 +1482,7 @@ const render = struct {
                 }
                 for (flag_bits.bits) |b| {
                     const bit_comment: Comment = .parse(b.comment);
-                    const bit_provider: Provider = .{ .p = if (b.extension_bit) b.providers else .{} };
+                    const bit_provider: ProviderComment = .{ .p = if (b.extension_bit) b.providers else .{} };
                     const bit_name: BitName = .parse(b.name, self.flags_name);
                     const diff = b.bitpos - last_bitpos;
                     const reserved: Reserved = .{ .diff = diff, .bitpos = b.bitpos };
@@ -1510,7 +1510,7 @@ const render = struct {
                 }
                 for (flag_bits.aggregates) |agg| {
                     const bit_comment: Comment = .parse(agg.comment);
-                    const bit_provider: Provider = .{ .p = agg.providers };
+                    const bit_provider: ProviderComment = .{ .p = agg.providers };
                     const bit_name: BitName = .parse(agg.name, self.flags_name);
                     try w.print(
                         \\{[comment]f}
@@ -1531,14 +1531,17 @@ const render = struct {
             .flags_name = flags_name,
             .flag_bits_name = .{ .name = "undefined" },
         };
+        const provider_decl: ProviderDecl = .{ .p = e_c.providers };
         try writer.print(
             \\{[comment]f}
-            \\{[provider]f}
+            \\{[provider_comment]f}
             \\pub const {[name]f} = packed struct(u{[bitwidth]t}){{
+            \\{[provider_decl]f}
             \\
         , .{
             .comment = comment,
-            .provider = provider,
+            .provider_comment = provider_comment,
+            .provider_decl = provider_decl,
             .name = flags_name,
             .bitwidth = e.bitwidth,
         });
@@ -1578,7 +1581,7 @@ const render = struct {
         const mixin_funcs: []const []const u8 = &.{ "toFlags", "fromFlags", "toInt", "fromInt" };
 
         const comment: Comment = .parse(e_c.comment);
-        const provider: Provider = .{ .p = e_c.providers };
+        const provider_comment: ProviderComment = .{ .p = e_c.providers };
         const mixins: Mixins = .{
             .mixins = mixin_funcs,
             .mixin_kind = "FlagBits",
@@ -1594,7 +1597,7 @@ const render = struct {
                 for (self.bits.bits) |b| {
                     const name: BitName = .parse(b.name, self.enum_name);
                     const c: Comment = .parse(b.comment);
-                    const p: Provider = .{ .p = if (b.extension_bit) b.providers else .{} };
+                    const p: ProviderComment = .{ .p = if (b.extension_bit) b.providers else .{} };
                     try w.print(
                         \\
                         \\{[comment]f}
@@ -1615,16 +1618,19 @@ const render = struct {
             .enum_name = flag_bits_name,
         };
 
+        const provider_decl: ProviderDecl = .{ .p = e_c.providers };
         try writer.print(
             \\{[comment]f}
-            \\{[provider]f}
+            \\{[provider_comment]f}
             \\pub const {[name]f} = enum(u{[bitwidth]t}){{
             \\{[bits]f}
             \\{[mixins]f}
+            \\{[provider_decl]f}
             \\}};
         , .{
             .comment = comment,
-            .provider = provider,
+            .provider_comment = provider_comment,
+            .provider_decl = provider_decl,
             .name = flag_bits_name,
             .bitwidth = e.bitwidth,
             .mixins = mixins,
@@ -1705,7 +1711,7 @@ const render = struct {
                     const canonical_name: EnumName = .parse(a.canonical, self.enum_name);
                     if (alias_name.eql(canonical_name)) continue; // SRGB_NONLINEAR_KHR
                     const c: Comment = .parse(a.comment);
-                    const p: Provider = .{ .p = a.providers };
+                    const p: ProviderComment = .{ .p = a.providers };
                     try w.print(
                         \\{[comment]f}
                         \\{[provider]f}
@@ -1726,7 +1732,7 @@ const render = struct {
             pub fn format(self: @This(), w: *Writer) Writer.Error!void {
                 for (self.values) |v| {
                     const c: Comment = .parse(v.comment);
-                    const p: Provider = .{ .p = v.providers };
+                    const p: ProviderComment = .{ .p = v.providers };
                     const n: EnumName = .parse(v.name, self.enum_name);
 
                     try w.print(
@@ -1744,22 +1750,25 @@ const render = struct {
         };
 
         const comment: Comment = .parse(e_c.comment);
-        const provider: Provider = .{ .p = e_c.providers };
+        const provider_comment: ProviderComment = .{ .p = e_c.providers };
+        const provider_decl: ProviderDecl = .{ .p = e_c.providers };
         const e = e_c.type.@"enum";
         const enum_name: TypeName = .parse(name);
         const values: Values = .{ .values = e.values, .enum_name = enum_name };
         const aliases: Aliases = .{ .aliases = e.aliases, .enum_name = enum_name };
         try writer.print(
             \\{[comment]f}
-            \\{[provider]f}
+            \\{[provider_comment]f}
             \\pub const {[name]f}=enum(i32){{
             \\{[values]f}
             \\{[aliases]f}
+            \\{[provider_decl]f}
             \\}};
         , .{
             .name = enum_name,
             .comment = comment,
-            .provider = provider,
+            .provider_comment = provider_comment,
+            .provider_decl = provider_decl,
             .values = values,
             .aliases = aliases,
         });
@@ -1857,11 +1866,12 @@ const render = struct {
             }
         };
         const comment: Comment = .parse(e_c.comment);
-        const provider: Provider = .{ .p = e_c.providers };
+        const provider_comment: ProviderComment = .{ .p = e_c.providers };
         const e = e_c.type.@"struct";
         const members: Members = .{ .e = e, .r = registry };
         const struct_name: TypeName = .parse(name);
         const structextends: StructExtends = .{ .raw = e.structextends };
+        const provider_decl: ProviderDecl = .{ .p = e_c.providers };
         try writer.print(
             \\{[comment]f}
             \\{[provider]f}
@@ -1869,14 +1879,16 @@ const render = struct {
             \\{[members]f}
             \\{[structextends]f}
             \\pub const allowduplicate = {[allowduplicate]};
+            \\{[provider_decl]f}
             \\}};
         , .{
             .comment = comment,
-            .provider = provider,
+            .provider = provider_comment,
             .struct_name = struct_name,
             .members = members,
             .structextends = structextends,
             .allowduplicate = e.allowduplicate,
+            .provider_decl = provider_decl,
         });
     }
     const ZigVar = struct {
@@ -1993,36 +2005,45 @@ const render = struct {
             }
         };
         const comment: Comment = .parse(e_c.comment);
-        const provider: Provider = .{ .p = e_c.providers };
+        const provider_comment: ProviderComment = .{ .p = e_c.providers };
+        const provider_decl: ProviderDecl = .{ .p = e_c.providers };
         const e = e_c.type.@"union";
         const n: TypeName = .parse(name);
         const members: Members = .{ .e = e };
         try writer.print(
             \\{[comment]f}
-            \\{[provider]f}
+            \\{[provider_comment]f}
             \\pub const {[name]f}=extern union{{
             \\{[members]f}
+            \\{[provider_decl]f}
             \\}};
         , .{
             .comment = comment,
-            .provider = provider,
+            .provider_comment = provider_comment,
+            .provider_decl = provider_decl,
             .name = n,
             .members = members,
         });
     }
     fn printHandle(name: []const u8, e_c: Registry.TypeCommon, writer: *Writer) Writer.Error!void {
         const comment: Comment = .parse(e_c.comment);
-        const provider: Provider = .{ .p = e_c.providers };
+        const provider: ProviderComment = .{ .p = e_c.providers };
         const e = e_c.type.handle;
         const n: TypeName = .parse(name);
+        const provider_decl: ProviderDecl = .{ .p = e_c.providers };
         try writer.print(
             \\{[comment]f}
             \\{[provider]f}
-            \\pub const {[name]f}=enum({[t]s}){{null_handle,_}};
+            \\pub const {[name]f}=enum({[t]s}){{
+            \\      null_handle,
+            \\      _,
+            \\{[provider_decl]f}
+            \\}};
         , .{
             .comment = comment,
             .provider = provider,
             .name = n,
+            .provider_decl = provider_decl,
             .t = if (e.dispatchable) "usize" else "u64",
         });
     }
@@ -2169,7 +2190,7 @@ const render = struct {
     };
     fn printFuncpointer(name: []const u8, e_c: Registry.TypeCommon, writer: *Writer) Writer.Error!void {
         const comment: Comment = .parse(e_c.comment);
-        const provider: Provider = .{ .p = e_c.providers };
+        const provider: ProviderComment = .{ .p = e_c.providers };
         const e = e_c.type.funcpointer;
         const n: FuncpointerName = .parse(name);
         const params: Params = .{ .params = e.params };
@@ -2190,7 +2211,7 @@ const render = struct {
     }
     fn printAlias(name: []const u8, e_c: Registry.TypeCommon, writer: *Writer) Writer.Error!void {
         const comment: Comment = .parse(e_c.comment);
-        const provider: Provider = .{ .p = e_c.providers };
+        const provider: ProviderComment = .{ .p = e_c.providers };
         const e = e_c.type.alias;
         const a_name: TypeName = .parse(name);
         const c_name: TypeName = .parse(e.canonical);
@@ -2214,7 +2235,7 @@ const render = struct {
             if (enumFromName(enum { VK_TRUE, VK_FALSE }, c_name)) |_| continue;
 
             const comment: Comment = .parse(c.comment);
-            const provider: Provider = .{ .p = c.providers };
+            const provider: ProviderComment = .{ .p = c.providers };
             const name: ConstantName = .parse(c_name);
             const zig_type: Primitives = enumFromName(Primitives, c.type) orelse panic("Unknown primitive type: {s}", .{c.type});
             var value = c.value;
@@ -2263,6 +2284,7 @@ const render = struct {
         }
     }
     fn printTypes(registry: *const Registry, writer: *Writer) Writer.Error!void {
+        try printProviderDeclaration(writer);
         var it = registry.types.iterator();
         while (it.next()) |entry| {
             const name = entry.key_ptr.*;
@@ -2313,6 +2335,8 @@ const render = struct {
     }
     fn renderDll(registry: *const Registry, writer: *Writer) Writer.Error!void {
         try writer.writeAll(@embedFile("preamble.zig"));
+        // Dummy Extension so that we don't have to modify the printing of structs
+        try writer.writeAll("const Extension = enum(u8){};");
         try printVulkanApiAndBaseTypes(writer);
         try printConstants(registry.constants, writer);
         try printTypes(registry, writer);
@@ -2543,7 +2567,7 @@ const render = struct {
             .error_codes = command.error_codes,
             .name = name.name,
         };
-        const provider: Provider = .{ .p = command.providers };
+        const provider: ProviderComment = .{ .p = command.providers };
         const params: VCParams = .{
             .params = if (is_create_command)
                 command.params[0 .. command.params.len - 1]
@@ -2607,7 +2631,6 @@ const render = struct {
     fn referenceRawBasetypes(writer: *Writer) Writer.Error!void {
         const basetypes: []const []const u8 = &.{
             "vulkan_api",
-            "StructChain",
             "Bool32",
             "ApiVersion",
             "DeviceSize",
@@ -2700,6 +2723,24 @@ const render = struct {
             \\              @compileError(text);
             \\          }
             \\      }
+            \\      pub fn StructChain(comptime Base: type, comptime extension_types: []const type) type{
+            \\          const Err: ?type = if(!provided_extensions.satisfies(Base.provider)) 
+            \\                          Base
+            \\                      else blk:{
+            \\                          for(extension_types) |T| if(!provided_extensions.satisfies(T.provider)) break :blk T;
+            \\                          break :blk null;
+            \\                      };
+            \\          if(Err) |E| @compileError(std.fmt.comptimePrint(
+            \\                  \\Missing dependencies for type: {}
+            \\                  \\Required:
+            \\                  \\{f}
+            \\                  \\
+            \\                  \\Provided:
+            \\                  \\{f}
+            \\                  \\
+            \\                  , .{E, E.provider, provided_extensions}));
+            \\          return StructChain_(Base,extension_types);
+            \\      }
             \\      pub const extensions = Extension.getFilteredVkNames(config.extensions);
             \\      pub const loaded_commands = blk:{
             \\          var res: [config.commands.len]Command = undefined;
@@ -2749,10 +2790,10 @@ const render = struct {
             \\          const get_device_proc_addr: com.GetPtrType() = @ptrCast(raw_get_device_proc_addr.?(device, com.getVkName()));
             \\          loader.initDeviceCommands(get_device_proc_addr.?, justFreakingCastTheThing(device, Device));
             \\      }
-            \\              const provided_extensions: CommandDependencyRequirements = .{
-            \\                  .version = config.apiVersion,
-            \\                  .extensions = config.extensions,
-            \\              };
+            \\      const provided_extensions: Provider = .{
+            \\          .version = config.apiVersion,
+            \\          .extensions = config.extensions,
+            \\      };
             \\      fn assertDependencies(comptime cmd: Command) void{
             \\          comptime{
             \\              const requirements = cmd.requirements();
@@ -2782,6 +2823,7 @@ const render = struct {
         }
         try referenceRawBasetypes(writer);
         {
+            try printProviderDeclaration(writer);
             var it = registry.types.iterator();
             while (it.next()) |entry| {
                 const name = entry.key_ptr.*;
@@ -3063,12 +3105,33 @@ const render = struct {
         if (enumFromName(enum { VK_ERROR_UNKNOWN, VK_ERROR_VALIDATION_FAILED }, name)) |_| return true;
         return false;
     }
+    const ProviderDecl = struct {
+        p: Registry.Providers,
 
-    pub fn printCommands(registry: *const Registry, writer: *Writer) Writer.Error!void {
+        pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+            if (self.p.version == null and self.p.extensions.len == 0) {
+                try writer.writeAll("pub const provider: Provider = .{ .version = .{.minor = 0}, .extensions = &.{} };");
+                return;
+            }
+            try writer.print(
+                \\pub const provider: Provider = .{{ .version = .{{ .minor = {s} }}, .extensions = &.{{
+            , .{if (self.p.version) |v| blk: {
+                const last = std.mem.findScalarLast(u8, v.number, '.') orelse panic("Failed to print vulkan version for {s}", .{v.number});
+                break :blk v.number[last + 1 ..];
+            } else no_version});
+            for (self.p.extensions) |ext| {
+                const n: ExtensionName = .parse(ext);
+                try writer.print(".{f},", .{n});
+            }
+            try writer.writeAll("}};");
+        }
+    };
+
+    fn printProviderDeclaration(writer: *Writer) Writer.Error!void {
         try writer.writeAll(
             \\
-            \\/// Any of these is sufficient to satisfy command requirements
-            \\pub const CommandDependencyRequirements = struct{
+            \\/// Any of these is sufficient to satisfy requirements
+            \\pub const Provider = struct{
             \\  version: ApiVersion,
             \\  extensions: []const Extension,
             \\  pub fn satisfies(self: @This(), requirements: @This()) bool{
@@ -3098,6 +3161,8 @@ const render = struct {
             \\  }
             \\};
         );
+    }
+    pub fn printCommands(registry: *const Registry, writer: *Writer) Writer.Error!void {
         try printExternFunctions(registry, writer);
         try printCommandGroup(registry, writer);
     }
@@ -3155,7 +3220,7 @@ const render = struct {
         while (it.next()) |entry| {
             const name = entry.key_ptr.*;
             const command = entry.value_ptr.*;
-            const provider: Provider = .{ .p = command.providers };
+            const provider: ProviderComment = .{ .p = command.providers };
             const command_name: CommandFunctionName = .parseFromText(name);
             const params: Params = .{ .params = command.params };
             try writer.print(
@@ -3252,7 +3317,7 @@ const render = struct {
                 while (i.next()) |entry| {
                     const command = entry.value_ptr.*;
                     const command_name = entry.key_ptr.*;
-                    const provider: Provider = .{ .p = command.providers };
+                    const provider: ProviderComment = .{ .p = command.providers };
                     const name: CommandFunctionName = .parseFromText(command_name);
                     try w.print(
                         \\{[provider]f}
@@ -3266,7 +3331,7 @@ const render = struct {
             ret_declaration: CommandReturnTypeDeclaration,
             ret: CommandReturnType,
             params: Params,
-            provider: Provider,
+            provider: ProviderComment,
 
             pub fn parse(name: []const u8, command: Registry.Command) @This() {
                 const command_name: CommandTypeName = .parse(name);
@@ -3351,7 +3416,7 @@ const render = struct {
 
             pub fn format(self: @This(), w: *Writer) Writer.Error!void {
                 try w.writeAll(
-                    \\pub fn requirements(self: @This()) CommandDependencyRequirements{
+                    \\pub fn requirements(self: @This()) Provider{
                     \\    return switch(self) {
                 );
                 var i = self.commands;
@@ -3397,7 +3462,7 @@ const render = struct {
             command_name: CommandFunctionName,
             ret: LoaderCommandReturnType,
             params: Params,
-            provider: Provider,
+            provider: ProviderComment,
 
             pub fn parse(name: []const u8, command: Registry.Command) @This() {
                 const command_name: CommandFunctionName = .parseFromText(name);
@@ -3482,7 +3547,7 @@ const render = struct {
             \\  };
             \\  return &result;
             \\}
-            \\pub fn isSatisfied(command: @This(), provided: CommandDependencyRequirements) bool{
+            \\pub fn isSatisfied(command: @This(), provided: Provider) bool{
             \\    return provided.satifies(command.requirements());
             \\}
             \\pub const LoaderType = enum{ global, instance, device };
