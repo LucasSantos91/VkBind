@@ -127,10 +127,6 @@ const Context = struct {
         }
         return false;
     }
-    fn Ptr(comptime T: type) type {
-        const i = @typeInfo(T).pointer;
-        return @Pointer(.many, i.attrs, i.child, i.sentinel());
-    }
 
     pub fn init() @This() {
         var self: @This() = undefined;
