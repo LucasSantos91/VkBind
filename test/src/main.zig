@@ -65,9 +65,8 @@ const vk = vk_bind.VulkanContext(.{
         .KHR_surface,
         surface_ext,
         .KHR_swapchain,
-        .KHR_get_physical_device_properties2,
     } ++
-        [_]vk_bind.raw.Extension{ .KHR_portability_enumeration, .KHR_portability_subset }) // Must be the last ones
+        [_]vk_bind.raw.Extension{ .KHR_get_physical_device_properties2, .KHR_portability_enumeration, .KHR_portability_subset }) // Must be the last ones
     ,
     .apiVersion = .{ .minor = 0 }
 });
@@ -219,7 +218,7 @@ const Context = struct {
         };
 
         const instance_create_info: vk.InstanceCreateInfo = .{
-            .enabledExtensionCount = if (enumerate_portability) vk.extensions.instance.len else vk.extensions.instance.len - 1,
+            .enabledExtensionCount = if (enumerate_portability) vk.extensions.instance.len else vk.extensions.instance.len - 2,
             .ppEnabledExtensionNames = vk.extensions.instance.ptr,
             .flags = .{ .ENUMERATE_PORTABILITY_KHR = enumerate_portability },
             .pApplicationInfo = &.{ .apiVersion = vk.apiVersion, .applicationVersion = 0, .engineVersion = 0 },
@@ -228,7 +227,7 @@ const Context = struct {
         const inst_proc_addr = vk.getSpecializedGetInstanceProcAddr(instance).?;
         vk.initInstanceCommands(inst_proc_addr, instance);
         self.initWindow(instance, inst_proc_addr);
-        self.physical_device, self.family_index, const portability_subset = selectPhysicalDeviceAndQueueFamily(instance, self.surface);
+        self.physical_device, self.family_index, const portability_subset = selectPhysicalDeviceAndQueueFamily(instance, self.surface, enumerate_portability);
         const queue_create_info: [1]vk.DeviceQueueCreateInfo = .{vk.DeviceQueueCreateInfo{
             .queueFamilyIndex = self.family_index,
             .queueCount = 1,
@@ -584,7 +583,7 @@ const Context = struct {
             .SUBOPTIMAL_KHR => self.handleOutOfDate(),
         }
     }
-    fn selectPhysicalDeviceAndQueueFamily(instance: vk.Instance, surface: vk.SurfaceKHR) struct { vk.PhysicalDevice, u4, bool } {
+    fn selectPhysicalDeviceAndQueueFamily(instance: vk.Instance, surface: vk.SurfaceKHR, search_portability: bool) struct { vk.PhysicalDevice, u4, bool } {
         var physical_devices: [16]vk.PhysicalDevice = undefined;
         var count: u32 = physical_devices.len;
         _ = instance.enumeratePhysicalDevices(&count, &physical_devices) catch |e| panic(e, "Failed to enumerate physical devices");
@@ -606,7 +605,7 @@ const Context = struct {
                     return .{
                         p,
                         @intCast(index),
-                        isExtensionInList(ext, vk.Extension.KHR_portability_subset.getVkName()),
+                        search_portability and isExtensionInList(ext, vk.Extension.KHR_portability_subset.getVkName()),
                     };
                 }
             }
