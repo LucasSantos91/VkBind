@@ -202,8 +202,11 @@ const Context = struct {
         }
     }
     fn recycleSwapchain(self: *@This()) void {
+        self.device.deviceWaitIdle() catch |e| panic(e, "Failed to wait device idle");
         self.destroySwapchainImages();
+        const old_swapchain = self.swapchain;
         self.createSwapchain();
+        self.device.destroySwapchainKHR(old_swapchain);
     }
 
     pub fn init() @This() {
@@ -506,13 +509,10 @@ const Context = struct {
         }
     }
     pub fn run(self: *@This()) !void {
-        self.draw();
         while (glfw.glfwWindowShouldClose(self.window) == 0) {
+            self.draw();
             glfw.glfwWaitEvents();
         }
-    }
-    fn handleOutOfDate(self: *@This()) void {
-        _ = self;
     }
     fn draw(self: *@This()) void {
         self.device.deviceWaitIdle() catch |e| panic(e, "Failed to wait device idle");
@@ -520,18 +520,17 @@ const Context = struct {
         self.device.resetFences(1, &.{self.frame_in_flight}) catch |e| panic(e, "Failed to reset fence");
 
         var swapchain_index: u32 = undefined;
-        const acquire_result = self.device.acquireNextImageKHR(self.swapchain, std.math.maxInt(u64), self.image_available, .null_handle, &swapchain_index) catch |e| switch (e) {
+        const acquire_result = blk: while (true) break :blk self.device.acquireNextImageKHR(self.swapchain, std.math.maxInt(u64), self.image_available, .null_handle, &swapchain_index) catch |e| switch (e) {
             error.OUT_OF_HOST_MEMORY, error.OUT_OF_DEVICE_MEMORY, error.DEVICE_LOST, error.SURFACE_LOST_KHR => |err| panic(err, "Failed to acquire swapchain image"),
             error.OUT_OF_DATE_KHR => {
-                self.handleOutOfDate();
-                @panic("Not implemented yet");
+                self.recycleSwapchain();
+                continue;
             },
             error.FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT => unreachable,
         };
         switch (acquire_result) {
             .SUCCESS => {},
-            .TIMEOUT => unreachable,
-            .NOT_READY => {},
+            .TIMEOUT, .NOT_READY => unreachable,
             .SUBOPTIMAL_KHR => {},
         }
         self.command_buffer.resetCommandBuffer(.{}) catch |e| panic(e, "Failed to reset command buffer");
@@ -580,7 +579,7 @@ const Context = struct {
         };
         switch (self.queue.queuePresentKHR(&present_info) catch |e| panic(e, "Failed to present")) {
             .SUCCESS => {},
-            .SUBOPTIMAL_KHR => self.handleOutOfDate(),
+            .SUBOPTIMAL_KHR => self.recycleSwapchain(),
         }
     }
     fn selectPhysicalDeviceAndQueueFamily(instance: vk.Instance, surface: vk.SurfaceKHR, search_portability: bool) struct { vk.PhysicalDevice, u4, bool } {
