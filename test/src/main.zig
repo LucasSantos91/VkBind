@@ -494,9 +494,9 @@ const Context = struct {
         }
     }
     pub fn run(self: *@This()) !void {
+        self.draw();
         while (glfw.glfwWindowShouldClose(self.window) == 0) {
-            glfw.glfwPollEvents();
-            self.draw();
+            glfw.glfwWaitEvents();
         }
     }
     fn handleOutOfDate(self: *@This()) void {
