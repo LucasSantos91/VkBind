@@ -58,6 +58,8 @@ const vk = vk_bind.VulkanContext(.{
         .queueSubmit,
         .queuePresentKHR,
         .cmdBindPipeline,
+        .deviceWaitIdle,
+        .cmdEndRenderPass,
     } ++ debug_commands,
     .extensions = &([_]vk_bind.raw.Extension{
         .KHR_surface,
@@ -85,7 +87,6 @@ const Context = struct {
     const Temp = struct {
         instance: vk.Instance,
         command_pool: vk.CommandPool,
-        set_layout: vk.DescriptorSetLayout,
         pipeline_layout: vk.PipelineLayout,
     };
     const Image = struct {
@@ -249,20 +250,9 @@ const Context = struct {
             .commandBufferCount = 1,
         }, @as(*[1]vk.CommandBuffer, &self.command_buffer)) catch |e| panic(e, "Failed to allocate command buffers");
 
-        const set_bindings: vk.DescriptorSetLayoutBinding = .{
-            .binding = 0,
-            .descriptorCount = 1,
-            .descriptorType = .STORAGE_BUFFER,
-            .stageFlags = .{ .VERTEX = true },
-        };
-        const set_layout_create_info: vk.DescriptorSetLayoutCreateInfo = .{
-            .bindingCount = 1,
-            .pBindings = @ptrCast(&set_bindings),
-        };
-        const set_layout = self.device.createDescriptorSetLayout(&set_layout_create_info) catch |e| panic(e, "Failed to create descriptor set layout");
         const pipeline_layout_create_info: vk.PipelineLayoutCreateInfo = .{
-            .setLayoutCount = 1,
-            .pSetLayouts = @ptrCast(&set_layout),
+            .setLayoutCount = 0,
+            .pSetLayouts = undefined,
         };
         const pipeline_layout = self.device.createPipelineLayout(&pipeline_layout_create_info) catch |e| panic(e, "Failed to create pipeline layout");
         const color_attachment_reference: vk.AttachmentReference = .{
@@ -438,12 +428,12 @@ const Context = struct {
             .pStages = &.{
                 vk.PipelineShaderStageCreateInfo{
                     .stage = .VERTEX,
-                    .pName = "vertexMain",
+                    .pName = "vertMain",
                     .module = shaders_module,
                 },
                 vk.PipelineShaderStageCreateInfo{
                     .stage = .FRAGMENT,
-                    .pName = "fragmentMain",
+                    .pName = "fragMain",
                     .module = shaders_module,
                 },
             },
@@ -477,7 +467,6 @@ const Context = struct {
             self.temp = .{
                 .instance = instance,
                 .command_pool = command_pool,
-                .set_layout = set_layout,
                 .pipeline_layout = pipeline_layout,
             };
         }
@@ -495,7 +484,6 @@ const Context = struct {
             self.device.destroySwapchainKHR(self.swapchain);
             self.device.destroyPipeline(self.pipeline);
             self.device.destroyPipelineLayout(self.temp.pipeline_layout);
-            self.device.destroyDescriptorSetLayout(self.temp.set_layout);
             self.device.destroyRenderPass(self.render_pass);
             self.device.destroyCommandPool(self.temp.command_pool);
             self.temp.instance.destroySurfaceKHR(self.surface);
@@ -515,6 +503,7 @@ const Context = struct {
         _ = self;
     }
     fn draw(self: *@This()) void {
+        self.device.deviceWaitIdle() catch |e| panic(e, "Failed to wait device idle");
         assert(self.device.waitForFences(1, &.{self.frame_in_flight}, .true, std.math.maxInt(u64)) catch |e| panic(e, "Failed to wait for fence") == .SUCCESS);
         self.device.resetFences(1, &.{self.frame_in_flight}) catch |e| panic(e, "Failed to reset fence");
 
@@ -544,7 +533,7 @@ const Context = struct {
                 .extent = self.swapchain_extent,
             },
             .clearValueCount = 1,
-            .pClearValues = &.{.{ .color = .{ .float32 = .{ 0, 0, 0, 1 } } }},
+            .pClearValues = &.{.{ .color = .{ .float32 = .{ 1, 0, 0, 1 } } }},
         };
         self.command_buffer.cmdBeginRenderPass(&render_pass_begin, .INLINE);
         const viewport: vk.Viewport = .{
@@ -557,6 +546,7 @@ const Context = struct {
         };
         self.command_buffer.cmdSetViewport(0, 1, @ptrCast(&viewport));
         self.command_buffer.cmdDraw(3, 1, 0, 0);
+        self.command_buffer.cmdEndRenderPass();
         self.command_buffer.endCommandBuffer() catch |e| panic(e, "Failed to end command buffer");
 
         const submit_info: vk.SubmitInfo = .{
