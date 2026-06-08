@@ -16,7 +16,7 @@ struct VertexOutput {
 };
 
 [shader("vertex")]
-VertexOutput vertMain(uint vid : SV_VertexID) {
+VertexOutput vertMain(uint vid : SV_VulkanVertexID) {
     VertexOutput output;
     output.sv_position = float4(positions[vid], 0.0, 1.0);
     output.color = colors[vid];

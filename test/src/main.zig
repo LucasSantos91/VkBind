@@ -474,6 +474,7 @@ const Context = struct {
     }
     pub fn deinit(self: *@This()) void {
         if (comptime is_safe) {
+            self.device.deviceWaitIdle() catch |e| panic(e, "Failed to wait device idle");
             self.device.destroyFence(self.frame_in_flight);
             self.device.destroySemaphore(self.image_available);
             self.device.destroySemaphore(self.render_finished);
