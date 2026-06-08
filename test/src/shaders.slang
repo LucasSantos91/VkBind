@@ -1,21 +1,22 @@
-struct VertexInput{
-	float3 position;
-}
-StructuredBuffer<VertexInput> vertex_data; 
-
 struct VertexOutput{
 	float4 position: SV_Position;
-	float3 color;
+	float4 color;
 }
 
 [shader("vertex")]
-VertexOutput vertexMain(uint vertexID : SV_VulkanVertexID ) {
-    	VertexOutput output;
-	output.position = float4(vertex_data[vertexID].position, 1.0);
-	output.color = float3(0.5 * vertexID, float(vertexID)/2.0, 0.5);
-    	return output;
+VertexOutput vertexMain(uint vertexID : SV_VulkanVertexID) {
+    VertexOutput o;
+    // Full‑screen triangle in Vulkan clip space (Y down)
+    const float2 pos[3] = {
+        float2(-1, -3),   // top
+        float2(-1,  1),   // bottom‑left
+        float2( 3,  1)    // bottom‑right
+    };
+    o.position = float4(pos[vertexID], 0.0, 1.0);
+    o.color = float4(0,1,0,1);   // green
+    return o;
 }
 [shader("fragment")]
-float4 fragmentMain(VertexOutput input) {
-    	return float4(input.color, 1.0);
+float4 fragmentMain(VertexOutput v) {
+    	return v.color;
 }

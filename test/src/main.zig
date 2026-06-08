@@ -58,6 +58,8 @@ const vk = vk_bind.VulkanContext(.{
         .queueSubmit,
         .queuePresentKHR,
         .cmdBindPipeline,
+        .cmdEndRenderPass,
+        .deviceWaitIdle,
     } ++ debug_commands,
     .extensions = &([_]vk_bind.raw.Extension{
         .KHR_surface,
@@ -249,15 +251,9 @@ const Context = struct {
             .commandBufferCount = 1,
         }, @as(*[1]vk.CommandBuffer, &self.command_buffer)) catch |e| panic(e, "Failed to allocate command buffers");
 
-        const set_bindings: vk.DescriptorSetLayoutBinding = .{
-            .binding = 0,
-            .descriptorCount = 1,
-            .descriptorType = .STORAGE_BUFFER,
-            .stageFlags = .{ .VERTEX = true },
-        };
         const set_layout_create_info: vk.DescriptorSetLayoutCreateInfo = .{
-            .bindingCount = 1,
-            .pBindings = @ptrCast(&set_bindings),
+            .bindingCount = 0,
+            .pBindings = undefined,
         };
         const set_layout = self.device.createDescriptorSetLayout(&set_layout_create_info) catch |e| panic(e, "Failed to create descriptor set layout");
         const pipeline_layout_create_info: vk.PipelineLayoutCreateInfo = .{
@@ -372,41 +368,65 @@ const Context = struct {
             dst.framebuffer = self.device.createFramebuffer(&framebuffer_create_info) catch |e| panic(e, "Failed to create framebuffer");
         }
 
-        const shaders_code align(@alignOf(u32)) = comptime @embedFile("shaders").*;
-        const shaders_module_create_info: vk.ShaderModuleCreateInfo = .{
-            .pCode = @ptrCast(&shaders_code),
-            .codeSize = comptime shaders_code.len,
+        const vertex_code align(@alignOf(u32)) = comptime @embedFile("vertex.spv").*;
+        const vertex_module_create_info: vk.ShaderModuleCreateInfo = .{
+            .pCode = @ptrCast(&vertex_code),
+            .codeSize = comptime vertex_code.len,
         };
-        const shaders_module = self.device.createShaderModule(&shaders_module_create_info) catch |e| panic(e, "Failed to create shader module");
-        defer self.device.destroyShaderModule(shaders_module);
+        const vertex_module = self.device.createShaderModule(&vertex_module_create_info) catch |e| panic(e, "Failed to create shader module");
+        defer self.device.destroyShaderModule(vertex_module);
+
+        const fragment_code align(@alignOf(u32)) = comptime @embedFile("fragment.spv").*;
+        const fragment_module_create_info: vk.ShaderModuleCreateInfo = .{
+            .pCode = @ptrCast(&fragment_code),
+            .codeSize = comptime fragment_code.len,
+        };
+        const fragment_module = self.device.createShaderModule(&fragment_module_create_info) catch |e| panic(e, "Failed to create shader module");
+        defer self.device.destroyShaderModule(vertex_module);
         const pipeline_create_info: vk.GraphicsPipelineCreateInfo = .{
             .layout = pipeline_layout,
             .flags = .{},
             .pColorBlendState = &vk.PipelineColorBlendStateCreateInfo{
                 .logicOpEnable = .false,
-                .logicOp = undefined,
-                .blendConstants = undefined,
+                .logicOp = .CLEAR,
+                .blendConstants = .{ 0, 0, 0, 0 },
                 .attachmentCount = 1,
                 .pAttachments = &.{vk.PipelineColorBlendAttachmentState{
                     .blendEnable = .false,
-                    .colorBlendOp = undefined,
-                    .alphaBlendOp = undefined,
-                    .srcAlphaBlendFactor = undefined,
-                    .srcColorBlendFactor = undefined,
-                    .dstAlphaBlendFactor = undefined,
-                    .dstColorBlendFactor = undefined,
+                    .colorBlendOp = .ADD,
+                    .alphaBlendOp = .ADD,
+                    .srcAlphaBlendFactor = .ZERO,
+                    .srcColorBlendFactor = .ZERO,
+                    .dstAlphaBlendFactor = .ZERO,
+                    .dstColorBlendFactor = .ZERO,
                 }},
             },
             .pDepthStencilState = &vk.PipelineDepthStencilStateCreateInfo{
                 .depthBoundsTestEnable = .false,
-                .depthWriteEnable = undefined,
-                .depthCompareOp = undefined,
-                .stencilTestEnable = undefined,
-                .front = undefined,
-                .back = undefined,
-                .minDepthBounds = undefined,
-                .maxDepthBounds = undefined,
-                .depthTestEnable = undefined,
+                .depthWriteEnable = .false,
+                .depthTestEnable = .false,
+                .stencilTestEnable = .false,
+                .depthCompareOp = .NEVER,
+                .front = .{
+                    .failOp = .KEEP,
+                    .passOp = .KEEP,
+                    .depthFailOp = .KEEP,
+                    .compareOp = .NEVER,
+                    .compareMask = 0,
+                    .writeMask = 0,
+                    .reference = 0,
+                },
+                .back = .{
+                    .failOp = .KEEP,
+                    .passOp = .KEEP,
+                    .depthFailOp = .KEEP,
+                    .compareOp = .NEVER,
+                    .compareMask = 0,
+                    .writeMask = 0,
+                    .reference = 0,
+                },
+                .minDepthBounds = 0,
+                .maxDepthBounds = 1,
             },
             .pDynamicState = &vk.PipelineDynamicStateCreateInfo{
                 .dynamicStateCount = 1,
@@ -417,7 +437,7 @@ const Context = struct {
                 .alphaToCoverageEnable = .false,
                 .alphaToOneEnable = .false,
                 .rasterizationSamples = .@"1",
-                .minSampleShading = undefined,
+                .minSampleShading = 0,
             },
             .pInputAssemblyState = &vk.PipelineInputAssemblyStateCreateInfo{
                 .topology = .TRIANGLE_LIST,
@@ -428,27 +448,28 @@ const Context = struct {
                 .rasterizerDiscardEnable = .false,
                 .polygonMode = .FILL,
                 .frontFace = .CLOCKWISE,
+                .cullMode = .{},
                 .depthBiasEnable = .false,
                 .depthClampEnable = .false,
-                .depthBiasConstantFactor = undefined,
-                .depthBiasClamp = undefined,
-                .depthBiasSlopeFactor = undefined,
+                .depthBiasConstantFactor = 0,
+                .depthBiasClamp = 0,
+                .depthBiasSlopeFactor = 0,
             },
             .stageCount = 2,
             .pStages = &.{
                 vk.PipelineShaderStageCreateInfo{
                     .stage = .VERTEX,
-                    .pName = "vertexMain",
-                    .module = shaders_module,
+                    .pName = "main",
+                    .module = vertex_module,
                 },
                 vk.PipelineShaderStageCreateInfo{
                     .stage = .FRAGMENT,
-                    .pName = "fragmentMain",
-                    .module = shaders_module,
+                    .pName = "main",
+                    .module = fragment_module,
                 },
             },
             .pTessellationState = &vk.PipelineTessellationStateCreateInfo{
-                .patchControlPoints = undefined,
+                .patchControlPoints = 0,
             },
             .pVertexInputState = &vk.PipelineVertexInputStateCreateInfo{},
             .pViewportState = &vk.PipelineViewportStateCreateInfo{
@@ -457,8 +478,8 @@ const Context = struct {
                     .x = 0,
                     .y = 0,
                 }, .extent = .{
-                    .width = std.math.maxInt(i32),
-                    .height = std.math.maxInt(i32),
+                    .width = self.swapchain_extent.width,
+                    .height = self.swapchain_extent.height,
                 } }},
                 .viewportCount = 1,
             },
@@ -485,6 +506,7 @@ const Context = struct {
     }
     pub fn deinit(self: *@This()) void {
         if (comptime is_safe) {
+            self.device.deviceWaitIdle() catch |e| panic(e, "Failed to wait device idle");
             self.device.destroyFence(self.frame_in_flight);
             self.device.destroySemaphore(self.image_available);
             self.device.destroySemaphore(self.render_finished);
@@ -506,15 +528,16 @@ const Context = struct {
         }
     }
     pub fn run(self: *@This()) !void {
+        self.draw();
         while (glfw.glfwWindowShouldClose(self.window) == 0) {
-            glfw.glfwPollEvents();
-            self.draw();
+            glfw.glfwWaitEvents();
         }
     }
     fn handleOutOfDate(self: *@This()) void {
         _ = self;
     }
     fn draw(self: *@This()) void {
+        self.device.deviceWaitIdle() catch |e| panic(e, "Failed to wait device idle");
         assert(self.device.waitForFences(1, &.{self.frame_in_flight}, .true, std.math.maxInt(u64)) catch |e| panic(e, "Failed to wait for fence") == .SUCCESS);
         self.device.resetFences(1, &.{self.frame_in_flight}) catch |e| panic(e, "Failed to reset fence");
 
@@ -544,7 +567,7 @@ const Context = struct {
                 .extent = self.swapchain_extent,
             },
             .clearValueCount = 1,
-            .pClearValues = &.{.{ .color = .{ .float32 = .{ 0, 0, 0, 1 } } }},
+            .pClearValues = &.{.{ .color = .{ .float32 = .{ 0.5, 0, 0, 0 } } }},
         };
         self.command_buffer.cmdBeginRenderPass(&render_pass_begin, .INLINE);
         const viewport: vk.Viewport = .{
@@ -557,6 +580,7 @@ const Context = struct {
         };
         self.command_buffer.cmdSetViewport(0, 1, @ptrCast(&viewport));
         self.command_buffer.cmdDraw(3, 1, 0, 0);
+        self.command_buffer.cmdEndRenderPass();
         self.command_buffer.endCommandBuffer() catch |e| panic(e, "Failed to end command buffer");
 
         const submit_info: vk.SubmitInfo = .{
