@@ -418,7 +418,7 @@ const Context = struct {
                 .lineWidth = 1,
                 .rasterizerDiscardEnable = .false,
                 .polygonMode = .FILL,
-                .frontFace = .CLOCKWISE,
+                .frontFace = undefined,
                 .cullMode = .{},
                 .depthBiasEnable = .false,
                 .depthClampEnable = .false,
@@ -440,7 +440,7 @@ const Context = struct {
                 },
             },
             .pTessellationState = &vk.PipelineTessellationStateCreateInfo{
-                .patchControlPoints = 0,
+                .patchControlPoints = undefined,
             },
             .pVertexInputState = &vk.PipelineVertexInputStateCreateInfo{},
             .pViewportState = &vk.PipelineViewportStateCreateInfo{
@@ -449,8 +449,8 @@ const Context = struct {
                     .x = 0,
                     .y = 0,
                 }, .extent = .{
-                    .width = self.swapchain_extent.width,
-                    .height = self.swapchain_extent.height,
+                    .width = std.math.maxInt(i32),
+                    .height = std.math.maxInt(i32),
                 } }},
                 .viewportCount = 1,
             },
