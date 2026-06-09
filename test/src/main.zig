@@ -88,17 +88,19 @@ const Context = struct {
         command_pool: vk.CommandPool,
         pipeline_layout: vk.PipelineLayout,
     };
-    const Image = struct {
+    const Frame = struct {
         image: vk.Image,
         view: vk.ImageView,
         framebuffer: vk.Framebuffer,
+        image_available: vk.Semaphore,
+        frame_in_flight: vk.Fence,
+        cmd: vk.CommandBuffer,
     };
 
     temp: if (is_safe) Temp else void,
     device: vk.Device,
     physical_device: vk.PhysicalDevice,
     family_index: u32,
-    command_buffer: vk.CommandBuffer,
     surface: vk.SurfaceKHR,
     pipeline: vk.Pipeline,
     window: *glfw.GLFWwindow,
@@ -106,12 +108,11 @@ const Context = struct {
     queue: vk.Queue,
     surface_format: vk.SurfaceFormatKHR,
     swapchain: vk.SwapchainKHR,
-    swapchain_images: [max_swapchain_images]Image,
+    swapchain_images: [max_swapchain_images]Frame,
+    render_finished_semaphores: [max_swapchain_images]vk.Semaphore,
     swapchain_images_len: u32,
+    frame_index: std.math.IntFittingRange(0, max_swapchain_images - 1) = 0,
     swapchain_extent: vk.Extent2D,
-    image_available: vk.Semaphore,
-    render_finished: vk.Semaphore,
-    frame_in_flight: vk.Fence,
 
     const max_swapchain_images = 16;
 
@@ -185,11 +186,9 @@ const Context = struct {
                     .b = .IDENTITY,
                 },
             };
-            dst.* = .{
-                .image = src,
-                .view = self.device.createImageView(&view_create_info) catch |e| panic(e, "Failed to create image view"),
-                .framebuffer = undefined,
-            };
+            dst.image = src;
+            dst.view = self.device.createImageView(&view_create_info) catch |e| panic(e, "Failed to create image view");
+
             const framebuffer_create_info: vk.FramebufferCreateInfo = .{
                 .renderPass = self.render_pass,
                 .attachmentCount = 1,
@@ -212,6 +211,7 @@ const Context = struct {
     pub fn init() @This() {
         var self: @This() = undefined;
         self.swapchain = .null_handle;
+        self.frame_index = 0;
 
         const enumerate_portability = blk: {
             var buffer: [512]vk.ExtensionProperties = undefined;
@@ -310,17 +310,6 @@ const Context = struct {
             _ = self.physical_device.getPhysicalDeviceSurfaceFormatsKHR(self.surface, &format_count, &format_buffer) catch |e| panic(e, "Failed to get physical device surface formats");
             self.surface_format = format_buffer[0];
         }
-
-        const command_pool = self.device.createCommandPool(&.{
-            .queueFamilyIndex = self.family_index,
-            .flags = .{ .RESET_COMMAND_BUFFER = true },
-        }) catch |e| panic(e, "Failed to create command pool");
-
-        self.device.allocateCommandBuffers(&.{
-            .commandPool = command_pool,
-            .level = .PRIMARY,
-            .commandBufferCount = 1,
-        }, @as(*[1]vk.CommandBuffer, &self.command_buffer)) catch |e| panic(e, "Failed to allocate command buffers");
 
         const pipeline_layout_create_info: vk.PipelineLayoutCreateInfo = .{
             .setLayoutCount = 0,
@@ -470,9 +459,24 @@ const Context = struct {
         assert(self.device.createGraphicsPipelines(.null_handle, 1, &.{pipeline_create_info}, @ptrCast(
             &self.pipeline,
         )) catch |e| panic(e, "Failed to create pipeline") == .SUCCESS);
-        self.image_available = self.device.createSemaphore(&.{}) catch |e| panic(e, "Failed to create semaphore");
-        self.render_finished = self.device.createSemaphore(&.{}) catch |e| panic(e, "Failed to create semaphore");
-        self.frame_in_flight = self.device.createFence(&.{ .flags = .{ .SIGNALED = true } }) catch |e| panic(e, "Failed to create fence");
+
+        const command_pool = self.device.createCommandPool(&.{
+            .queueFamilyIndex = self.family_index,
+            .flags = .{ .RESET_COMMAND_BUFFER = true },
+        }) catch |e| panic(e, "Failed to create command pool");
+
+        var cmd_buffers: [max_swapchain_images]vk.CommandBuffer = undefined;
+        self.device.allocateCommandBuffers(&.{
+            .commandPool = command_pool,
+            .level = .PRIMARY,
+            .commandBufferCount = cmd_buffers.len,
+        }, &cmd_buffers) catch |e| panic(e, "Failed to allocate command buffers");
+        for (&self.swapchain_images, &self.render_finished_semaphores, cmd_buffers) |*i, *s, c| {
+            s.* = self.device.createSemaphore(&.{}) catch |e| panic(e, "Failed to create semaphore");
+            i.image_available = self.device.createSemaphore(&.{}) catch |e| panic(e, "Failed to create semaphore");
+            i.frame_in_flight = self.device.createFence(&.{ .flags = .{ .SIGNALED = true } }) catch |e| panic(e, "Failed to create fence");
+            i.cmd = c;
+        }
 
         if (comptime is_safe) {
             self.temp = .{
@@ -492,9 +496,11 @@ const Context = struct {
     pub fn deinit(self: *@This()) void {
         if (comptime is_safe) {
             self.device.deviceWaitIdle() catch |e| panic(e, "Failed to wait device idle");
-            self.device.destroyFence(self.frame_in_flight);
-            self.device.destroySemaphore(self.image_available);
-            self.device.destroySemaphore(self.render_finished);
+            for (self.render_finished_semaphores, self.swapchain_images) |s, i| {
+                self.device.destroySemaphore(s);
+                self.device.destroySemaphore(i.image_available);
+                self.device.destroyFence(i.frame_in_flight);
+            }
             self.destroySwapchainImages();
             self.device.destroySwapchainKHR(self.swapchain);
             self.device.destroyPipeline(self.pipeline);
@@ -515,27 +521,32 @@ const Context = struct {
         }
     }
     fn draw(self: *@This()) void {
-        self.device.deviceWaitIdle() catch |e| panic(e, "Failed to wait device idle");
-        assert(self.device.waitForFences(1, &.{self.frame_in_flight}, .true, std.math.maxInt(u64)) catch |e| panic(e, "Failed to wait for fence") == .SUCCESS);
-        self.device.resetFences(1, &.{self.frame_in_flight}) catch |e| panic(e, "Failed to reset fence");
+        const frame = &self.swapchain_images[self.frame_index];
+        self.frame_index = if (self.frame_index == max_swapchain_images - 1)
+            0
+        else
+            self.frame_index + 1;
+
+        assert(self.device.waitForFences(1, @ptrCast(&frame.frame_in_flight), .true, std.math.maxInt(u64)) catch |e| panic(e, "Failed to wait for fence") == .SUCCESS);
+        self.device.resetFences(1, @ptrCast(&frame.frame_in_flight)) catch |e| panic(e, "Failed to reset fence");
 
         var swapchain_index: u32 = undefined;
-        const acquire_result = blk: while (true) break :blk self.device.acquireNextImageKHR(self.swapchain, std.math.maxInt(u64), self.image_available, .null_handle, &swapchain_index) catch |e| switch (e) {
-            error.OUT_OF_HOST_MEMORY, error.OUT_OF_DEVICE_MEMORY, error.DEVICE_LOST, error.SURFACE_LOST_KHR => |err| panic(err, "Failed to acquire swapchain image"),
-            error.OUT_OF_DATE_KHR => {
-                self.recycleSwapchain();
-                continue;
-            },
-            error.FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT => unreachable,
-        };
-        switch (acquire_result) {
-            .SUCCESS => {},
-            .TIMEOUT, .NOT_READY => unreachable,
-            .SUBOPTIMAL_KHR => {},
+        while (true) {
+            _ = self.device.acquireNextImageKHR(self.swapchain, std.math.maxInt(u64), frame.image_available, .null_handle, &swapchain_index) catch |e| switch (e) {
+                error.OUT_OF_HOST_MEMORY, error.OUT_OF_DEVICE_MEMORY, error.DEVICE_LOST, error.SURFACE_LOST_KHR => |err| panic(err, "Failed to acquire swapchain image"),
+                error.OUT_OF_DATE_KHR => {
+                    self.recycleSwapchain();
+                    continue;
+                },
+                error.FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT => unreachable,
+            };
+            break;
         }
-        self.command_buffer.resetCommandBuffer(.{}) catch |e| panic(e, "Failed to reset command buffer");
-        self.command_buffer.beginCommandBuffer(&.{}) catch |e| panic(e, "Failed to begin command buffer");
-        self.command_buffer.cmdBindPipeline(.GRAPHICS, self.pipeline);
+        const render_finished = &self.render_finished_semaphores[swapchain_index];
+
+        frame.cmd.resetCommandBuffer(.{}) catch |e| panic(e, "Failed to reset command buffer");
+        frame.cmd.beginCommandBuffer(&.{}) catch |e| panic(e, "Failed to begin command buffer");
+        frame.cmd.cmdBindPipeline(.GRAPHICS, self.pipeline);
         const render_pass_begin: vk.RenderPassBeginInfo = .{
             .renderPass = self.render_pass,
             .framebuffer = self.swapchain_images[swapchain_index].framebuffer,
@@ -546,7 +557,7 @@ const Context = struct {
             .clearValueCount = 1,
             .pClearValues = &.{.{ .color = .{ .float32 = .{ 1, 0, 0, 1 } } }},
         };
-        self.command_buffer.cmdBeginRenderPass(&render_pass_begin, .INLINE);
+        frame.cmd.cmdBeginRenderPass(&render_pass_begin, .INLINE);
         const viewport: vk.Viewport = .{
             .x = 0,
             .y = 0,
@@ -555,26 +566,26 @@ const Context = struct {
             .minDepth = 0,
             .maxDepth = 1,
         };
-        self.command_buffer.cmdSetViewport(0, 1, @ptrCast(&viewport));
-        self.command_buffer.cmdDraw(3, 1, 0, 0);
-        self.command_buffer.cmdEndRenderPass();
-        self.command_buffer.endCommandBuffer() catch |e| panic(e, "Failed to end command buffer");
+        frame.cmd.cmdSetViewport(0, 1, @ptrCast(&viewport));
+        frame.cmd.cmdDraw(3, 1, 0, 0);
+        frame.cmd.cmdEndRenderPass();
+        frame.cmd.endCommandBuffer() catch |e| panic(e, "Failed to end command buffer");
 
         const submit_info: vk.SubmitInfo = .{
             .commandBufferCount = 1,
-            .pCommandBuffers = @ptrCast(&self.command_buffer),
+            .pCommandBuffers = @ptrCast(&frame.cmd),
             .waitSemaphoreCount = 1,
-            .pWaitSemaphores = @ptrCast(&self.image_available),
+            .pWaitSemaphores = @ptrCast(&frame.image_available),
             .pWaitDstStageMask = &.{.{ .COLOR_ATTACHMENT_OUTPUT = true }},
             .signalSemaphoreCount = 1,
-            .pSignalSemaphores = @ptrCast(&self.render_finished),
+            .pSignalSemaphores = @ptrCast(render_finished),
         };
-        self.queue.queueSubmit(1, @ptrCast(&submit_info), self.frame_in_flight) catch |e| panic(e, "Failed to submit to queue");
+        self.queue.queueSubmit(1, @ptrCast(&submit_info), frame.frame_in_flight) catch |e| panic(e, "Failed to submit to queue");
         const present_info: vk.PresentInfoKHR = .{
             .swapchainCount = 1,
             .pSwapchains = @ptrCast(&self.swapchain),
             .waitSemaphoreCount = 1,
-            .pWaitSemaphores = @ptrCast(&self.render_finished),
+            .pWaitSemaphores = @ptrCast(render_finished),
             .pImageIndices = @ptrCast(&swapchain_index),
         };
         switch (self.queue.queuePresentKHR(&present_info) catch |e| panic(e, "Failed to present")) {
