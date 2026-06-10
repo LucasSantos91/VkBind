@@ -169,6 +169,7 @@ fn StructChain_(comptime Base: type, comptime extension_types: []const type) typ
             if (comptime Field == Base and index == 0) return self.getBaseC();
             const extension_index = comptime blk: {
                 var i = index;
+                if (Field == Base) i -= 1;
                 for (extension_types, 0..) |T, final_index| {
                     if (Field == T) {
                         if (i == 0) break :blk final_index;
