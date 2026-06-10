@@ -3,7 +3,8 @@
     .version = "0.0.1",
     .minimum_zig_version = "0.17.0-dev.135+9df02121d",
     .paths = .{
-        "src/",
+        "src",
+        "example",
     },
     .fingerprint = 0x424d8f64a649bfc6,
     .dependencies = .{},
