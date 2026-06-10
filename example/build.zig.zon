@@ -11,8 +11,8 @@
             .hash = "N-V-__8AAAZquQEXic7B2h2BKcC6HF_LAJxiSolGIEvmP2JT",
         },
         .@"glfw-zig" = .{
-            .url = "https://github.com/LucasSantos91/glfw-zig/archive/eef63b96a658bceb2219623fecc5a9997a115897.zip",
-            .hash = "glfw_zig-0.0.1-o6Bmm_IRAAA29IXBrkI3oPeCLrqI3J_nbXl5Rg92x7AQ",
+            .url = "git+https://github.com/LucasSantos91/glfw-zig.git#e63418d42d202facaa81921ae094b5e05c980c97",
+            .hash = "glfw_zig-0.0.1-o6BmmzsSAACUTqPBZCNrmo4VirmPTekP870oYGW3oXKH",
         },
     },
 }
