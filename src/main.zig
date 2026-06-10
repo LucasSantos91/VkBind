@@ -2304,27 +2304,24 @@ const render = struct {
         }
     }
     fn printVulkanApiAndBaseTypes(writer: *Writer) Writer.Error!void {
-        try writer.print(
-            \\const builtin = @import("builtin");
-            \\pub const vulkan_api: std.builtin.CallingConvention = if (builtin.os.tag == .windows and builtin.cpu.arch == .x86)
-            \\    .winapi
-            \\else if (builtin.abi == .android and (builtin.cpu.arch.isArm() or builtin.cpu.arch.isThumb()) and std.Target.arm.featureSetHas(builtin.cpu.features, .has_v7) and builtin.cpu.arch.ptrBitWidth() == 32)
-            \\    .arm_aapcs_vfp
-            \\else
-            \\    .c;
-            \\  {s}
-            \\  pub const StructChain = StructChain_;
-            \\
-        , .{@embedFile("basetypes.zig")});
+        try writer.writeAll(@embedFile("basetypes.zig"));
     }
     pub fn render(registry: *const Registry, writer: *Writer) Writer.Error!void {
         overrideTypes(registry);
 
-        try writer.print(
-            \\{s}
-            \\pub const raw = struct{{
+        try writer.writeAll(@embedFile("preamble.zig"));
+        try writer.writeAll(
+            \\pub const raw = struct{
             \\
-        , .{@embedFile("preamble.zig")});
+        );
+        const decls: []const []const u8 = &.{
+            "isDispatchableHandle",
+            "isExtensibleStruct",
+            "StructChain",
+        };
+        for (decls) |d| {
+            try writer.print("pub const {[name]s} = {[name]s}_;", .{ .name = d });
+        }
         try printVulkanApiAndBaseTypes(writer);
         try printConstants(registry.constants, writer);
         try printTypes(registry, writer);
@@ -2814,6 +2811,14 @@ const render = struct {
             \\          }
             \\      }
         );
+
+        const decls: []const []const u8 = &.{
+            "isDispatchableHandle",
+            "isExtensibleStruct",
+        };
+        for (decls) |d| {
+            try writer.print("pub const {[name]s} = {[name]s}_;", .{ .name = d });
+        }
         {
             var it = registry.constants.iterator();
             while (it.next()) |c| {

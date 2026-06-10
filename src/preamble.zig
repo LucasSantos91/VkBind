@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub fn FlagsMixin(comptime Flags: type, comptime FlagBits: type) type {
+fn FlagsMixin(comptime Flags: type, comptime FlagBits: type) type {
     return struct {
         const BackingInt = @typeInfo(Flags).@"struct".backing_integer.?;
         pub fn toInt(self: Flags) BackingInt {
@@ -36,7 +36,7 @@ pub fn FlagsMixin(comptime Flags: type, comptime FlagBits: type) type {
         }
     };
 }
-pub fn FlagBitsMixin(comptime Flags: type, comptime FlagBits: type) type {
+fn FlagBitsMixin(comptime Flags: type, comptime FlagBits: type) type {
     return struct {
         const BackingInt = @typeInfo(Flags).@"struct".backing_integer.?;
         pub fn toFlags(self: FlagBits) Flags {
@@ -71,7 +71,7 @@ inline fn nullValue(comptime T: type) T {
 }
 
 inline fn maybeUnused(_: anytype) void {}
-pub fn isDispatchableHandle(comptime T: type) bool {
+fn isDispatchableHandle_(comptime T: type) bool {
     const result = comptime blk: {
         const info = @typeInfo(T);
         if (info != .@"enum") break :blk false;
@@ -105,7 +105,7 @@ inline fn justFreakingCastTheThing(value: anytype, comptime Target: type) Target
     const casted: *const Target = @ptrCast(ptr);
     return casted.*;
 }
-pub fn isExtensibleStruct(comptime T: type) bool {
+fn isExtensibleStruct_(comptime T: type) bool {
     const result = comptime blk: {
         const i = @typeInfo(T);
         if (i != .@"struct") break :blk false;
@@ -119,9 +119,9 @@ pub fn isExtensibleStruct(comptime T: type) bool {
 }
 fn StructChain_(comptime Base: type, comptime extension_types: []const type) type {
     comptime {
-        if (!isExtensibleStruct(Base)) @compileError(std.fmt.comptimePrint("{} is not an extensible struct", .{Base}));
+        if (!isExtensibleStruct_(Base)) @compileError(std.fmt.comptimePrint("{} is not an extensible struct", .{Base}));
         for (extension_types, 0..) |T, index| {
-            if (!isExtensibleStruct(T)) @compileError(std.fmt.comptimePrint("{} is not an extensible struct", .{T}));
+            if (!isExtensibleStruct_(T)) @compileError(std.fmt.comptimePrint("{} is not an extensible struct", .{T}));
             if (std.mem.findScalar(type, T.structextends, Base) == null)
                 @compileError(std.fmt.comptimePrint("{} does not extend {}", .{ T, Base }));
             if (!T.allowduplicate and
