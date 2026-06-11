@@ -189,3 +189,29 @@ fn StructChain_(comptime Base: type, comptime extension_types: []const type) typ
         }
     };
 }
+
+const struct_init = struct {
+    pub fn onlySType(comptime T: type) T {
+        var result: T = undefined;
+        if (comptime std.meta.fieldIndex("sType", T)) |i| if (i == 0) {
+            result.sType = .locked;
+        };
+        return result;
+    }
+    pub fn sTypeAndPNext(comptime T: type) T {
+        var result: T = undefined;
+        if (comptime std.meta.fieldIndex("sType", T)) |i| if (i == 0) {
+            result.sType = .locked;
+            result.pNext = null;
+        };
+        return result;
+    }
+    pub fn zeroes(comptime T: type) T {
+        var result = std.mem.zeroes(T);
+        if (comptime std.meta.fieldIndex("sType", T)) |i| if (i == 0) {
+            result.sType = .locked;
+            result.pNext = null;
+        };
+        return result;
+    }
+};

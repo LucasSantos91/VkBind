@@ -1856,7 +1856,11 @@ const render = struct {
         const StructExtends = struct {
             raw: []const u8,
             pub fn format(self: @This(), w: *Writer) Writer.Error!void {
-                try w.writeAll("pub const structextends: []const type = &.{");
+                try w.writeAll(
+                    \\
+                    \\/// Structs that can contain this struct in a pNext chain.
+                    \\pub const structextends: []const type = &.{
+                );
                 var it: CommaIterator = .{ .text = self.raw };
                 while (it.next()) |next| {
                     const n: TypeName = .parse(next);
@@ -1878,8 +1882,20 @@ const render = struct {
             \\pub const {[struct_name]f}=extern struct{{
             \\{[members]f}
             \\{[structextends]f}
+            \\
+            \\/// Whether a pNext chain can contain more than one instance of this struct.
             \\pub const allowduplicate = {[allowduplicate]};
             \\{[provider_decl]f}
+            \\
+            \\/// Only sType set, everything else undefined.
+            \\pub const only_sType = struct_init.onlySType(@This());
+            \\
+            \\/// sType set and pNext set to null, everything else undefined.
+            \\pub const sType_and_pNext = struct_init.sTypeAndPNext(@This());
+            \\
+            \\/// sType set, pNext set to null, everything else set to zero.
+            \\pub const zeroes = struct_init.zeroes(@This());
+            \\
             \\}};
         , .{
             .comment = comment,
@@ -3114,8 +3130,15 @@ const render = struct {
         p: Registry.Providers,
 
         pub fn format(self: @This(), writer: *Writer) Writer.Error!void {
+            try writer.writeAll(
+                \\
+                \\/// Vulkan version or extensions that provide this type.
+                \\
+            );
             if (self.p.version == null and self.p.extensions.len == 0) {
-                try writer.writeAll("pub const provider: Provider = .{ .version = .{.minor = 0}, .extensions = &.{} };");
+                try writer.writeAll(
+                    \\pub const provider: Provider = .{ .version = .{.minor = 0}, .extensions = &.{} };
+                );
                 return;
             }
             try writer.print(

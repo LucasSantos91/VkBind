@@ -18,6 +18,9 @@ pub fn build(b: *std.Build) void {
     const shaders_module = b.createModule(.{
         .root_source_file = shaders,
     });
+    const vk_bind_module = vk_bind.module("VkBind");
+    const install_vk_bind = b.addInstallFile(vk_bind_module.root_source_file.?, "VkBind.zig");
+    b.getInstallStep().dependOn(&install_vk_bind.step);
 
     const exe = b.addExecutable(.{
         .name = "triangle",
@@ -26,7 +29,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .target = target,
             .imports = &.{
-                .{ .name = "VkBind", .module = vk_bind.module("VkBind") },
+                .{ .name = "VkBind", .module = vk_bind_module },
                 .{ .name = "glfw-zig", .module = glfw_zig.module("glfw-zig") },
                 .{ .name = "shaders", .module = shaders_module },
             },
