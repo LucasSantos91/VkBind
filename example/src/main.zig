@@ -116,12 +116,18 @@ const Context = struct {
 
     const max_swapchain_images = 16;
 
+    fn windowRefreshCallback(window: ?*glfw.GLFWwindow) callconv(.c) void {
+        const self: *@This() = @ptrCast(@alignCast(glfw.glfwGetWindowUserPointer(window.?)));
+        self.draw();
+    }
     fn initWindow(self: *@This(), instance: vk.Instance, instance_proc_address: vk.Command.getInstanceProcAddr.GetPtrType()) void {
         std.debug.assert(glfw.glfwInit() == glfw.GLFW_TRUE);
         glfw.glfwWindowHint(glfw.GLFW_CLIENT_API, glfw.GLFW_NO_API);
         self.window = glfw.glfwCreateWindow(640, 480, "Triangle", null, null).?;
         glfw.glfwInitVulkanLoader(@ptrCast(instance_proc_address));
         std.debug.assert(glfw.glfwCreateWindowSurface(@ptrFromInt(@intFromEnum(instance)), self.window, null, @ptrCast(&self.surface)) == @intFromEnum(vk.Result.SUCCESS));
+        glfw.glfwSetWindowUserPointer(self.window, self);
+        _ = glfw.glfwSetWindowRefreshCallback(self.window, windowRefreshCallback);
     }
     fn isExtensionInList(haystack: []const vk.ExtensionProperties, needle: [*:0]const u8) bool {
         for (haystack) |p| {
@@ -208,8 +214,7 @@ const Context = struct {
         self.device.destroySwapchainKHR(old_swapchain);
     }
 
-    pub fn init() @This() {
-        var self: @This() = undefined;
+    pub fn init(self: *@This()) void {
         self.swapchain = .null_handle;
         self.frame_index = 0;
 
@@ -485,8 +490,8 @@ const Context = struct {
                 .pipeline_layout = pipeline_layout,
             };
         }
-        return self;
     }
+
     fn destroySwapchainImages(self: *const @This()) void {
         for (self.swapchain_images[0..self.swapchain_images_len]) |i| {
             self.device.destroyFramebuffer(i.framebuffer);
@@ -516,7 +521,6 @@ const Context = struct {
     }
     pub fn run(self: *@This()) !void {
         while (glfw.glfwWindowShouldClose(self.window) == 0) {
-            self.draw();
             glfw.glfwWaitEvents();
         }
     }
@@ -626,7 +630,8 @@ const Context = struct {
 };
 
 pub fn main() void {
-    var context: Context = .init();
+    var context: Context = undefined;
+    context.init();
     try context.run();
     if (comptime is_safe) {
         context.deinit();
