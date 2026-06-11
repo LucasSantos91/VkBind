@@ -1887,15 +1887,6 @@ const render = struct {
             \\pub const allowduplicate = {[allowduplicate]};
             \\{[provider_decl]f}
             \\
-            \\/// Only sType set, everything else undefined.
-            \\pub const only_sType = struct_init.onlySType(@This());
-            \\
-            \\/// sType set and pNext set to null, everything else undefined.
-            \\pub const sType_and_pNext = struct_init.sTypeAndPNext(@This());
-            \\
-            \\/// sType set, pNext set to null, everything else set to zero.
-            \\pub const zeroes = struct_init.zeroes(@This());
-            \\
             \\}};
         , .{
             .comment = comment,
