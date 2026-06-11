@@ -136,6 +136,8 @@ fn StructChain_(comptime Base: type, comptime extension_types: []const type) typ
         base: Base = undefined,
         extensions: Extensions = undefined,
 
+        /// Initializes the chain with the values provided.
+        /// pNext and sType are filled in by this function.
         pub fn init(self: *@This(), base: Base, extensions: Extensions) void {
             self.* = .{
                 .base = base,
@@ -144,7 +146,9 @@ fn StructChain_(comptime Base: type, comptime extension_types: []const type) typ
             self.initChain();
         }
 
-        /// Sets up the pNext chain
+        /// Sets up the pNext chain.
+        /// Only sType and pNext are filled in, everything else is left as is.
+        /// Useful for passing thhis struct chain to be filled by the implementation.
         pub fn initChain(self: *@This()) void {
             self.base.sType = .locked;
             if (comptime extension_types.len == 0) {
@@ -165,7 +169,7 @@ fn StructChain_(comptime Base: type, comptime extension_types: []const type) typ
         pub fn get(self: *@This(), comptime Field: type, comptime index: usize) *Field {
             return @constCast(self.getC(Field, index));
         }
-        pub fn getC(self: *@This(), comptime Field: type, comptime index: usize) *const Field {
+        pub fn getC(self: *const @This(), comptime Field: type, comptime index: usize) *const Field {
             if (comptime Field == Base and index == 0) return self.getBaseC();
             const extension_index = comptime blk: {
                 var i = index;
