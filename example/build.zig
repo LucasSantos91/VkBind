@@ -12,8 +12,28 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const compile_shaders = b.addSystemCommand(&.{ "slangc", "-target", "spirv", "-profile", "glsl_330", "-o" });
-    const shaders = compile_shaders.addOutputFileArg("shaders.spirv");
+    const compile_shaders = b.addSystemCommand(&.{
+        "slangc",     "-target", "spirv", "-profile", "glsl_330",
+        "-Wno-50011",
+        switch (optimize) {
+            .Debug, .ReleaseSafe => "-O0",
+            .ReleaseSmall => "-O2",
+            .ReleaseFast => "-O3",
+        },
+
+        switch (optimize) {
+            .Debug, .ReleaseSafe => "-g3",
+            .ReleaseSmall, .ReleaseFast => "-g0",
+        },
+        "-fp-mode",   "fast",    "-o",
+    });
+
+    const shaders = compile_shaders.addOutputFileArg("shaders.spv");
+    switch (optimize) {
+        .Debug, .ReleaseSafe => {},
+        .ReleaseSmall, .ReleaseFast => compile_shaders.addArg("-obfuscate"),
+    }
+
     compile_shaders.addFileArg(b.path("src/shaders.slang"));
     const shaders_module = b.createModule(.{
         .root_source_file = shaders,
