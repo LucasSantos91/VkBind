@@ -5,7 +5,7 @@
     .paths = .{
         "build.zig",
         "build.zig.zon",
-        "src"
+        "src",
     },
     .fingerprint = 0xfb65fc2fa0e660ae,
     .dependencies = .{
@@ -15,8 +15,8 @@
             .hash = "N-V-__8AAAZquQEXic7B2h2BKcC6HF_LAJxiSolGIEvmP2JT",
         },
         .@"glfw-zig" = .{
-            .url = "git+https://github.com/LucasSantos91/glfw-zig.git#e63418d42d202facaa81921ae094b5e05c980c97",
-            .hash = "glfw_zig-0.0.1-o6BmmzsSAACUTqPBZCNrmo4VirmPTekP870oYGW3oXKH",
+            .url = "git+https://github.com/LucasSantos91/glfw-zig.git#92ab768a6104a6b137f0e47a35e0b22390de0099",
+            .hash = "glfw_zig-0.0.1-o6Bmm3MUAAAEKaLHfmGJptqA2Opojs_0C6kU3BCxK3dg",
         },
     },
 }

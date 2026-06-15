@@ -128,6 +128,8 @@ const Context = struct {
         std.debug.assert(glfw.glfwCreateWindowSurface(@ptrFromInt(@intFromEnum(instance)), self.window, null, @ptrCast(&self.surface)) == @intFromEnum(vk.Result.SUCCESS));
         glfw.glfwSetWindowUserPointer(self.window, self);
         _ = glfw.glfwSetWindowRefreshCallback(self.window, windowRefreshCallback);
+        const minimum_window_size: [2]u8 = .{ 50, 50 };
+        glfw.glfwSetWindowSizeLimits(self.window, minimum_window_size[0], minimum_window_size[1], glfw.GLFW_DONT_CARE, glfw.GLFW_DONT_CARE);
     }
     fn isExtensionInList(haystack: []const vk.ExtensionProperties, needle: [*:0]const u8) bool {
         for (haystack) |p| {
