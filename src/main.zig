@@ -2322,7 +2322,12 @@ const render = struct {
             \\
         );
         const decls: []const []const u8 = &.{
+            "FlagsMixin",
+            "FlagBitsMixin",
+            "nullValue",
             "isDispatchableHandle",
+            "LockedEnum",
+            "LockedInt",
             "isExtensibleStruct",
             "StructChain",
         };
@@ -2341,6 +2346,19 @@ const render = struct {
         try writer.writeAll(@embedFile("preamble.zig"));
         // Dummy Extension so that we don't have to modify the printing of structs
         try writer.writeAll("const Extension = enum(u8){};");
+        const decls: []const []const u8 = &.{
+            "FlagsMixin",
+            "FlagBitsMixin",
+            "nullValue",
+            "isDispatchableHandle",
+            "LockedEnum",
+            "LockedInt",
+            "isExtensibleStruct",
+            "StructChain",
+        };
+        for (decls) |d| {
+            try writer.print("pub const {[name]s} = {[name]s}_;", .{ .name = d });
+        }
         try printVulkanApiAndBaseTypes(writer);
         try printConstants(registry.constants, writer);
         try printTypes(registry, writer);
@@ -2820,7 +2838,12 @@ const render = struct {
         );
 
         const decls: []const []const u8 = &.{
+            "FlagsMixin",
+            "FlagBitsMixin",
+            "nullValue",
             "isDispatchableHandle",
+            "LockedEnum",
+            "LockedInt",
             "isExtensibleStruct",
         };
         for (decls) |d| {

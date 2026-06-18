@@ -1,6 +1,6 @@
 const std = @import("std");
 
-fn FlagsMixin(comptime Flags: type, comptime FlagBits: type) type {
+fn FlagsMixin_(comptime Flags: type, comptime FlagBits: type) type {
     return struct {
         const BackingInt = @typeInfo(Flags).@"struct".backing_integer.?;
         pub fn toInt(self: Flags) BackingInt {
@@ -36,7 +36,7 @@ fn FlagsMixin(comptime Flags: type, comptime FlagBits: type) type {
         }
     };
 }
-fn FlagBitsMixin(comptime Flags: type, comptime FlagBits: type) type {
+fn FlagBitsMixin_(comptime Flags: type, comptime FlagBits: type) type {
     return struct {
         const BackingInt = @typeInfo(Flags).@"struct".backing_integer.?;
         pub fn toFlags(self: FlagBits) Flags {
@@ -55,7 +55,7 @@ fn FlagBitsMixin(comptime Flags: type, comptime FlagBits: type) type {
     };
 }
 
-inline fn nullValue(comptime T: type) T {
+inline fn nullValue_(comptime T: type) T {
     return switch (@typeInfo(T)) {
         .pointer, .@"union" => undefined,
         .@"enum" => |i| {
@@ -79,7 +79,7 @@ fn isDispatchableHandle_(comptime T: type) bool {
     };
     return result;
 }
-fn LockedEnum(comptime T: type, comptime value: T) type {
+fn LockedEnum_(comptime T: type, comptime value: T) type {
     return enum(@typeInfo(T).@"enum".tag_type) {
         locked = @intFromEnum(value),
 
@@ -89,7 +89,7 @@ fn LockedEnum(comptime T: type, comptime value: T) type {
     };
 }
 
-fn LockedInt(comptime T: type, comptime value: T) type {
+fn LockedInt_(comptime T: type, comptime value: T) type {
     return enum(T) {
         locked = value,
 
